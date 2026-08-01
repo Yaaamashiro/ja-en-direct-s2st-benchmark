@@ -1,0 +1,13 @@
+beam: 10
+batch_size: 1
+inference:
+  command:
+    - python
+    - -m
+    - direct_s2st.s2ut.fairseq_infer
+    - --data-root
+    - "{data_root}"
+    - --run-root
+    - "{run_root}"
+    - --predictions
+    - "{predictions}"

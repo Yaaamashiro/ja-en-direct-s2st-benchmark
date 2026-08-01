@@ -1,0 +1,13 @@
+asr:
+  model: openai/whisper-large-v3-turbo
+  revision: 60be3615a4d667e1258e8ad29130467587c489aa
+blaser:
+  model: facebook/blaser-2.0-qe
+  revision: 22cebdefbcd7bd50e74edfa43c6ec94f672554b2
+  enabled: false
+  source_encoder: sonar_speech_encoder_jpn
+  target_encoder: sonar_speech_encoder_eng
+speaker_encoder:
+  model: speechbrain/spkrec-ecapa-voxceleb
+  revision: 0f99f2d0ebe89ac095bcc5903c4dd8f72b367286
+  enabled: true

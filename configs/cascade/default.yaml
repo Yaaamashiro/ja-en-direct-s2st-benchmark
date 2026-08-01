@@ -1,0 +1,13 @@
+asr:
+  model: openai/whisper-large-v3-turbo
+  revision: 60be3615a4d667e1258e8ad29130467587c489aa
+mt:
+  model: facebook/nllb-200-distilled-600M
+  revision: f8d333a098d19b4fd9a8b18f94170487ad3f821d
+  source_language: jpn_Jpan
+  target_language: eng_Latn
+tts:
+  model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+  revision: f00cf133b78d3c2c35857faba3b1be9b98c4f971
+  speaker: Ono_Anna
+  language: English

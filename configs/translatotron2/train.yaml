@@ -1,0 +1,23 @@
+architecture: s2spect2_conformer
+seed: 1
+training:
+  max_updates: 100
+  command:
+    - python
+    - -m
+    - fairseq_cli.train
+    - "{data_root}"
+    - --task
+    - speech_to_spectrogram
+    - --arch
+    - s2spect2_conformer
+    - --config-yaml
+    - config.yaml
+    - --multitask-config-yaml
+    - config_multitask.yaml
+    - --save-dir
+    - "{run_root}/checkpoints"
+    - --max-update
+    - "100"
+    - --save-interval-updates
+    - "25"

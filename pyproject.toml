@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ja-en-direct-s2st-benchmark"
+version = "0.1.0"
+description = "Reproducible Japanese-to-English speech-to-speech translation experiments"
+requires-python = ">=3.10"
+dependencies = ["PyYAML==6.0.2"]
+
+[project.scripts]
+s2st-exp = "direct_s2st.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest==8.4.2"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = ["gpu: requires a CUDA-capable GPU and pinned model artifacts"]

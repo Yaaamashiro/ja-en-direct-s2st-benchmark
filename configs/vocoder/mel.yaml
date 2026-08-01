@@ -1,0 +1,19 @@
+backend: hifigan
+train:
+  command:
+    - python
+    - -m
+    - fairseq_cli.hydra_train
+    - task.data="{experiment_data_root}/translatotron2/fairseq"
+    - checkpoint.save_dir="{output_root}/checkpoints"
+infer:
+  command:
+    - python
+    - -m
+    - direct_s2st.vocoders.mel.infer
+    - --data-root
+    - "{experiment_data_root}/translatotron2/fairseq"
+    - --output-root
+    - "{output_root}"
+    - --split
+    - "{split}"

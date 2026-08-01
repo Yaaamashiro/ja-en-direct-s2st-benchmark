@@ -1,0 +1,1 @@
+"""Pinned external vocoder adapters."""

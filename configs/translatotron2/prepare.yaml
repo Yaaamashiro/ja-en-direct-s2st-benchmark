@@ -1,0 +1,17 @@
+architecture: s2spect2_conformer
+sample_rate: 16000
+phonemizer:
+  engine: espeak-ng
+  version: "1.52.0"
+  language: en-us
+  preserve_punctuation: false
+  with_stress: false
+  word_separator: "|"
+  phone_separator: " "
+mel:
+  n_mels: 80
+  n_fft: 512
+  win_length: 400
+  hop_length: 160
+  f_min: 0
+  f_max: 8000

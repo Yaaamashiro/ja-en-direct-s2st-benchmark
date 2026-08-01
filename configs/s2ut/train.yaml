@@ -1,0 +1,22 @@
+architecture: s2ut_transformer
+target: reduced_units
+seed: 1
+training:
+  max_updates: 100
+  command:
+    - python
+    - -m
+    - fairseq_cli.train
+    - "{data_root}"
+    - --task
+    - speech_to_speech
+    - --arch
+    - s2ut_transformer
+    - --config-yaml
+    - config.yaml
+    - --save-dir
+    - "{run_root}/checkpoints"
+    - --max-update
+    - "100"
+    - --save-interval-updates
+    - "25"

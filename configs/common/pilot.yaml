@@ -1,0 +1,4 @@
+seed: 1
+target_hours: 10
+training:
+  save_interval_updates: 1000

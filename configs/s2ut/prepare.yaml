@@ -1,0 +1,12 @@
+feature_extractor: hubert_base
+hubert_layer: 6
+kmeans_clusters: 100
+sample_rate: 16000
+reduce_consecutive_units: true
+hubert:
+  model: facebook/hubert-base-ls960
+  revision: dba3bb02fda4248b6e082697eee756de8fe8aa8a
+kmeans:
+  artifact: fairseq-s2ut-hubert-base-l6-k100
+  path: models/s2ut/hubert_base_l6_k100.npy
+  sha256: REPLACE_WITH_VERIFIED_ARTIFACT_SHA256
