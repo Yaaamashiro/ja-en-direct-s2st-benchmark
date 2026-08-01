@@ -44,3 +44,16 @@ def test_common_profile_is_merged_from_config_tree(tmp_path: Path) -> None:
     path.write_text("seed: 1\n", encoding="utf-8")
     resolved = load_config(path, profile="pilot")
     assert resolved["target_hours"] == 10
+
+
+def test_training_profiles_control_update_counts() -> None:
+    root = Path(__file__).resolve().parents[2]
+    config = root / "configs" / "s2ut" / "train.yaml"
+    smoke = load_config(config, profile="smoke")
+    pilot = load_config(config, profile="pilot")
+    full = load_config(config, profile="full")
+
+    assert smoke["training"]["max_updates"] == 100
+    assert pilot["training"]["max_updates"] == 10_000
+    assert full["training"]["max_updates"] == 100_000
+    assert full["confirm_full"] is True

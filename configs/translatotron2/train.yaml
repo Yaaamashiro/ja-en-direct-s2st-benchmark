@@ -1,7 +1,6 @@
 architecture: s2spect2_conformer
 seed: 1
 training:
-  max_updates: 100
   command:
     - python
     - -m
@@ -18,6 +17,6 @@ training:
     - --save-dir
     - "{run_root}/checkpoints"
     - --max-update
-    - "100"
+    - "{max_updates}"
     - --save-interval-updates
-    - "25"
+    - "{save_interval_updates}"

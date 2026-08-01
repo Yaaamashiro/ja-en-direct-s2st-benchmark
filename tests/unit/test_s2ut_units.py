@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from direct_s2st.io import atomic_write_json
-from direct_s2st.s2ut.extract_units import extract_units, stable_shard
+from direct_s2st.s2ut.extract_units import assign_kmeans_units, extract_units, stable_shard
 from direct_s2st.s2ut.prepare_fairseq import prepare_fairseq
 from direct_s2st.s2ut.reduce_units import reduce_consecutive_units, validate_units
 from direct_s2st.vocoders.runner import run_vocoder_command
@@ -61,6 +61,13 @@ def test_reduce_units_and_range_validation() -> None:
 
 def test_stable_sharding_is_deterministic() -> None:
     assert stable_shard("pair", 7) == stable_shard("pair", 7)
+
+
+def test_kmeans_assignment_matches_fairseq_distance_rule() -> None:
+    np = pytest.importorskip("numpy")
+    features = np.asarray([[0.1, 0.2], [9.0, 8.0]], dtype=np.float32)
+    centers = np.asarray([[0.0, 0.0], [10.0, 10.0]], dtype=np.float32)
+    assert assign_kmeans_units(features, centers).tolist() == [0, 1]
 
 
 def test_extract_and_prepare_fairseq_fixture(tmp_path: Path) -> None:

@@ -10,6 +10,8 @@ import pytest
 
 from direct_s2st.predictions import Prediction, validate_predictions
 from direct_s2st.runs import make_run_id, redact_command, run_external_experiment
+from direct_s2st.training import build_training_command
+from direct_s2st.training import train_system
 
 
 def _lock(path: Path) -> None:
@@ -31,6 +33,59 @@ def test_run_id_generation() -> None:
 def test_command_redaction() -> None:
     assert redact_command(["tool", "--token", "secret"])[2] == "<redacted>"
     assert redact_command(["tool", "--api-key=value"])[1] == "--api-key=<redacted>"
+
+
+def test_training_command_uses_resolved_profile_values(tmp_path: Path) -> None:
+    command = build_training_command(
+        tmp_path / "run",
+        tmp_path / "data",
+        config={
+            "training": {
+                "max_updates": 10_000,
+                "save_interval_updates": 1_000,
+                "command": [
+                    "train",
+                    "--max-update",
+                    "{max_updates}",
+                    "--save-interval-updates",
+                    "{save_interval_updates}",
+                ],
+            }
+        },
+    )
+    assert command[-3:] == ["10000", "--save-interval-updates", "1000"]
+
+
+def test_full_training_requires_docker_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("S2ST_EXECUTION_ENV", raising=False)
+    monkeypatch.delenv("S2ST_DOCKER_IMAGE_DIGEST", raising=False)
+    with pytest.raises(RuntimeError, match="production Docker"):
+        train_system(
+            tmp_path,
+            tmp_path / "run",
+            tmp_path / "data",
+            run_id="full-run",
+            config={"confirm_full": True},
+            profile="full",
+        )
+
+
+def test_full_training_requires_image_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("S2ST_EXECUTION_ENV", "docker")
+    monkeypatch.delenv("S2ST_DOCKER_IMAGE_DIGEST", raising=False)
+    with pytest.raises(RuntimeError, match="S2ST_DOCKER_IMAGE_DIGEST"):
+        train_system(
+            tmp_path,
+            tmp_path / "run",
+            tmp_path / "data",
+            run_id="full-run",
+            config={"confirm_full": True},
+            profile="full",
+        )
 
 
 def test_external_run_records_environment_and_status(tmp_path: Path) -> None:

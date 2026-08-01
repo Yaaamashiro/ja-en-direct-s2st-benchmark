@@ -7,6 +7,10 @@ hubert:
   model: facebook/hubert-base-ls960
   revision: dba3bb02fda4248b6e082697eee756de8fe8aa8a
 kmeans:
-  artifact: fairseq-s2ut-hubert-base-l6-k100
-  path: models/s2ut/hubert_base_l6_k100.npy
-  sha256: REPLACE_WITH_VERIFIED_ARTIFACT_SHA256
+  artifact: fairseq-textless-hubert-base-l6-k100
+  format: fairseq-joblib
+  source_sklearn_version: "0.24.0"
+  loader_sklearn_version: "1.5.2"
+  source_url: https://dl.fbaipublicfiles.com/textless_nlp/gslm/hubert/km100/km.bin
+  path: models/s2ut/hubert_base_l6_k100.bin
+  sha256: f14a3104615485381fc489701d6761c9abbdbb0d43607cf55518a1e2891023fe

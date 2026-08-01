@@ -29,7 +29,7 @@ def load_unit_file(path: Path, *, clusters: int) -> list[int]:
 
 
 class HubertKMeansExtractor:
-    """Lazy Transformers HuBERT extractor with NumPy centroid assignment."""
+    """Lazy Transformers HuBERT extractor with fairseq joblib k-means."""
 
     def __init__(
         self,
@@ -37,7 +37,8 @@ class HubertKMeansExtractor:
         model_id: str,
         revision: str,
         layer: int,
-        centroids_path: Path,
+        kmeans_path: Path,
+        expected_clusters: int,
         device: str = "cuda",
     ) -> None:
         import numpy as np
@@ -51,10 +52,9 @@ class HubertKMeansExtractor:
         self.model = HubertModel.from_pretrained(model_id, revision=revision).to(self.device)
         self.model.eval()
         self.layer = layer
-        centers = np.load(centroids_path)
-        if centers.ndim != 2:
-            raise ValueError("k-means centroids must be a [clusters, features] array")
-        self.centers = centers.astype(np.float32, copy=False)
+        self.centers = load_fairseq_kmeans_centers(
+            kmeans_path, expected_clusters=expected_clusters
+        )
 
     def __call__(self, audio_path: Path) -> list[int]:
         import soundfile as sf
@@ -69,12 +69,39 @@ class HubertKMeansExtractor:
         features = output.hidden_states[self.layer][0].float().cpu().numpy()
         if features.shape[1] != self.centers.shape[1]:
             raise ValueError("HuBERT feature width does not match k-means centroids")
-        distances = (
-            (features**2).sum(axis=1, keepdims=True)
-            - 2 * features @ self.centers.T
-            + (self.centers**2).sum(axis=1)
+        return assign_kmeans_units(features, self.centers).astype(int).tolist()
+
+
+def load_fairseq_kmeans_centers(path: Path, *, expected_clusters: int) -> Any:
+    import joblib
+    import numpy as np
+
+    model = joblib.load(path)
+    if not hasattr(model, "cluster_centers_"):
+        raise ValueError("fairseq k-means artifact must expose cluster_centers_")
+    centers = np.asarray(model.cluster_centers_, dtype=np.float32)
+    if centers.ndim != 2:
+        raise ValueError("k-means centers must be a [clusters, features] array")
+    if centers.shape[0] != expected_clusters:
+        raise ValueError(
+            f"k-means cluster count mismatch: expected {expected_clusters}, got {centers.shape[0]}"
         )
-        return distances.argmin(axis=1).astype(int).tolist()
+    return centers
+
+
+def assign_kmeans_units(features: Any, centers: Any) -> Any:
+    """Match fairseq ApplyKmeans' squared-Euclidean nearest-center rule."""
+
+    if features.ndim != 2 or centers.ndim != 2:
+        raise ValueError("features and centers must both be rank-2 arrays")
+    if features.shape[1] != centers.shape[1]:
+        raise ValueError("HuBERT feature width does not match k-means centers")
+    distances = (
+        (features**2).sum(axis=1, keepdims=True)
+        - 2 * features @ centers.T
+        + (centers**2).sum(axis=1)
+    )
+    return distances.argmin(axis=1)
 
 
 def extract_units(
@@ -88,6 +115,7 @@ def extract_units(
     hubert_revision: str,
     hubert_layer: int,
     kmeans_sha256: str,
+    kmeans_artifact: str | None = None,
     shard_index: int = 0,
     num_shards: int = 1,
     limit: int | None = None,
@@ -130,6 +158,7 @@ def extract_units(
                     "hubert_layer": hubert_layer,
                     "kmeans_clusters": clusters,
                     "kmeans_sha256": kmeans_sha256,
+                    "kmeans_artifact": kmeans_artifact,
                 }
             )
             processed += 1
@@ -142,6 +171,7 @@ def extract_units(
         "hubert_layer": hubert_layer,
         "kmeans_clusters": clusters,
         "kmeans_sha256": kmeans_sha256,
+        "kmeans_artifact": kmeans_artifact,
         "num_shards": num_shards,
     }
     atomic_write_json(
@@ -153,15 +183,18 @@ def extract_units(
 def extractor_from_config(config: dict[str, Any], cache_root: Path) -> HubertKMeansExtractor:
     hubert = config["hubert"]
     kmeans = config["kmeans"]
-    centroids = cache_root / kmeans["path"]
+    if kmeans.get("format") != "fairseq-joblib":
+        raise ValueError("kmeans.format must be fairseq-joblib")
+    artifact = cache_root / kmeans["path"]
     expected = kmeans["sha256"]
-    actual = sha256_file(centroids)
+    actual = sha256_file(artifact)
     if actual.lower() != expected.lower():
-        raise ValueError(f"k-means checksum mismatch: {centroids}")
+        raise ValueError(f"k-means checksum mismatch: {artifact}")
     return HubertKMeansExtractor(
         model_id=hubert["model"],
         revision=hubert["revision"],
         layer=int(config["hubert_layer"]),
-        centroids_path=centroids,
+        kmeans_path=artifact,
+        expected_clusters=int(config["kmeans_clusters"]),
         device=str(config.get("device", "cuda")),
     )

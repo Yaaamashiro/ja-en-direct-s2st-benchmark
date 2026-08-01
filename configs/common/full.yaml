@@ -1,5 +1,6 @@
 seed: 1
 target_hours: 300
-requires_explicit_confirmation: true
+confirm_full: true
 training:
+  max_updates: 100000
   save_interval_updates: 5000

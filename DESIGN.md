@@ -26,9 +26,13 @@ Python、PyTorch、CUDA、Docker、G2P、評価器を immutable revision/version
 固定する。GPU OOM や device-side assert は process-fatal とし、sample 固有エラーは
 failed record として保持する。
 
+本番の前処理、学習、推論、評価はDocker Compose経由だけで実行する。`common`、
+`fairseq`、`cascade`、`evaluation`を分離し、GPU処理には明示的なdevice reservationを
+設定する。`full`学習はDocker実行マーカーと実際のimage digestがない場合は拒否する。
+
 ## Phases
 
-1. Common manifest、HuBERT layer 6 / k=100 unit、reduced unit、S2UT fairseq data、unit vocoder。
+1. Common manifest、HuBERT layer 6 / fairseq joblib k=100 unit、reduced unit、S2UT fairseq data、unit vocoder。
 2. espeak-ng 英語音素、80-bin Mel、`s2spect2_conformer` data、Mel vocoder、Cascade。
 3. S2UT/Translatotron 2 train/infer、共通 test 出力、共通評価と比較 report。
 

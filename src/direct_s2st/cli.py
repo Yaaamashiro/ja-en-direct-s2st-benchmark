@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     _leaf(corpus, "validate", "Validate normalized manifests")
 
     for system, actions in {
-        "s2ut": ("extract-units", "prepare", "train", "infer"),
+        "s2ut": ("fetch-artifacts", "extract-units", "prepare", "train", "infer"),
         "translatotron2": ("phonemize", "prepare", "train", "infer"),
     }.items():
         commands = systems.add_parser(system).add_subparsers(dest="action", required=True)
@@ -82,11 +83,16 @@ def command_key(args: argparse.Namespace) -> str:
 
 
 def _default_config(args: argparse.Namespace) -> Path | None:
-    root = Path(__file__).resolve().parents[2] / "configs"
+    configured_root = os.environ.get("S2ST_CONFIG_ROOT")
+    root = (
+        Path(configured_root).expanduser()
+        if configured_root
+        else Path(__file__).resolve().parents[2] / "configs"
+    )
     if args.system == "corpus":
         return None
     if args.system in ("s2ut", "translatotron2"):
-        name = "prepare" if args.action in ("extract-units", "phonemize", "prepare") else args.action
+        name = "prepare" if args.action in ("fetch-artifacts", "extract-units", "phonemize", "prepare") else args.action
         return root / args.system / f"{name}.yaml"
     if args.system == "cascade":
         return root / "cascade" / "default.yaml"
@@ -120,12 +126,33 @@ def _run_corpus(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _run_s2ut(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
+    from .artifacts import download_artifact
     from .s2ut.extract_units import extract_units, extractor_from_config
     from .s2ut.prepare_fairseq import prepare_fairseq
 
     roots = RootPaths.from_environment()
     common = roots.experiment_data / "common"
     units = roots.experiment_data / "s2ut" / "units"
+    if args.action == "fetch-artifacts":
+        values = config["kmeans"]
+        destination = roots.cache / str(values["path"])
+        plan = {
+            "artifact": str(values["artifact"]),
+            "url": str(values["source_url"]),
+            "path": str(destination),
+            "sha256": str(values["sha256"]),
+        }
+        if args.dry_run:
+            return plan
+        return {
+            **plan,
+            **download_artifact(
+                str(values["source_url"]),
+                destination,
+                sha256=str(values["sha256"]),
+                overwrite=args.overwrite,
+            ),
+        }
     if args.action == "extract-units":
         plan = {
             "common_root": str(common),
@@ -147,6 +174,7 @@ def _run_s2ut(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
             hubert_revision=str(config["hubert"]["revision"]),
             hubert_layer=int(config["hubert_layer"]),
             kmeans_sha256=str(config["kmeans"]["sha256"]),
+            kmeans_artifact=str(config["kmeans"]["artifact"]),
             shard_index=args.shard_index,
             num_shards=args.num_shards,
             limit=args.limit,

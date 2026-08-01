@@ -1,20 +1,76 @@
 name: ja-en-direct-s2st-benchmark
 
+x-benchmark-environment: &benchmark-environment
+  CORPUS_ROOT: /corpus
+  EXPERIMENT_DATA_ROOT: /experiment-data
+  RUNS_ROOT: /runs
+  CACHE_ROOT: /cache
+  S2ST_CONFIG_ROOT: /workspace/configs
+  S2ST_EXECUTION_ENV: docker
+  S2ST_DOCKER_IMAGE_DIGEST: ${S2ST_DOCKER_IMAGE_DIGEST:-}
+  FAIRSEQ_HUBERT_CHECKPOINT: ${FAIRSEQ_HUBERT_CHECKPOINT:-}
+  S2ST_KMEANS_ARTIFACT: ${S2ST_KMEANS_ARTIFACT:-}
+  S2ST_PARITY_AUDIO: ${S2ST_PARITY_AUDIO:-}
+
+x-benchmark-volumes: &benchmark-volumes
+  - ${CORPUS_ROOT:-./data/corpus}:/corpus:ro
+  - ${EXPERIMENT_DATA_ROOT:-./data/benchmark}:/experiment-data
+  - ${RUNS_ROOT:-./runs}:/runs
+  - ${CACHE_ROOT:-./.cache/benchmark}:/cache
+  - ./configs:/workspace/configs:ro
+  - ./tests:/workspace/tests:ro
+
+x-gpu-reservation: &gpu-reservation
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
+
 services:
-  benchmark:
-    image: ja-en-direct-s2st-benchmark:locked
+  common:
+    image: ja-en-direct-s2st-benchmark-common:locked
     build:
       context: .
       dockerfile: docker/common.Dockerfile
-    environment:
-      CORPUS_ROOT: /corpus
-      EXPERIMENT_DATA_ROOT: /experiment-data
-      RUNS_ROOT: /runs
-      CACHE_ROOT: /cache
-    volumes:
-      - ${CORPUS_ROOT:-./data/corpus}:/corpus:ro
-      - ${EXPERIMENT_DATA_ROOT:-./data/benchmark}:/experiment-data
-      - ${RUNS_ROOT:-./runs}:/runs
-      - ${CACHE_ROOT:-./.cache/benchmark}:/cache
-      - ./configs:/workspace/configs:ro
+    environment: *benchmark-environment
+    volumes: *benchmark-volumes
     command: ["corpus", "validate", "--profile", "smoke", "--dry-run"]
+
+  fairseq:
+    image: ja-en-direct-s2st-benchmark-fairseq:locked
+    build:
+      context: .
+      dockerfile: docker/fairseq.Dockerfile
+    environment: *benchmark-environment
+    volumes: *benchmark-volumes
+    shm_size: 8gb
+    deploy: *gpu-reservation
+    command: ["s2ut", "extract-units", "--profile", "smoke", "--dry-run"]
+
+  cascade:
+    image: ja-en-direct-s2st-benchmark-cascade:locked
+    build:
+      context: .
+      dockerfile: docker/cascade.Dockerfile
+      args:
+        FAIRSEQ_IMAGE: ja-en-direct-s2st-benchmark-fairseq:locked
+    environment: *benchmark-environment
+    volumes: *benchmark-volumes
+    shm_size: 8gb
+    deploy: *gpu-reservation
+    command: ["cascade", "run", "--profile", "smoke", "--split", "test", "--dry-run"]
+
+  evaluation:
+    image: ja-en-direct-s2st-benchmark-evaluation:locked
+    build:
+      context: .
+      dockerfile: docker/evaluation.Dockerfile
+      args:
+        FAIRSEQ_IMAGE: ja-en-direct-s2st-benchmark-fairseq:locked
+    environment: *benchmark-environment
+    volumes: *benchmark-volumes
+    shm_size: 8gb
+    deploy: *gpu-reservation
+    command: ["evaluate", "run", "--profile", "smoke", "--dry-run"]
