@@ -32,7 +32,7 @@ def _leaf(parent: argparse._SubParsersAction, name: str, help_text: str) -> argp
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="s2st-exp", description="Japanese-to-English S2ST experiments")
+    parser = argparse.ArgumentParser(prog="s2st-benchmark", description="Japanese-to-English S2ST benchmark")
     systems = parser.add_subparsers(dest="system", required=True)
 
     corpus = systems.add_parser("corpus").add_subparsers(dest="action", required=True)

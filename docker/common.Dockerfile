@@ -6,4 +6,4 @@ WORKDIR /workspace
 COPY pyproject.toml /workspace/pyproject.toml
 COPY src /workspace/src
 RUN python -m pip install --no-cache-dir .
-ENTRYPOINT ["s2st-exp"]
+ENTRYPOINT ["s2st-benchmark"]

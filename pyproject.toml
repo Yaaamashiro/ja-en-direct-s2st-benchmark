@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ja-en-direct-s2st-benchmark"
 version = "0.1.0"
-description = "Reproducible Japanese-to-English speech-to-speech translation experiments"
+description = "Reproducible Japanese-to-English speech-to-speech translation benchmark"
 requires-python = ">=3.10"
 dependencies = ["PyYAML==6.0.2"]
 
 [project.scripts]
-s2st-exp = "direct_s2st.cli:main"
+s2st-benchmark = "direct_s2st.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest==8.4.2"]

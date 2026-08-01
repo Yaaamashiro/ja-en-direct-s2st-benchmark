@@ -1,4 +1,4 @@
-# ja-en-direct-s2st-experiments design
+# ja-en-direct-s2st-benchmark design
 
 ## Scope
 

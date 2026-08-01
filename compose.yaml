@@ -1,8 +1,8 @@
 name: ja-en-direct-s2st-benchmark
 
 services:
-  experiments:
-    image: direct-s2st-experiments:locked
+  benchmark:
+    image: ja-en-direct-s2st-benchmark:locked
     build:
       context: .
       dockerfile: docker/common.Dockerfile
@@ -13,8 +13,8 @@ services:
       CACHE_ROOT: /cache
     volumes:
       - ${CORPUS_ROOT:-./data/corpus}:/corpus:ro
-      - ${EXPERIMENT_DATA_ROOT:-./data/experiments}:/experiment-data
+      - ${EXPERIMENT_DATA_ROOT:-./data/benchmark}:/experiment-data
       - ${RUNS_ROOT:-./runs}:/runs
-      - ${CACHE_ROOT:-./.cache/experiments}:/cache
+      - ${CACHE_ROOT:-./.cache/benchmark}:/cache
       - ./configs:/workspace/configs:ro
     command: ["corpus", "validate", "--profile", "smoke", "--dry-run"]

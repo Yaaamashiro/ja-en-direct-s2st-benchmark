@@ -26,7 +26,7 @@ def test_roots_come_from_environment() -> None:
     roots = RootPaths.from_environment(
         {
             "CORPUS_ROOT": "/corpus",
-            "EXPERIMENT_DATA_ROOT": "/experiments",
+            "EXPERIMENT_DATA_ROOT": "/benchmark",
             "RUNS_ROOT": "/runs",
             "CACHE_ROOT": "/cache",
         }

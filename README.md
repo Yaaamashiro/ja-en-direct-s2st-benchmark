@@ -1,4 +1,4 @@
-# Japanese → English Direct S2ST Experiments
+# Japanese → English Direct S2ST Benchmark
 
 同一コーパス・同一 test split・同一評価条件で、次の3系統を比較する実験基盤です。
 
@@ -25,31 +25,31 @@
 
 ```powershell
 $env:CORPUS_ROOT = 'D:\data\ja-en-direct-s2st-corpus'
-$env:EXPERIMENT_DATA_ROOT = 'D:\data\ja-en-direct-s2st-experiments'
-$env:RUNS_ROOT = 'D:\runs\ja-en-direct-s2st-experiments'
-$env:CACHE_ROOT = 'D:\cache\ja-en-direct-s2st-experiments'
+$env:EXPERIMENT_DATA_ROOT = 'D:\data\ja-en-direct-s2st-benchmark'
+$env:RUNS_ROOT = 'D:\runs\ja-en-direct-s2st-benchmark'
+$env:CACHE_ROOT = 'D:\cache\ja-en-direct-s2st-benchmark'
 ```
 
 インストールと CLI 確認:
 
 ```powershell
 python -m pip install -e ".[dev]"
-s2st-exp --help
+s2st-benchmark --help
 ```
 
 ## 最短の処理順
 
 ```powershell
-s2st-exp corpus import --profile smoke
-s2st-exp corpus validate --profile smoke
+s2st-benchmark corpus import --profile smoke
+s2st-benchmark corpus validate --profile smoke
 
-s2st-exp s2ut extract-units --config configs/s2ut/prepare.yaml --profile smoke --resume
-s2st-exp s2ut prepare --config configs/s2ut/prepare.yaml --profile smoke
+s2st-benchmark s2ut extract-units --config configs/s2ut/prepare.yaml --profile smoke --resume
+s2st-benchmark s2ut prepare --config configs/s2ut/prepare.yaml --profile smoke
 
-s2st-exp translatotron2 phonemize --config configs/translatotron2/prepare.yaml --profile smoke --resume
-s2st-exp translatotron2 prepare --config configs/translatotron2/prepare.yaml --profile smoke
+s2st-benchmark translatotron2 phonemize --config configs/translatotron2/prepare.yaml --profile smoke --resume
+s2st-benchmark translatotron2 prepare --config configs/translatotron2/prepare.yaml --profile smoke
 
-s2st-exp cascade run --config configs/cascade/default.yaml --profile smoke --split test --resume
+s2st-benchmark cascade run --config configs/cascade/default.yaml --profile smoke --split test --resume
 ```
 
 モデルやGPUをロードせず、解決される処理だけ確認する場合は `--dry-run` を付けます。
@@ -67,10 +67,10 @@ per-sample JSONL に残ります。
 
 ```powershell
 # run_id を追加した評価設定を指定
-s2st-exp evaluate run --config my-evaluation.yaml --resume
+s2st-benchmark evaluate run --config my-evaluation.yaml --resume
 
 # run_ids を列挙した集計設定を指定
-s2st-exp evaluate aggregate --config my-comparison.yaml
+s2st-benchmark evaluate aggregate --config my-comparison.yaml
 ```
 
 BLASER の実行環境がない場合でも ASR-BLEU、音声品質、RTF は評価できます。

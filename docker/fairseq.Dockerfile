@@ -19,4 +19,4 @@ COPY third_party/fairseq /opt/fairseq
 COPY patches/fairseq /opt/fairseq-patches
 RUN find /opt/fairseq-patches -type f -name '*.patch' -exec git -C /opt/fairseq apply {} \; \
     && python3 -m pip install --no-cache-dir --editable /opt/fairseq
-ENTRYPOINT ["s2st-exp"]
+ENTRYPOINT ["s2st-benchmark"]

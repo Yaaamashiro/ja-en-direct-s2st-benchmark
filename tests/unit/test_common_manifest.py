@@ -56,7 +56,7 @@ def test_import_preserves_splits_and_creates_lock(tmp_path: Path) -> None:
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
         encoding="utf-8",
     )
-    output = tmp_path / "experiments" / "common"
+    output = tmp_path / "benchmark" / "common"
     lock = import_corpus(manifest, corpus_root=corpus, output_root=output)
     assert lock["total_pairs"] == 3
     assert lock["source_manifest_sha256"]
