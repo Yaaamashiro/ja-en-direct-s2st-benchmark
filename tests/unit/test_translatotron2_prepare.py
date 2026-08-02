@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from direct_s2st.io import atomic_write_json
-from direct_s2st.translatotron2.phonemize import normalize_phonemes, phonemize_manifests
+from direct_s2st.translatotron2.phonemize import (
+    normalize_phonemes,
+    phonemize_manifests,
+    tokenize_espeak_ipa,
+)
 from direct_s2st.translatotron2.prepare_fairseq import prepare_fairseq
 
 
@@ -45,6 +49,8 @@ def _common(root: Path) -> None:
 
 def test_phoneme_normalization_is_stable() -> None:
     assert normalize_phonemes("  ˈðə   |  bʊk ") == "ðə | bʊk"
+    assert tokenize_espeak_ipa("d\u200dʒˈʌd\u200dʒ") == ["d\u200dʒ", "ʌ", "d\u200dʒ"]
+    assert tokenize_espeak_ipa("bˈʌʔn̩") == ["b", "ʌ", "ʔ", "n̩"]
 
 
 def test_phonemize_and_prepare_fixture(tmp_path: Path) -> None:
@@ -58,6 +64,7 @@ def test_phonemize_and_prepare_fixture(tmp_path: Path) -> None:
         phonemizer=lambda _: "DH AH | B UH K",
         engine="fixture",
         version="1",
+        fixed_vocabulary=("DH", "AH", "|", "B", "UH", "K", "X"),
     )
     assert result["processed"] == 3
     lock = prepare_fairseq(
@@ -67,7 +74,7 @@ def test_phonemize_and_prepare_fixture(tmp_path: Path) -> None:
         mel_config={"n_mels": 80, "hop_length": 160},
         feature_extractor=_mel_fixture,
     )
-    assert lock["phoneme_vocabulary_source"] == "train"
+    assert lock["phoneme_vocabulary_source"] == "fixed_espeak_inventory"
     assert (fairseq / "logmelspec80.zip").is_file()
     manifest = (fairseq / "train.tsv").read_text(encoding="utf-8").splitlines()
     assert manifest[0] == "id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames"
@@ -82,6 +89,8 @@ def test_phonemize_and_prepare_fixture(tmp_path: Path) -> None:
     multitask = (fairseq / "config_multitask.yaml").read_text()
     assert (fairseq / "target_phoneme" / "dict.txt").resolve().as_posix() in multitask
     assert (fairseq / "target_phoneme").resolve().as_posix() in multitask
+    dictionary = (fairseq / "target_phoneme" / "dict.txt").read_text()
+    assert "X 1\n" in dictionary
 
 
 def test_unknown_dev_phoneme_is_rejected(tmp_path: Path) -> None:
@@ -92,6 +101,7 @@ def test_unknown_dev_phoneme_is_rejected(tmp_path: Path) -> None:
     (phonemes / "train.tsv").write_text("pair-train\tA B\n")
     (phonemes / "dev.tsv").write_text("pair-dev\tA X\n")
     (phonemes / "test.tsv").write_text("pair-test\tA B\n")
+    (phonemes / "inventory.txt").write_text("A\nB\n")
     with pytest.raises(ValueError, match="unknown phonemes"):
         prepare_fairseq(
             common,

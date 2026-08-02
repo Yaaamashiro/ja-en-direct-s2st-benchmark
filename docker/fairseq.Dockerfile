@@ -46,6 +46,8 @@ RUN python3 -m pip install --no-cache-dir /workspace
 RUN s2st-benchmark --help >/dev/null
 RUN python3 -m pip install --no-cache-dir -r /workspace/requirements/preparation.txt
 RUN python3 -m pip install --no-cache-dir Cython==3.2.9
+RUN apt-get update && apt-get install -y --no-install-recommends patch \
+    && rm -rf /var/lib/apt/lists/*
 COPY third_party/fairseq /opt/fairseq
 COPY patches/fairseq /opt/fairseq-patches
 RUN sed -i 's/\r$//' /opt/fairseq/fairseq/data/audio/audio_utils.py \

@@ -35,6 +35,18 @@ def _read_phonemes(root: Path, split: str) -> dict[str, str]:
     return values
 
 
+def _read_inventory(root: Path) -> tuple[str, ...]:
+    path = root / "inventory.txt"
+    if not path.is_file():
+        raise FileNotFoundError(f"phoneme inventory not found: {path}")
+    tokens = tuple(line.strip() for line in path.read_text(encoding="utf-8").splitlines())
+    if not tokens or any(not token or any(char.isspace() for char in token) for token in tokens):
+        raise ValueError(f"invalid phoneme inventory: {path}")
+    if len(tokens) != len(set(tokens)):
+        raise ValueError(f"duplicate token in phoneme inventory: {path}")
+    return tokens
+
+
 def _ten_ms_frames(path: Path) -> int:
     with wave.open(str(path), "rb") as handle:
         if handle.getframerate() != 16000:
@@ -159,13 +171,14 @@ def prepare_fairseq(
         split: _read_phonemes(phoneme_root, split)
         for split in ("train", "dev", "test")
     }
+    inventory = _read_inventory(phoneme_root)
     train_vocabulary = Counter(
         token for sequence in phonemes["train"].values() for token in sequence.split()
     )
     if not train_vocabulary:
         raise ValueError("train phoneme vocabulary is empty")
-    known = set(train_vocabulary)
-    for split in ("dev", "test"):
+    known = set(inventory)
+    for split in ("train", "dev", "test"):
         unknown = sorted(
             {token for sequence in phonemes[split].values() for token in sequence.split()} - known
         )
@@ -240,7 +253,7 @@ def prepare_fairseq(
         split_counts[split] = len(rows)
 
     dictionary = "".join(
-        f"{token} {count}\n" for token, count in sorted(train_vocabulary.items())
+        f"{token} {max(train_vocabulary.get(token, 0), 1)}\n" for token in inventory
     )
     atomic_write_text(
         target_root / "dict.txt", dictionary, resume=resume, overwrite=overwrite
@@ -305,7 +318,8 @@ def prepare_fairseq(
         "common_dataset_lock_sha256": sha256_file(common_root / "dataset-lock.json"),
         "mel": settings,
         "mel_zip_sha256": sha256_file(zip_path),
-        "phoneme_vocabulary_source": "train",
+        "phoneme_vocabulary_source": "fixed_espeak_inventory",
+        "phoneme_inventory_sha256": sha256_file(phoneme_root / "inventory.txt"),
         "preparation_reference": "fairseq prep_s2spect_data.py",
         "splits": split_counts,
     }

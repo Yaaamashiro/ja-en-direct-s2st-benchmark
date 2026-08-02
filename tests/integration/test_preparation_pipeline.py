@@ -84,6 +84,7 @@ def test_corpus_to_both_direct_model_manifests(tmp_path: Path) -> None:
         phonemizer=lambda _: "EH NG | G L IH SH",
         engine="fixture",
         version="1",
+        fixed_vocabulary=("EH", "NG", "|", "G", "L", "IH", "SH"),
     )
     prepare_t2(
         common,

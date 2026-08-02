@@ -33,7 +33,7 @@ failed record として保持する。
 ## Phases
 
 1. Common manifest、HuBERT layer 6 / fairseq joblib k=100 unit、reduced unit、S2UT fairseq data、unit vocoder。
-2. espeak-ng 英語音素、80-bin Mel、`s2spect2_conformer` data、Mel vocoder、Cascade。
+2. 固定版 espeak-ng の英語音素と分割非依存の固定音素辞書、80-bin Mel、`s2spect2_conformer` data、Mel vocoder、Cascade。
 3. S2UT/Translatotron 2 train/infer、共通 test 出力、共通評価と比較 report。
 
 規模は smoke（5〜100文）、pilot（約5〜10時間）、full（約300時間）の順とする。
