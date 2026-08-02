@@ -89,7 +89,9 @@ def test_extract_and_prepare_fairseq_fixture(tmp_path: Path) -> None:
     assert result["processed"] == 3
     lock = prepare_fairseq(common, units, fairseq)
     assert lock["splits"] == {"train": 1, "dev": 1, "test": 1}
-    assert "pair-train" in (fairseq / "train.tsv").read_text(encoding="utf-8")
+    manifest = (fairseq / "train.tsv").read_text(encoding="utf-8").splitlines()
+    assert manifest[0] == "id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames"
+    assert manifest[1].split("\t")[2:] == ["10", "1 2 3", "3"]
     assert (units / "train" / "reduced" / "pair-train.units").read_text() == "1 2 3\n"
 
 

@@ -30,20 +30,28 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ESPEAK_DATA_PATH=/opt/espeak-ng/share/espeak-ng-data
 COPY --from=espeak-builder /opt/espeak-ng /opt/espeak-ng
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git python3 python3-pip libsndfile1 sox \
+    build-essential ca-certificates git libsndfile1 python3 python3-dev python3-pip sox \
     && rm -rf /var/lib/apt/lists/*
 RUN espeak-ng --version 2>&1 | grep -F "1.52.0"
 RUN python3 -m pip install --no-cache-dir \
     torch==2.7.1 torchaudio==2.7.1 \
     --index-url https://download.pytorch.org/whl/cu126
+RUN python3 -m pip install --no-cache-dir \
+    pip==24.0 setuptools==80.9.0 wheel==0.45.1
 WORKDIR /workspace
 COPY pyproject.toml /workspace/pyproject.toml
 COPY src /workspace/src
 COPY requirements/preparation.txt /workspace/requirements/preparation.txt
 RUN python3 -m pip install --no-cache-dir /workspace
+RUN s2st-benchmark --help >/dev/null
 RUN python3 -m pip install --no-cache-dir -r /workspace/requirements/preparation.txt
+RUN python3 -m pip install --no-cache-dir Cython==3.2.9
 COPY third_party/fairseq /opt/fairseq
 COPY patches/fairseq /opt/fairseq-patches
-RUN find /opt/fairseq-patches -type f -name '*.patch' -exec git -C /opt/fairseq apply {} \; \
-    && python3 -m pip install --no-cache-dir --editable /opt/fairseq
+RUN sed -i 's/\r$//' /opt/fairseq/fairseq/data/audio/audio_utils.py \
+    && patch --directory=/opt/fairseq --strip=1 --forward \
+        --input=/opt/fairseq-patches/0001-librosa-mel-keywords.patch \
+    && python3 -m pip install --no-build-isolation --no-cache-dir --editable /opt/fairseq
+ENV PYTHONPATH=/opt/fairseq
+RUN python3 -c "import direct_s2st; import examples.speech_synthesis.data_utils; from fairseq.data.audio.audio_utils import get_mel_filters; assert get_mel_filters(16000, 512, 80, 0, 8000).shape == (80, 257)"
 ENTRYPOINT ["s2st-benchmark"]

@@ -13,7 +13,7 @@ dependencies = ["PyYAML==6.0.2"]
 s2st-benchmark = "direct_s2st.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest==8.4.2"]
+dev = ["numpy==1.26.4", "pytest==8.4.2"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

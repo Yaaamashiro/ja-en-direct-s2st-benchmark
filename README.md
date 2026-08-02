@@ -68,8 +68,17 @@ docker compose run --rm fairseq s2ut prepare --profile smoke
 docker compose run --rm fairseq translatotron2 phonemize --profile smoke --limit 5 --resume
 docker compose run --rm fairseq translatotron2 prepare --profile smoke
 
+docker compose run --rm fairseq s2ut train --profile smoke
+docker compose run --rm fairseq s2ut train --profile smoke --resume
+docker compose run --rm fairseq translatotron2 train --profile smoke
+docker compose run --rm fairseq translatotron2 train --profile smoke --resume
+
 docker compose run --rm cascade cascade run --profile smoke --split test --limit 5 --resume
 ```
+
+上の学習4コマンドで、固定fairseqのdataset load、model build、forward、backward、
+optimizer step、checkpoint保存・再開を両Directモデルについて確認します。GPU実機で
+すべて成功するまで`pilot`や`full`へ進めません。
 
 モデルやGPUをロードせず、解決される処理だけ確認する場合は `--dry-run` を付けます。
 S2UT k-meansは `${CACHE_ROOT}/models/s2ut/hubert_base_l6_k100.bin` に保存され、

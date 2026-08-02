@@ -20,6 +20,11 @@ def _wav(path: Path) -> None:
         handle.writeframes(b"\0\0" * 1600)
 
 
+def _mel_fixture(_: Path, output: Path, settings: dict[str, object]) -> None:
+    np = pytest.importorskip("numpy")
+    np.save(output, np.zeros((11, int(settings["n_mels"])), dtype=np.float32))
+
+
 def _common(root: Path) -> None:
     root.mkdir(parents=True)
     for split in ("train", "dev", "test"):
@@ -60,9 +65,23 @@ def test_phonemize_and_prepare_fixture(tmp_path: Path) -> None:
         phonemes,
         fairseq,
         mel_config={"n_mels": 80, "hop_length": 160},
+        feature_extractor=_mel_fixture,
     )
     assert lock["phoneme_vocabulary_source"] == "train"
-    assert "target_phoneme" in (fairseq / "config_multitask.yaml").read_text()
+    assert (fairseq / "logmelspec80.zip").is_file()
+    manifest = (fairseq / "train.tsv").read_text(encoding="utf-8").splitlines()
+    assert manifest[0] == "id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames"
+    assert manifest[1].split("\t")[2:] == [
+        "10",
+        manifest[1].split("\t")[3],
+        "11",
+    ]
+    assert manifest[1].split("\t")[3].startswith("logmelspec80.zip:")
+    target_manifest = (fairseq / "target_phoneme" / "train.tsv").read_text()
+    assert target_manifest.startswith("id\ttgt_text\n")
+    multitask = (fairseq / "config_multitask.yaml").read_text()
+    assert (fairseq / "target_phoneme" / "dict.txt").resolve().as_posix() in multitask
+    assert (fairseq / "target_phoneme").resolve().as_posix() in multitask
 
 
 def test_unknown_dev_phoneme_is_rejected(tmp_path: Path) -> None:

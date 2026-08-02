@@ -57,3 +57,31 @@ def test_training_profiles_control_update_counts() -> None:
     assert pilot["training"]["max_updates"] == 10_000
     assert full["training"]["max_updates"] == 100_000
     assert full["confirm_full"] is True
+
+
+def test_fairseq_training_commands_use_the_pinned_s2s_interfaces() -> None:
+    root = Path(__file__).resolve().parents[2]
+    s2ut = load_config(root / "configs" / "s2ut" / "train.yaml")
+    translatotron2 = load_config(
+        root / "configs" / "translatotron2" / "train.yaml"
+    )
+
+    s2ut_command = s2ut["training"]["command"]
+    assert s2ut_command[s2ut_command.index("--task") + 1] == "speech_to_speech"
+    assert "--target-is-code" in s2ut_command
+    assert s2ut_command[s2ut_command.index("--target-code-size") + 1] == "100"
+    assert s2ut_command[s2ut_command.index("--criterion") + 1] == "speech_to_unit"
+    assert "--optimizer" in s2ut_command
+    assert "--lr-scheduler" in s2ut_command
+    assert "--max-tokens" in s2ut_command
+
+    t2_command = translatotron2["training"]["command"]
+    assert t2_command[t2_command.index("--task") + 1] == "speech_to_speech"
+    assert (
+        t2_command[t2_command.index("--criterion") + 1]
+        == "speech_to_spectrogram"
+    )
+    assert t2_command[t2_command.index("--n-frames-per-step") + 1] == "5"
+    assert "--optimizer" in t2_command
+    assert "--lr-scheduler" in t2_command
+    assert "--max-tokens" in t2_command

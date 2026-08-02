@@ -12,9 +12,11 @@ from ..io import atomic_write_json, atomic_write_text, read_jsonl
 from .extract_units import load_unit_file
 
 
-def _frames(path: Path) -> int:
+def _ten_ms_frames(path: Path) -> int:
     with wave.open(str(path), "rb") as handle:
-        return handle.getnframes()
+        if handle.getframerate() != 16000:
+            raise ValueError(f"expected 16 kHz source audio: {path}")
+        return handle.getnframes() // 160
 
 
 def prepare_fairseq(
@@ -40,7 +42,7 @@ def prepare_fairseq(
     frequencies: Counter[int] = Counter()
     split_counts: dict[str, int] = {}
     for split in ("train", "dev", "test"):
-        lines = ["id\taudio\tn_frames\ttgt_text\n"]
+        lines = ["id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames\n"]
         count = 0
         for row in read_jsonl(common_root / f"{split}.jsonl"):
             pair_id = str(row["pair_id"])
@@ -52,10 +54,12 @@ def prepare_fairseq(
             units = load_unit_file(
                 Path(unit_record["units_reduced_path"]), clusters=clusters
             )
-            frequencies.update(units)
+            if split == "train":
+                frequencies.update(units)
             lines.append(
                 f"{pair_id}\t{Path(row['ja_audio']).resolve()}\t"
-                f"{_frames(Path(row['ja_audio']))}\t{' '.join(map(str, units))}\n"
+                f"{_ten_ms_frames(Path(row['ja_audio']))}\t"
+                f"{' '.join(map(str, units))}\t{len(units)}\n"
             )
             count += 1
         atomic_write_text(
@@ -71,11 +75,20 @@ def prepare_fairseq(
         output_root / "dict.txt", dictionary, resume=resume, overwrite=overwrite
     )
     fairseq_config = {
-        "audio_root": "/",
-        "sampling_rate": 16000,
-        "vocab_filename": "dict.txt",
-        "target_type": "units",
-        "reduce_consecutive_units": True,
+        "input_channels": 1,
+        "input_feat_per_channel": 80,
+        "specaugment": {
+            "time_wrap_W": 0,
+            "freq_mask_N": 1,
+            "freq_mask_F": 27,
+            "time_mask_N": 1,
+            "time_mask_T": 100,
+            "time_mask_p": 1.0,
+        },
+        "transforms": {
+            "*": ["utterance_cmvn"],
+            "_train": ["utterance_cmvn", "specaugment"],
+        },
     }
     atomic_write_text(
         output_root / "config.yaml",

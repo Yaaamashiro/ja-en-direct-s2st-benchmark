@@ -7,15 +7,61 @@ training:
     - fairseq_cli.train
     - "{data_root}"
     - --task
+    - speech_to_speech
+    - --criterion
     - speech_to_spectrogram
+    - --n-frames-per-step
+    - "5"
     - --arch
     - s2spect2_conformer
+    - --decoder-normalize-before
+    - --dropout
+    - "0.1"
+    - --attention-dropout
+    - "0.1"
+    - --relu-dropout
+    - "0.1"
     - --config-yaml
     - config.yaml
     - --multitask-config-yaml
     - config_multitask.yaml
+    - --train-subset
+    - train
+    - --valid-subset
+    - dev
     - --save-dir
     - "{run_root}/checkpoints"
+    - --lr
+    - "0.0005"
+    - --lr-scheduler
+    - inverse_sqrt
+    - --warmup-init-lr
+    - "1e-7"
+    - --warmup-updates
+    - "10000"
+    - --optimizer
+    - adam
+    - --adam-betas
+    - "(0.9,0.98)"
+    - --clip-norm
+    - "10.0"
+    - --weight-decay
+    - "1e-6"
+    - --max-tokens
+    - "80000"
+    - --max-tokens-valid
+    - "30000"
+    - --required-batch-size-multiple
+    - "1"
+    - --max-target-positions
+    - "3000"
+    - --update-freq
+    - "1"
+    - --num-workers
+    - "8"
+    - --seed
+    - "1"
+    - --fp16
     - --max-update
     - "{max_updates}"
     - --save-interval-updates

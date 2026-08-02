@@ -5,6 +5,8 @@ import json
 import wave
 from pathlib import Path
 
+import pytest
+
 from direct_s2st.manifests.import_corpus import import_corpus
 from direct_s2st.s2ut.extract_units import extract_units
 from direct_s2st.s2ut.prepare_fairseq import prepare_fairseq as prepare_s2ut
@@ -20,6 +22,11 @@ def _wav(path: Path) -> tuple[float, str]:
         handle.setframerate(16000)
         handle.writeframes(b"\0\0" * 1600)
     return 0.1, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _mel_fixture(_: Path, output: Path, settings: dict[str, object]) -> None:
+    np = pytest.importorskip("numpy")
+    np.save(output, np.zeros((11, int(settings["n_mels"])), dtype=np.float32))
 
 
 def test_corpus_to_both_direct_model_manifests(tmp_path: Path) -> None:
@@ -78,7 +85,14 @@ def test_corpus_to_both_direct_model_manifests(tmp_path: Path) -> None:
         engine="fixture",
         version="1",
     )
-    prepare_t2(common, phonemes, t2, mel_config={"n_mels": 80, "hop_length": 160})
+    prepare_t2(
+        common,
+        phonemes,
+        t2,
+        mel_config={"n_mels": 80, "hop_length": 160},
+        feature_extractor=_mel_fixture,
+    )
 
     assert (s2ut / "test.tsv").is_file()
+    assert (t2 / "logmelspec80.zip").is_file()
     assert (t2 / "config_multitask.yaml").is_file()

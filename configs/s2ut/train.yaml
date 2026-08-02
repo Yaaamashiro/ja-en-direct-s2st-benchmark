@@ -9,12 +9,55 @@ training:
     - "{data_root}"
     - --task
     - speech_to_speech
+    - --target-is-code
+    - --target-code-size
+    - "100"
+    - --criterion
+    - speech_to_unit
+    - --label-smoothing
+    - "0.2"
     - --arch
     - s2ut_transformer
+    - --share-decoder-input-output-embed
+    - --dropout
+    - "0.1"
+    - --attention-dropout
+    - "0.1"
+    - --relu-dropout
+    - "0.1"
     - --config-yaml
     - config.yaml
+    - --train-subset
+    - train
+    - --valid-subset
+    - dev
     - --save-dir
     - "{run_root}/checkpoints"
+    - --lr
+    - "0.0005"
+    - --lr-scheduler
+    - inverse_sqrt
+    - --warmup-init-lr
+    - "1e-7"
+    - --warmup-updates
+    - "10000"
+    - --optimizer
+    - adam
+    - --adam-betas
+    - "(0.9,0.98)"
+    - --clip-norm
+    - "10.0"
+    - --max-tokens
+    - "20000"
+    - --max-target-positions
+    - "3000"
+    - --update-freq
+    - "1"
+    - --num-workers
+    - "8"
+    - --seed
+    - "1"
+    - --fp16
     - --max-update
     - "{max_updates}"
     - --save-interval-updates
