@@ -1,13 +1,19 @@
-beam: 10
-batch_size: 1
+architecture: translatotron2
+implementation_status: experimental_native_core
+prediction_type: mels
+voice_preservation: disabled
 inference:
   command:
     - python
     - -m
-    - direct_s2st.translatotron2.fairseq_infer
+    - direct_s2st.translatotron2.infer
     - --data-root
     - "{data_root}"
     - --run-root
     - "{run_root}"
+    - --common-root
+    - "{common_root}"
     - --predictions
     - "{predictions}"
+    - --device
+    - cpu

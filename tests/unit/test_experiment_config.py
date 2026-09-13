@@ -76,12 +76,7 @@ def test_fairseq_training_commands_use_the_pinned_s2s_interfaces() -> None:
     assert "--max-tokens" in s2ut_command
 
     t2_command = translatotron2["training"]["command"]
-    assert t2_command[t2_command.index("--task") + 1] == "speech_to_speech"
-    assert (
-        t2_command[t2_command.index("--criterion") + 1]
-        == "speech_to_spectrogram"
-    )
-    assert t2_command[t2_command.index("--n-frames-per-step") + 1] == "5"
-    assert "--optimizer" in t2_command
-    assert "--lr-scheduler" in t2_command
-    assert "--max-tokens" in t2_command
+    assert translatotron2["implementation_status"] == "experimental_native_core"
+    assert t2_command[:3] == ["python", "-m", "direct_s2st.translatotron2.train"]
+    assert t2_command[t2_command.index('--model-size') + 1] == 'smoke'
+    assert "--multitask-config-yaml" in s2ut_command

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from ..manifests.reader import read_common_manifest
 from typing import Any, Protocol
 
 from ..hashing import sha256_file, sha256_text
@@ -127,7 +128,7 @@ def extract_units(
     processed = 0
     for current_split in splits:
         split_processed = 0
-        for row in read_jsonl(common_root / f"{current_split}.jsonl"):
+        for row in read_common_manifest(common_root / f"{current_split}.jsonl"):
             pair_id = str(row["pair_id"])
             if stable_shard(pair_id, num_shards) != shard_index:
                 continue
@@ -143,8 +144,8 @@ def extract_units(
                 reduced = reduce_consecutive_units(original)
                 atomic_write_text(original_path, serialize_units(original), overwrite=overwrite)
                 atomic_write_text(reduced_path, serialize_units(reduced), overwrite=overwrite)
-            if len(reduced) > len(original):
-                raise ValueError(f"reduced unit sequence grew for {pair_id}")
+            if reduced != reduce_consecutive_units(original):
+                raise ValueError(f"reduced unit sequence does not match original for {pair_id}")
             records.append(
                 {
                     "pair_id": pair_id,

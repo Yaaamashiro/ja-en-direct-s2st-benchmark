@@ -13,13 +13,17 @@ dependencies = ["PyYAML==6.0.2"]
 s2st-benchmark = "direct_s2st.cli:main"
 
 [project.optional-dependencies]
-dev = ["numpy==1.26.4", "pytest==8.4.2"]
+dev = ["numpy==1.26.4", "pytest==8.4.2", "sacrebleu==2.5.1", "soundfile==0.13.1"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"direct_s2st.s2ut" = ["*.yaml"]
+"direct_s2st.vocoders" = ["HIFIGAN_LICENSE"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

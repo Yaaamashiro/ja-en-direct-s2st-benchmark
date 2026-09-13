@@ -1,0 +1,14 @@
+# Pinned fairseq docs/direct_s2st_discrete_units.md, Fisher reduced-unit example.
+source_letter:
+  decoder_type: transformer
+  encoder_layer: 6
+  loss_weight: 8.0
+target_letter:
+  decoder_type: transformer
+  encoder_layer: 8
+  loss_weight: 8.0
+decoder_target_ctc:
+  decoder_type: ctc
+  decoder_layer: 3
+  loss_weight: 1.6
+  zero_infinity: false

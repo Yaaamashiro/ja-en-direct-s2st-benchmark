@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .paths import resolve_audio_path
+
 
 SPLITS = ("train", "dev", "test")
 
@@ -59,11 +61,7 @@ class CommonManifestRow:
             raw = row.get(f"{language}_audio", row.get(f"{language}_wav_16k"))
             if not isinstance(raw, str) or not raw.strip():
                 raise ValueError(f"{language}_audio or {language}_wav_16k is required")
-            path = Path(raw)
-            if not path.is_absolute():
-                rooted = corpus_root / path
-                path = rooted if rooted.exists() else manifest_parent / path
-            return str(path.resolve())
+            return str(resolve_audio_path(raw, corpus_root))
 
         return cls(
             pair_id=_text(row, "pair_id"),

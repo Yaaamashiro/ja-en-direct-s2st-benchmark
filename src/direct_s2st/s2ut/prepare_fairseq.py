@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import wave
+import json
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ import yaml
 from ..hashing import sha256_file
 from ..io import atomic_write_json, atomic_write_text, read_jsonl
 from .extract_units import load_unit_file
+from .multitask import prepare_labels, validate_prepared
+from ..manifests.reader import read_common_manifest
 
 
 def _ten_ms_frames(path: Path) -> int:
@@ -25,6 +28,7 @@ def prepare_fairseq(
     output_root: Path,
     *,
     clusters: int = 100,
+    multitask: dict[str, Any] | None = None,
     resume: bool = False,
     overwrite: bool = False,
 ) -> dict[str, Any]:
@@ -39,12 +43,23 @@ def prepare_fairseq(
                 raise ValueError(f"duplicate unit record: {pair_id}")
             unit_records[pair_id] = row
 
+    rows_by_split = {split: list(read_common_manifest(common_root / f"{split}.jsonl")) for split in ("train", "dev", "test")}
+    seen = set()
+    for split, rows in rows_by_split.items():
+        for row in rows:
+            pair_id = row["pair_id"]
+            if not isinstance(pair_id, str) or not pair_id or any(c in pair_id for c in "\t\r\n/\\") or pair_id in seen:
+                raise ValueError(f"invalid or duplicate pair_id: {pair_id}")
+            seen.add(pair_id)
+            if row["split"] != split:
+                raise ValueError(f"common split mismatch: {pair_id}")
+    linguistic = prepare_labels(rows_by_split, output_root, settings=multitask, resume=resume, overwrite=overwrite)
     frequencies: Counter[int] = Counter()
     split_counts: dict[str, int] = {}
     for split in ("train", "dev", "test"):
         lines = ["id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames\n"]
         count = 0
-        for row in read_jsonl(common_root / f"{split}.jsonl"):
+        for row in rows_by_split[split]:
             pair_id = str(row["pair_id"])
             unit_record = unit_records.get(pair_id)
             if unit_record is None:
@@ -97,13 +112,16 @@ def prepare_fairseq(
         overwrite=overwrite,
     )
     lock = {
+        "unit_configuration": json.loads((units_root / "unit-lock.json").read_text(encoding="utf-8")),
         "common_dataset_lock_sha256": sha256_file(common_root / "dataset-lock.json"),
         "unit_manifest_sha256": {str(path): sha256_file(path) for path in manifests},
         "clusters": clusters,
         "target": "reduced_units",
+        "linguistic": linguistic,
         "splits": split_counts,
     }
     atomic_write_json(
         output_root / "data-lock.json", lock, resume=resume, overwrite=overwrite
     )
+    validate_prepared(output_root, clusters=clusters)
     return lock

@@ -6,6 +6,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
+from ..manifests.reader import read_common_manifest
 from typing import Any, Protocol
 
 from ..hashing import sha256_file
@@ -189,7 +190,7 @@ def phonemize_manifests(
     for current_split in splits:
         lines: list[str] = []
         split_processed = 0
-        for row in read_jsonl(common_root / f"{current_split}.jsonl"):
+        for row in read_common_manifest(common_root / f"{current_split}.jsonl"):
             pair_id = str(row["pair_id"])
             if stable_shard(pair_id, num_shards) != shard_index:
                 continue

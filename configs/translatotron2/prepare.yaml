@@ -1,4 +1,5 @@
-architecture: s2spect2_conformer
+planned_architecture: translatotron2
+implementation_status: feature_preparation_only
 sample_rate: 16000
 phonemizer:
   engine: espeak-ng
