@@ -7,6 +7,7 @@ import zipfile
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
+from ..manifests.reader import read_common_manifest
 from typing import Any
 
 import yaml
@@ -162,11 +163,13 @@ def prepare_fairseq(
     output_root: Path,
     *,
     mel_config: dict[str, Any],
+    source_mel_config: dict[str, Any] | None = None,
     feature_extractor: FeatureExtractor | None = None,
     resume: bool = False,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     settings = _mel_settings(mel_config)
+    source_settings = _mel_settings(source_mel_config or mel_config)
     phonemes = {
         split: _read_phonemes(phoneme_root, split)
         for split in ("train", "dev", "test")
@@ -189,7 +192,7 @@ def prepare_fairseq(
     target_audio: dict[str, Path] = {}
     for split in ("train", "dev", "test"):
         rows_by_split[split] = []
-        for row in read_jsonl(common_root / f"{split}.jsonl"):
+        for row in read_common_manifest(common_root / f"{split}.jsonl"):
             pair_id = str(row["pair_id"])
             sequence = phonemes[split].get(pair_id)
             if sequence is None:
@@ -206,6 +209,9 @@ def prepare_fairseq(
                 }
             )
 
+    for split, rows in rows_by_split.items():
+        if not rows or {row['id'] for row in rows} != set(phonemes[split]):
+            raise ValueError(f'empty split or extra phoneme IDs in {split}')
     output_root.mkdir(parents=True, exist_ok=True)
     feature_name = f"logmelspec{settings['n_mels']}"
     zip_path = output_root / f"{feature_name}.zip"
@@ -317,6 +323,7 @@ def prepare_fairseq(
     lock = {
         "common_dataset_lock_sha256": sha256_file(common_root / "dataset-lock.json"),
         "mel": settings,
+        "source_mel": source_settings,
         "mel_zip_sha256": sha256_file(zip_path),
         "phoneme_vocabulary_source": "fixed_espeak_inventory",
         "phoneme_inventory_sha256": sha256_file(phoneme_root / "inventory.txt"),
@@ -326,4 +333,12 @@ def prepare_fairseq(
     atomic_write_json(
         output_root / "data-lock.json", lock, resume=resume, overwrite=overwrite
     )
+    atomic_write_json(
+        output_root / "mel-spec.json",
+        {**settings, "log_transform": "natural_log_clamp_eps", "normalization": "none"},
+        resume=resume, overwrite=overwrite,
+    )
+    atomic_write_json(output_root / 'source-mel-spec.json',
+        {**source_settings, 'log_transform': 'natural_log_clamp_eps', 'normalization': 'utterance_cmvn'},
+        resume=resume, overwrite=overwrite)
     return lock

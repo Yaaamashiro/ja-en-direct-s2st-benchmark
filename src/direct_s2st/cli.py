@@ -41,8 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     _leaf(corpus, "validate", "Validate normalized manifests")
 
     for system, actions in {
-        "s2ut": ("fetch-artifacts", "extract-units", "prepare", "train", "infer"),
-        "translatotron2": ("phonemize", "prepare", "train", "infer"),
+        "s2ut": ("fetch-artifacts", "extract-units", "prepare", "validate", "train", "infer"),
+        "translatotron2": ("phonemize", "prepare", "validate", "train", "infer"),
     }.items():
         commands = systems.add_parser(system).add_subparsers(dest="action", required=True)
         for action in actions:
@@ -60,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate = systems.add_parser("evaluate").add_subparsers(dest="action", required=True)
     _leaf(evaluate, "run", "Evaluate standardized predictions")
     _leaf(evaluate, "aggregate", "Aggregate experiment metrics")
+    _leaf(evaluate, 'verify', 'Verify three-system real artifact completion')
     return parser
 
 
@@ -92,7 +93,7 @@ def _default_config(args: argparse.Namespace) -> Path | None:
     if args.system == "corpus":
         return None
     if args.system in ("s2ut", "translatotron2"):
-        name = "prepare" if args.action in ("fetch-artifacts", "extract-units", "phonemize", "prepare") else args.action
+        name = "prepare" if args.action in ("fetch-artifacts", "extract-units", "phonemize", "prepare", "validate") else args.action
         return root / args.system / f"{name}.yaml"
     if args.system == "cascade":
         return root / "cascade" / "default.yaml"
@@ -133,6 +134,9 @@ def _run_s2ut(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
     roots = RootPaths.from_environment()
     common = roots.experiment_data / "common"
     units = roots.experiment_data / "s2ut" / "units"
+    if args.action == "validate":
+        from .s2ut.multitask import validate_prepared
+        return validate_prepared(roots.experiment_data / "s2ut" / "fairseq", clusters=int(config.get("kmeans_clusters", 100)))
     if args.action == "fetch-artifacts":
         values = config["kmeans"]
         destination = roots.cache / str(values["path"])
@@ -190,6 +194,7 @@ def _run_s2ut(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
             units,
             output,
             clusters=int(config.get("kmeans_clusters", 100)),
+            multitask=config.get("multitask"),
             resume=args.resume,
             overwrite=args.overwrite,
         )
@@ -234,9 +239,24 @@ def _run_translatotron2(
             phonemes,
             output,
             mel_config=config["mel"],
+            source_mel_config=config.get('source_mel'),
             resume=args.resume,
             overwrite=args.overwrite,
         )
+    if args.action == 'validate':
+        root = roots.experiment_data / 'translatotron2' / 'fairseq'
+        if args.dry_run:
+            return {'data_root': str(root), 'action': 'validate'}
+        from .translatotron2.data import PreparedDataset, fingerprint
+        datasets = {split: PreparedDataset(root, split) for split in ('train', 'dev', 'test')}
+        ids = [row['id'] for dataset in datasets.values() for row in dataset.rows]
+        if len(ids) != len(set(ids)):
+            raise ValueError('duplicate IDs across splits')
+        for dataset in datasets.values():
+            for index in range(len(dataset)):
+                dataset[index]
+        return {'splits': {split: len(dataset) for split, dataset in datasets.items()},
+                'fingerprint': fingerprint(root)}
     if args.action in ("train", "infer"):
         return _run_direct_model("translatotron2", args, config, roots)
     raise NotImplementedError(f"unsupported translatotron2 action: {args.action}")
@@ -251,7 +271,7 @@ def _run_direct_model(
     from .inference import infer_system
     from .training import train_system
 
-    repository = Path(__file__).resolve().parents[2]
+    repository = Path(os.environ.get("S2ST_CONFIG_ROOT", str(Path(__file__).resolve().parents[2] / "configs"))).resolve().parent
     data_root = roots.experiment_data / system / "fairseq"
     variant = str(config.get("variant", "default"))
     seed = int(config.get("seed", 1))
@@ -311,6 +331,7 @@ def _run_cascade(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, 
         asr=asr,
         mt=mt,
         tts=tts,
+        model_identity=config,
         split=split,
         shard_index=args.shard_index,
         num_shards=args.num_shards,
@@ -325,7 +346,7 @@ def _run_evaluate(args: argparse.Namespace, config: dict[str, Any]) -> dict[str,
     from .evaluation.run import evaluate_predictions
 
     roots = RootPaths.from_environment()
-    if args.action == "aggregate":
+    if args.action in ('aggregate', 'verify'):
         run_ids = config.get("run_ids")
         if not isinstance(run_ids, list) or not run_ids:
             raise ValueError("run_ids must be a non-empty list for evaluation aggregation")
@@ -333,6 +354,9 @@ def _run_evaluate(args: argparse.Namespace, config: dict[str, Any]) -> dict[str,
         output = roots.experiment_data / "results"
         if args.dry_run:
             return {"run_roots": [str(path) for path in run_roots], "output_root": str(output)}
+        if args.action == 'verify':
+            from .evaluation.acceptance import verify_suite
+            return verify_suite(roots.experiment_data / 'common', run_roots, output, overwrite=args.overwrite)
         return aggregate_runs(run_roots, output, overwrite=args.overwrite)
 
     run_id = config.get("run_id")
@@ -378,6 +402,7 @@ def _run_evaluate(args: argparse.Namespace, config: dict[str, Any]) -> dict[str,
         transcribe=transcriber,
         blaser=blaser,
         speaker_similarity=speaker,
+        evaluation_identity=config,
         resume=args.resume,
         overwrite=args.overwrite,
     )
@@ -393,17 +418,29 @@ def _run_vocoder(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, 
     if not isinstance(values, dict) or not isinstance(values.get("command"), list):
         raise ValueError(f"{action}.command must be an explicit argument list")
     split = args.split or ("train" if action == "train" else "test")
-    output = roots.experiment_data / "artifacts" / "vocoders" / kind
+    run_id = config.get("run_id")
+    if not isinstance(run_id, str):
+        raise ValueError("vocoder config requires run_id matching the direct-model inference run")
+    from .runs import validate_run_id
+    validate_run_id(run_id)
+    output = roots.runs / run_id / ('vocoder-' + kind if action == 'train' else 'predictions')
     command = [
         str(part).format_map(
             {
                 "experiment_data_root": str(roots.experiment_data),
                 "output_root": str(output),
+                "run_root": str(roots.runs / run_id),
+                "cache_root": str(roots.cache),
                 "split": split,
+                "config_root": str(Path(os.environ.get('S2ST_CONFIG_ROOT', Path(__file__).resolve().parents[2] / 'configs'))),
             }
         )
         for part in values["command"]
     ]
+    if args.overwrite:
+        command.append("--overwrite")
+    if args.resume:
+        command.append('--resume')
     return run_vocoder_command(
         command,
         output_root=output,
@@ -418,6 +455,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _validate_args(args)
         config = load_config(args.config or _default_config(args), profile=args.profile)
+        if not args.dry_run and all(os.environ.get(name) for name in ("CORPUS_ROOT", "EXPERIMENT_DATA_ROOT", "RUNS_ROOT", "CACHE_ROOT")):
+            RootPaths.from_environment().validate_output_roots()
         key = command_key(args)
         if args.system == "corpus":
             payload = _run_corpus(args)
@@ -445,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True, default=str))
         return 0
-    except (ValueError, KeyError, OSError, NotImplementedError) as error:
+    except (ValueError, KeyError, OSError, RuntimeError) as error:
         print(json.dumps({"status": "failed", "error": str(error)}, ensure_ascii=False))
         return 2
 

@@ -31,6 +31,7 @@ def build_training_command(
             "run_root": run_root,
             "checkpoint_last": checkpoint,
             "max_updates": str(max_updates),
+            "seed": str(config.get('seed', 1)),
             "save_interval_updates": str(save_interval),
         },
     )
@@ -51,6 +52,8 @@ def train_system(
     overwrite: bool = False,
 ) -> dict[str, Any]:
     validate_run_id(run_id)
+    if config.get("implementation_status") == "not_implemented" or str(config.get("architecture", "")).startswith("s2spect2"):
+        raise NotImplementedError("duration-free substitute architecture is not Translatotron 2")
     if profile == "full" and config.get("confirm_full") is not True:
         raise ValueError("full training requires confirm_full: true in the explicit config")
     if profile == "full" and os.environ.get("S2ST_EXECUTION_ENV") != "docker":
@@ -63,7 +66,12 @@ def train_system(
         config=config,
         resume=resume,
     )
-    return run_external_experiment(
+    if config.get('architecture') == 'translatotron2' and overwrite:
+        command.append('--overwrite')
+    if "speech_to_unit" in command:
+        from .s2ut.preflight import validate_training
+        validate_training(data_root, command)
+    result = run_external_experiment(
         repository_root,
         run_root,
         command=command,
@@ -74,3 +82,27 @@ def train_system(
         overwrite=overwrite,
         require_checkpoint_for_resume=True,
     )
+    if config.get('architecture') == 'translatotron2':
+        from .translatotron2.engine import load_checkpoint
+        from .translatotron2.data import fingerprint
+        from .io import atomic_write_json
+        try:
+            _, state = load_checkpoint(run_root / 'checkpoints/checkpoint_last.pt')
+            if {k: v for k, v in state['data_fingerprint'].items() if k != 'training'} != fingerprint(data_root):
+                raise ValueError('TT2 checkpoint data fingerprint mismatch')
+            result['updates'] = state['updates']
+            result['backend'] = 'experimental_native_tt2'
+        except (ValueError, OSError) as error:
+            atomic_write_json(run_root / 'status.json', {'status': 'failed', 'error': str(error)}, overwrite=True)
+            raise
+        atomic_write_json(run_root / 'status.json', result, overwrite=True)
+    if "speech_to_unit" in command:
+        from .s2ut.checkpoint import validate_checkpoint
+        from .io import atomic_write_json
+        try:
+            result.update(validate_checkpoint(run_root / "checkpoints" / "checkpoint_last.pt"))
+        except (ValueError, OSError) as error:
+            atomic_write_json(run_root / "status.json", {"status": "failed", "error": str(error)}, overwrite=True)
+            raise
+        atomic_write_json(run_root / "status.json", result, overwrite=True)
+    return result

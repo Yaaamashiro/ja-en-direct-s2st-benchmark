@@ -5,7 +5,7 @@ training:
   command:
     - python
     - -m
-    - fairseq_cli.train
+    - direct_s2st.s2ut.fairseq_train
     - "{data_root}"
     - --task
     - speech_to_speech
@@ -27,6 +27,8 @@ training:
     - "0.1"
     - --config-yaml
     - config.yaml
+    - --multitask-config-yaml
+    - config_multitask.yaml
     - --train-subset
     - train
     - --valid-subset
@@ -58,6 +60,10 @@ training:
     - --seed
     - "1"
     - --fp16
+    - --log-format
+    - json
+    - --log-interval
+    - "1"
     - --max-update
     - "{max_updates}"
     - --save-interval-updates

@@ -1,19 +1,50 @@
 backend: fairseq_code_hifigan
-train:
-  command:
-    - python
-    - -m
-    - fairseq_cli.hydra_train
-    - task.data="{experiment_data_root}/s2ut/fairseq"
-    - checkpoint.save_dir="{output_root}/checkpoints"
+run_id: s2ut-smoke
+reference:
+  source_url: https://github.com/facebookresearch/fairseq/blob/3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99/examples/speech_to_speech/docs/direct_s2st_discrete_units.md
+  checkpoint_url: https://dl.fbaipublicfiles.com/fairseq/speech_to_speech/vocoder/code_hifigan/hubert_base_100_lj/g_00500000
+  config_url: https://dl.fbaipublicfiles.com/fairseq/speech_to_speech/vocoder/code_hifigan/hubert_base_100_lj/config.json
+  training_data: LJSpeech
+  code_license: MIT
+  checkpoint_license: verify upstream terms; code license does not establish weight license
 infer:
+  # Select the trained generator.pt/config.json below after fitting, or supply
+  # a verified compatible pretrained checkpoint explicitly.
   command:
     - python
     - -m
     - direct_s2st.vocoders.unit.infer
-    - --data-root
-    - "{experiment_data_root}/s2ut/fairseq"
+    - --input
+    - "{run_root}/predictions/units.jsonl"
+    - --output-root
+    - "{output_root}"
+    - --checkpoint
+    - "{cache_root}/models/vocoder/unit/g_00500000"
+    - --config
+    - "{cache_root}/models/vocoder/unit/config.json"
+    - --duration-prediction
+    - --sample-rate
+    - "16000"
+    - --device
+    - cuda
+train:
+  command:
+    - python
+    - -m
+    - direct_s2st.vocoders.train
+    - --kind
+    - unit
+    - --common-root
+    - "{experiment_data_root}/common"
+    - --units-root
+    - "{experiment_data_root}/s2ut/units"
+    - --config
+    - "{config_root}/vocoder/unit-generator.json"
     - --output-root
     - "{output_root}"
     - --split
     - "{split}"
+    - --max-updates
+    - "2"
+    - --device
+    - cuda

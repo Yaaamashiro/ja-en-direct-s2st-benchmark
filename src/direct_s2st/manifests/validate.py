@@ -8,6 +8,7 @@ from typing import Any
 from ..hashing import sha256_file
 from ..io import read_jsonl
 from .schema import CommonManifestRow, SPLITS
+from .reader import read_common_manifest
 
 
 class ManifestValidationError(ValueError):
@@ -85,7 +86,7 @@ def validate_manifest_directory(root: Path) -> dict[str, Any]:
         path = root / f"{split}.jsonl"
         if not path.is_file():
             raise ManifestValidationError(f"missing split manifest: {path}")
-        for raw in read_jsonl(path):
+        for raw in read_common_manifest(path):
             row = CommonManifestRow.from_dict(raw)
             if row.split != split:
                 raise ManifestValidationError(

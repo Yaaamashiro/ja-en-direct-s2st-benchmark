@@ -27,6 +27,7 @@ def _manifest(path: Path) -> None:
         rows.append(
             {
                 "pair_id": pair_id,
+                "split": "test",
                 "ja_audio": str(ja),
                 "en_audio": str(en),
                 "en_text": "Reference.",

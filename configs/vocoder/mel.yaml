@@ -1,19 +1,45 @@
 backend: hifigan
-train:
-  command:
-    - python
-    - -m
-    - fairseq_cli.hydra_train
-    - task.data="{experiment_data_root}/translatotron2/fairseq"
-    - checkpoint.save_dir="{output_root}/checkpoints"
+run_id: translatotron2-smoke
+# A checkpoint with verified matching mel parameters must be supplied.
 infer:
+  # Select the trained generator.pt/config.json below after fitting, or supply
+  # a verified compatible pretrained checkpoint explicitly.
   command:
     - python
     - -m
     - direct_s2st.vocoders.mel.infer
-    - --data-root
-    - "{experiment_data_root}/translatotron2/fairseq"
+    - --input
+    - "{run_root}/predictions/mels.jsonl"
+    - --output-root
+    - "{output_root}"
+    - --checkpoint
+    - "{cache_root}/models/vocoder/mel/generator.pt"
+    - --config
+    - "{cache_root}/models/vocoder/mel/config.json"
+    - --mel-spec
+    - "{experiment_data_root}/translatotron2/fairseq/mel-spec.json"
+    - --sample-rate
+    - "16000"
+    - --device
+    - cuda
+train:
+  command:
+    - python
+    - -m
+    - direct_s2st.vocoders.train
+    - --kind
+    - mel
+    - --common-root
+    - "{experiment_data_root}/common"
+    - --units-root
+    - "{experiment_data_root}/s2ut/units"
+    - --config
+    - "{config_root}/vocoder/mel-generator.json"
     - --output-root
     - "{output_root}"
     - --split
     - "{split}"
+    - --max-updates
+    - "2"
+    - --device
+    - cuda

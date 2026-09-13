@@ -5,7 +5,7 @@ x-benchmark-environment: &benchmark-environment
   EXPERIMENT_DATA_ROOT: /experiment-data
   RUNS_ROOT: /runs
   CACHE_ROOT: /cache
-  S2ST_CONFIG_ROOT: /workspace/configs
+  S2ST_CONFIG_ROOT: ${S2ST_CONTAINER_CONFIG_ROOT:-/workspace/configs}
   S2ST_EXECUTION_ENV: docker
   S2ST_DOCKER_IMAGE_DIGEST: ${S2ST_DOCKER_IMAGE_DIGEST:-}
   FAIRSEQ_HUBERT_CHECKPOINT: ${FAIRSEQ_HUBERT_CHECKPOINT:-}
@@ -17,7 +17,7 @@ x-benchmark-volumes: &benchmark-volumes
   - ${EXPERIMENT_DATA_ROOT:-./data/benchmark}:/experiment-data
   - ${RUNS_ROOT:-./runs}:/runs
   - ${CACHE_ROOT:-./.cache/benchmark}:/cache
-  - ./configs:/workspace/configs:ro
+  - ./configs:${S2ST_CONTAINER_CONFIG_ROOT:-/workspace/configs}:ro
   - ./tests:/workspace/tests:ro
 
 x-gpu-reservation: &gpu-reservation

@@ -1,0 +1,60 @@
+{
+  "sampling_rate": 16000,
+  "model_in_dim": 128,
+  "upsample_initial_channel": 512,
+  "upsample_rates": [
+    5,
+    4,
+    4,
+    4
+  ],
+  "upsample_kernel_sizes": [
+    11,
+    8,
+    8,
+    8
+  ],
+  "resblock_kernel_sizes": [
+    3,
+    7,
+    11
+  ],
+  "resblock_dilation_sizes": [
+    [
+      1,
+      3,
+      5
+    ],
+    [
+      1,
+      3,
+      5
+    ],
+    [
+      1,
+      3,
+      5
+    ]
+  ],
+  "mel": {
+    "sample_rate": 16000,
+    "n_fft": 512,
+    "win_length": 400,
+    "hop_length": 160,
+    "n_mels": 80,
+    "f_min": 0,
+    "f_max": 8000,
+    "eps": 0.00001,
+    "normalize_volume": false,
+    "log_transform": "natural_log_clamp_eps",
+    "normalization": "none"
+  },
+  "num_embeddings": 100,
+  "embedding_dim": 128,
+  "dur_predictor_params": {
+    "encoder_embed_dim": 128,
+    "var_pred_hidden_dim": 128,
+    "var_pred_kernel_size": 3,
+    "var_pred_dropout": 0.5
+  }
+}

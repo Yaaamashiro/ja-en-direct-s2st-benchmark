@@ -1,3 +1,3 @@
-ARG FAIRSEQ_IMAGE=direct-s2st-fairseq:locked
+ARG FAIRSEQ_IMAGE=ja-en-direct-s2st-benchmark-fairseq:locked
 FROM ${FAIRSEQ_IMAGE}
 ENTRYPOINT ["s2st-benchmark", "vocoder", "unit"]

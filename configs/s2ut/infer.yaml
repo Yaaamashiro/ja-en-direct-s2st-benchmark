@@ -1,4 +1,5 @@
 beam: 10
+prediction_type: units
 batch_size: 1
 inference:
   command:
@@ -11,3 +12,5 @@ inference:
     - "{run_root}"
     - --predictions
     - "{predictions}"
+    - --common-root
+    - "{common_root}"

@@ -20,6 +20,12 @@ class RootPaths:
     runs: Path
     cache: Path
 
+    def validate_output_roots(self) -> None:
+        corpus = self.corpus.resolve()
+        for root in (self.experiment_data, self.runs, self.cache):
+            if root.resolve().is_relative_to(corpus):
+                raise ValueError(f"benchmark output root must not be inside CORPUS_ROOT: {root}")
+
     @classmethod
     def from_environment(cls, environment: dict[str, str] | None = None) -> "RootPaths":
         values = os.environ if environment is None else environment

@@ -1,5 +1,15 @@
 # Japanese → English Direct S2ST Benchmark
 
+**実装・検証途中です。3方式の実E2E完了はまだ確認していません。**
+S2UTは3つの補助タスクを必須にし、推論・vocoder adapterを追加しました。
+Translatotron 2のduration-based coreと学習・mel推論を実験的に実装しました。
+CPUでloss・勾配・checkpoint再開を検証済みですが、実音声E2Eは未実施です。
+[本体の構成と原論文との差分](docs/TRANSLATOTRON2.md)を参照してください。
+環境は後から指定できます。[実行環境の設定とsmoke手順](docs/REPRODUCTION.md)と
+[監査・検証報告](docs/IMPLEMENTATION_STATUS.md)を参照してください。
+unit／mel vocoder学習と3方式の一括実行・再開・完了判定も実装しています。
+[3方式の実行手順と未検証範囲](docs/PIPELINE_COMPLETION.md)を参照してください。
+
 同一コーパス・同一 test split・同一評価条件で、次の3系統を比較する実験基盤です。
 
 - S2UT: 日本語音声 → 英語離散unit → unit vocoder
@@ -65,20 +75,17 @@ docker compose run --rm common corpus validate --profile smoke
 docker compose run --rm fairseq s2ut extract-units --profile smoke --limit 5 --resume
 docker compose run --rm fairseq s2ut prepare --profile smoke
 
-docker compose run --rm fairseq translatotron2 phonemize --profile smoke --limit 5 --resume
-docker compose run --rm fairseq translatotron2 prepare --profile smoke
-
 docker compose run --rm fairseq s2ut train --profile smoke
 docker compose run --rm fairseq s2ut train --profile smoke --resume
-docker compose run --rm fairseq translatotron2 train --profile smoke
-docker compose run --rm fairseq translatotron2 train --profile smoke --resume
 
 docker compose run --rm cascade cascade run --profile smoke --split test --limit 5 --resume
 ```
 
-上の学習4コマンドで、固定fairseqのdataset load、model build、forward、backward、
-optimizer step、checkpoint保存・再開を両Directモデルについて確認します。GPU実機で
-すべて成功するまで`pilot`や`full`へ進めません。
+Translatotron 2は既定で縮小モデル・CPU・2updatesです。実音声frontendには固定fairseq環境が必要です。
+S2UTについても実checkpointを用いた一連のGPU検証は未実施です。
+新しい `scripts/smoke/run.py` は最大100件/split・最大10updatesに制限し、
+実行環境とcorpus保存先を指定した後にprepare→train→infer→vocode→evaluateを実行します。
+GPU実機ですべて成功するまで`pilot`や`full`へ進めません。
 
 モデルやGPUをロードせず、解決される処理だけ確認する場合は `--dry-run` を付けます。
 S2UT k-meansは `${CACHE_ROOT}/models/s2ut/hubert_base_l6_k100.bin` に保存され、
@@ -112,6 +119,9 @@ BLASER の実行環境がない場合でも ASR-BLEU、音声品質、RTF は評
 
 ## テスト
 
+TT2のreference preset、分散学習、frontend仕様と検証範囲は
+[REFERENCE_PARITY.md](docs/REFERENCE_PARITY.md)を参照してください。
+
 ホストPythonは開発時のunit testにだけ使用します。本番データ処理には使用しません。
 
 ```powershell
@@ -119,3 +129,10 @@ python -m pip install -e ".[dev]"
 python -m pytest -q -m "not gpu"
 python -m pytest -q -m gpu  # 明示実行のみ
 ```
+
+S2UTの新しい補助タスクは `ja_text` / `en_text` のUnicode文字単位です。
+ASCII whitespaceは `<space>` に畳み、それ以外は大小文字・句読点・結合文字を保持します。
+辞書はtrainのみで作成し、未知文字・空列・ID欠落・TTS textとの内容差を拒否します。
+`source_letter` / `target_letter` / `decoder_target_ctc` の接続層とloss weightは
+パッケージ内 `src/direct_s2st/s2ut/multitask.yaml` に明示し、data-lockにも保存します。
+`configs/s2ut/prepare.yaml` の `multitask` マッピングで全3タスクを指定して上書きできます。

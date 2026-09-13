@@ -1,0 +1,40 @@
+architecture: translatotron2
+implementation_status: independent_reference_recipe
+voice_preservation: disabled
+seed: 1
+# Shape/optimizer reference, not a claim of dataset or numerical reproduction.
+# Smoke remains bounded; choose update-freq explicitly for the paper global batch.
+reference_global_batch: 768
+training:
+  max_updates: 2
+  save_interval_updates: 1
+  command:
+    - python
+    - -m
+    - direct_s2st.translatotron2.train
+    - --data-root
+    - "{data_root}"
+    - --run-root
+    - "{run_root}"
+    - --max-updates
+    - "{max_updates}"
+    - --save-interval-updates
+    - "{save_interval_updates}"
+    - --seed
+    - "{seed}"
+    - --device
+    - cuda
+    - --model-size
+    - conversational
+    - --learning-rate
+    - "0.0033"
+    - --warmup-updates
+    - "10000"
+    - --l2-regularization
+    - "0.000001"
+    - --batch-size
+    - "1"
+    - --update-freq
+    - "1"
+    - --validate-interval
+    - "1"

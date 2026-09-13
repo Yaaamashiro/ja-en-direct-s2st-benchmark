@@ -3,6 +3,7 @@ from __future__ import annotations
 import wave
 from collections.abc import Callable
 from pathlib import Path
+from ..manifests.reader import read_common_manifest
 from time import perf_counter
 from typing import Any, Protocol
 
@@ -41,16 +42,24 @@ def run_pipeline(
     limit: int | None = None,
     resume: bool = False,
     overwrite: bool = False,
+    model_identity: dict | None = None,
 ) -> dict[str, Any]:
     prediction_path = output_root / "predictions.jsonl"
     if prediction_path.exists() and not (resume or overwrite):
         raise ExistingOutputError(f"output already exists: {prediction_path}")
-    prior = {
-        str(row["pair_id"]): row for row in read_jsonl(prediction_path)
-    } if resume and prediction_path.is_file() else {}
+    from ..journal import Journal
+    from ..hashing import sha256_file
+    common_rows = list(read_common_manifest(common_manifest))
+    if len({r['pair_id'] for r in common_rows}) != len(common_rows) or any(r['split'] != split for r in common_rows):
+        raise ValueError('invalid cascade common IDs/split')
+    identity = dict(common=sha256_file(common_manifest), models=model_identity, run_id=run_id,
+                    split=split, shard_index=shard_index, num_shards=num_shards, limit=limit,
+                    source={r['pair_id']: sha256_file(Path(r['ja_audio'])) for r in common_rows})
+    journal = Journal(prediction_path, identity, resume=resume, overwrite=overwrite)
+    prior = journal.rows.copy()
     records: list[dict[str, Any]] = []
     selected = 0
-    for row in read_jsonl(common_manifest):
+    for row in common_rows:
         pair_id = str(row["pair_id"])
         if stable_shard(pair_id, num_shards) != shard_index:
             continue
@@ -58,14 +67,17 @@ def run_pipeline(
             break
         selected += 1
         old = prior.get(pair_id)
-        if old and old.get("status") == "success" and Path(old["output_audio"]).is_file():
+        if old and old.get("status") == "success" and Path(old["output_audio"]).is_file() and old.get('output_sha256') == sha256_file(Path(old['output_audio'])):
             records.append(old)
             continue
         output_audio = output_root / "audio" / f"{pair_id}.wav"
+        if not output_audio.resolve().is_relative_to((output_root / 'audio').resolve()):
+            raise ValueError('unsafe cascade pair ID')
         record: dict[str, Any] = {
             "pair_id": pair_id,
             "system_id": "cascade",
             "run_id": run_id,
+            "split": split,
             "source_audio": str(Path(row["ja_audio"]).resolve()),
             "reference_audio": str(Path(row["en_audio"]).resolve()),
             "reference_text": row["en_text"],
@@ -75,6 +87,7 @@ def run_pipeline(
             "error": None,
         }
         total_started = perf_counter()
+        fatal_error = None
         try:
             started = perf_counter()
             record["asr_ja_text"] = asr(Path(row["ja_audio"]))
@@ -87,9 +100,10 @@ def run_pipeline(
             record["tts_seconds"] = perf_counter() - started
             record["output_duration"] = _duration(output_audio)
             record["status"] = "success"
+            record['output_sha256'] = sha256_file(output_audio)
         except Exception as error:
             if _fatal_accelerator_error(error):
-                raise
+                fatal_error = error
             record["error"] = f"{type(error).__name__}: {error}"
         record["total_seconds"] = perf_counter() - total_started
         record["inference_seconds"] = record["total_seconds"]
@@ -98,7 +112,9 @@ def run_pipeline(
             record["total_seconds"] / duration if duration > 0 else None
         )
         records.append(record)
-        atomic_write_jsonl(prediction_path, records, overwrite=True)
+        journal.record(record)
+        if fatal_error is not None:
+            raise fatal_error
     atomic_write_jsonl(prediction_path, records, overwrite=True)
     return {
         "predictions": str(prediction_path),
