@@ -1,138 +1,124 @@
 # Japanese → English Direct S2ST Benchmark
 
-**実装・検証途中です。3方式の実E2E完了はまだ確認していません。**
-S2UTは3つの補助タスクを必須にし、推論・vocoder adapterを追加しました。
-Translatotron 2のduration-based coreと学習・mel推論を実験的に実装しました。
-CPUでloss・勾配・checkpoint再開を検証済みですが、実音声E2Eは未実施です。
-[本体の構成と原論文との差分](docs/TRANSLATOTRON2.md)を参照してください。
-環境は後から指定できます。[実行環境の設定とsmoke手順](docs/REPRODUCTION.md)と
-[監査・検証報告](docs/IMPLEMENTATION_STATUS.md)を参照してください。
-unit／mel vocoder学習と3方式の一括実行・再開・完了判定も実装しています。
-[3方式の実行手順と未検証範囲](docs/PIPELINE_COMPLETION.md)を参照してください。
+日本語から英語への音声翻訳を、同一コーパス・同一test split・同一評価条件で比較するための実験基盤です。
+データの取り込みから前処理、学習、推論、音声生成、評価までを扱います。
 
-同一コーパス・同一 test split・同一評価条件で、次の3系統を比較する実験基盤です。
+## 比較する方式
 
-- S2UT: 日本語音声 → 英語離散unit → unit vocoder
-- Translatotron 2: 日本語音声 → 英語音素/内部状態 → Mel → Mel vocoder
-- Cascade: 日本語ASR → 日英MT → 英語TTS
+| 方式 | 処理経路 |
+| --- | --- |
+| S2UT | 日本語音声 → 英語離散unit → unit vocoder |
+| Translatotron 2 | 日本語音声 → 音素・内部状態 → mel → mel vocoder |
+| Cascade | 日本語ASR → 日英MT → 英語TTS |
 
-コーパス生成はこのリポジトリでは行いません。外部の
-`ja-en-direct-s2st-corpus` が生成した `accepted.jsonl` と16 kHz音声を読み取り、
-外部コーパスを変更せずに派生データを作ります。詳細な不変条件は
-[DESIGN.md](DESIGN.md) を参照してください。
+Translatotron 2はnative PyTorchによる独立実装です。原著者の実装や学習済み重みではなく、
+canonical-speaker出力を対象とし、話者性の保持は行いません。
+実音声での3方式のE2E成功・翻訳品質・原論文の数値再現は未確認です。
+構成と適用範囲は[モデルの説明](docs/TRANSLATOTRON2.md)を参照してください。
 
-## 安全な既定値
+## 必要なもの
 
-- 既定 profile は `smoke`。`full` 学習には設定内の `confirm_full: true` が必要です。
-- 既存出力は `--overwrite` なしで置換しません。
-- 長時間処理は `--resume`、stable shard、atomic write に対応します。
-- model ID、revision、dataset/artifact checksum を run metadata に保存します。
-- 音声、特徴量、checkpoint、cache、推論結果は Git 対象外です。
+- 外部の `ja-en-direct-s2st-corpus` が生成した `accepted.jsonl` と16 kHz音声
+- Docker Compose、およびGPU処理用のLinux・NVIDIA GPU・対応ドライバ・NVIDIA Container Toolkit
+- 実行計画の作成と開発テスト用のPython 3.10以上
+- 設定で固定されたモデル・artifactを取得できるネットワーク、または準備済みのcache
 
-## 本番環境（Dockerのみ）
+コーパスや学習済みcheckpointは同梱しません。コーパスの生成もこのリポジトリの対象外です。
+入力コーパスは読み取り専用で扱い、特徴量などの派生物は別の保存先に作成します。
+本番のデータ処理はDocker内で実行し、ホストPythonは実行ドライバと開発テストに使用します。
 
-本番の前処理・学習・推論・評価はホストのPythonから実行せず、必ず
-`docker compose run` を使います。clone時はfairseq submoduleも取得します。
+## セットアップ
 
-```powershell
-git submodule update --init --recursive
+以下は実行先ホストで操作する例です。
 
-$env:CORPUS_ROOT = 'D:\data\ja-en-direct-s2st-corpus'
-$env:EXPERIMENT_DATA_ROOT = 'D:\data\ja-en-direct-s2st-benchmark'
-$env:RUNS_ROOT = 'D:\runs\ja-en-direct-s2st-benchmark'
-$env:CACHE_ROOT = 'D:\cache\ja-en-direct-s2st-benchmark'
-
-docker compose build common fairseq
-docker compose build cascade evaluation
+```sh
+git clone --recurse-submodules https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark.git
+cd ja-en-direct-s2st-benchmark
+python -m pip install -e .
 ```
 
-`cascade` と `evaluation` はローカルのfairseq imageを基底にするため、上記の順で
-buildします。GPUサービスはNVIDIA Container Toolkitを前提とします。
+取得済みのリポジトリでは `git submodule update --init --recursive` で固定fairseqを準備します。
+以降のコマンドはリポジトリのルートから実行してください。
 
-HuBERT layer 6 / KM100の公式fairseq joblib artifactは、コンテナ内の明示コマンドで
-SHA-256検証付きダウンロードを行います。
+### 保存先を設定する
 
-```powershell
-docker compose run --rm fairseq s2ut fetch-artifacts --profile smoke
+[.env.example](.env.example)をコピーして `.env` を作成し、次のパスを設定してください。
+`.env` はGit管理対象外です。
+
+| 変数 | 保存先 |
+| --- | --- |
+| `CORPUS_ROOT` | `production/manifests/releases/accepted.jsonl` と音声を含む既存コーパス |
+| `EXPERIMENT_DATA_ROOT` | benchmarkの派生データ。コーパスの外にある専用ディレクトリ |
+| `RUNS_ROOT` | 学習ログ、checkpoint、推論結果 |
+| `CACHE_ROOT` | モデルとartifactのcache |
+
+パスはDocker daemonが動くホスト上のものを指定します。smoke用の派生データは本学習用と分けてください。
+リモート接続は実行ドライバの `--docker-context NAME` で指定できますが、ファイル転送は行いません。
+詳しくは[実行環境の設定](docs/REPRODUCTION.md)を参照してください。
+
+### Docker imageをbuildする
+
+```sh
+docker compose --env-file .env build common fairseq
+docker compose --env-file .env build cascade evaluation
 ```
 
-本番データを処理する前に、fairseq公式checkpointと実音声1件を指定し、同じ音声から
-Transformers経路とfairseq公式経路が完全に同じunit列を出すことをGPUテストします。
+`cascade` と `evaluation` はfairseq imageを基底にするため、この順でbuildします。
 
-```powershell
-$env:FAIRSEQ_HUBERT_CHECKPOINT = '/cache/models/s2ut/hubert_base_ls960.pt'
-$env:S2ST_KMEANS_ARTIFACT = '/cache/models/s2ut/hubert_base_l6_k100.bin'
-$env:S2ST_PARITY_AUDIO = '/corpus/production/audio/16k/en/example.wav'
-docker compose run --rm --entrypoint python3 fairseq -m pytest -q -m gpu tests/integration/test_hubert_fairseq_parity.py
+## 小規模に実行する
+
+まず3方式の実行計画を確認します。このコマンドだけではモデル処理は開始しません。
+
+```sh
+python scripts/smoke/suite.py --env-file .env --name benchmark-smoke --limit 5 --max-updates 2
 ```
 
-## 本番前の5文スモーク順序
+計画を確認したら `--execute` を付けて実行します。停止した処理は同じ設定で `--resume` を付けて再開します。
 
-```powershell
-docker compose run --rm common corpus import --profile smoke --limit 5
-docker compose run --rm common corpus validate --profile smoke
-
-docker compose run --rm fairseq s2ut extract-units --profile smoke --limit 5 --resume
-docker compose run --rm fairseq s2ut prepare --profile smoke
-
-docker compose run --rm fairseq s2ut train --profile smoke
-docker compose run --rm fairseq s2ut train --profile smoke --resume
-
-docker compose run --rm cascade cascade run --profile smoke --split test --limit 5 --resume
+```sh
+python scripts/smoke/suite.py --env-file .env --name benchmark-smoke --limit 5 --max-updates 2 --execute
+python scripts/smoke/suite.py --env-file .env --name benchmark-smoke --limit 5 --max-updates 2 --execute --resume
 ```
 
-Translatotron 2は既定で縮小モデル・CPU・2updatesです。実音声frontendには固定fairseq環境が必要です。
-S2UTについても実checkpointを用いた一連のGPU検証は未実施です。
-新しい `scripts/smoke/run.py` は最大100件/split・最大10updatesに制限し、
-実行環境とcorpus保存先を指定した後にprepare→train→infer→vocode→evaluateを実行します。
-GPU実機ですべて成功するまで`pilot`や`full`へ進めません。
+`--limit 5` はtrain/dev/testの各splitから最大5件を選びます。3つのsplitが必要で、
+文字・音素辞書はtrainだけから作成します。入力条件の詳細は[smoke手順](docs/REPRODUCTION.md)を確認してください。
 
-モデルやGPUをロードせず、解決される処理だけ確認する場合は `--dry-run` を付けます。
-S2UT k-meansは `${CACHE_ROOT}/models/s2ut/hubert_base_l6_k100.bin` に保存され、
-設定済みSHA-256と一致しないartifactは拒否されます。
+一括実行は前処理、各方式の学習・推論、unit／mel vocoderの学習、評価、比較を順に行います。
+2updatesは処理経路を確認するための設定であり、意味の通る音声やE2E成功を保証しません。
+学習済みvocoderの指定、個別実行、失敗時の扱いは[パイプラインの実行手順](docs/PIPELINE_COMPLETION.md)に記載しています。
 
-`full` は既定では開始されません。smoke/pilot確認後、使用imageのIDを明示してから
-Docker内でのみ開始できます。
+## 設定と出力
 
-```powershell
-$env:S2ST_DOCKER_IMAGE_DIGEST = docker image inspect --format '{{.Id}}' ja-en-direct-s2st-benchmark-fairseq:locked
-docker compose run --rm fairseq s2ut train --profile full
-```
+- `configs/`：各方式、vocoder、評価の設定。モデルIDとimmutable revisionを固定します。
+- `scripts/smoke/`：小規模実行の計画・実行・再開ドライバ。
+- `src/direct_s2st/`：CLI、前処理、学習、推論、評価の実装。
+- `tests/`：単体テストと統合テスト。
+- `docs/`：環境構築、モデル仕様、再現条件、検証記録。
 
-学習と推論は設定内の明示的な引数配列を実行します。`RUNS_ROOT/run_id` には
-resolved config、環境、dataset lock、command、log、checkpoint、prediction、metrics が保存されます。
+一括実行の生成設定は `configs/local/<name>`、方式別の成果物は `RUNS_ROOT/<name>-<system>` に保存します。
+完了判定は `EXPERIMENT_DATA_ROOT/results/e2e-acceptance.json`、比較結果は同じ `results` 以下に出力します。
+評価は共通の固定ASRと正規化を使い、失敗したサンプルも記録に残します。
 
-## 評価
+既定profileは `smoke` です。`full` 学習には明示的な設定と確認が必要です。
+既存出力は明示的な `--overwrite` なしでは置換せず、再開時には設定・入力・成果物を照合します。
+音声、特徴量、checkpoint、cache、推論結果はGitに追加しないでください。
 
-すべての方式で同じ固定ASRと正規化を使います。生成失敗や評価失敗は削除されず、
-per-sample JSONL に残ります。
+## 開発・テスト
 
-```powershell
-# run_id を追加した評価設定を指定
-docker compose run --rm evaluation evaluate run --config my-evaluation.yaml --resume
-
-# run_ids を列挙した集計設定を指定
-docker compose run --rm evaluation evaluate aggregate --config my-comparison.yaml
-```
-
-BLASER の実行環境がない場合でも ASR-BLEU、音声品質、RTF は評価できます。
-
-## テスト
-
-TT2のreference preset、分散学習、frontend仕様と検証範囲は
-[REFERENCE_PARITY.md](docs/REFERENCE_PARITY.md)を参照してください。
-
-ホストPythonは開発時のunit testにだけ使用します。本番データ処理には使用しません。
-
-```powershell
+```sh
 python -m pip install -e ".[dev]"
 python -m pytest -q -m "not gpu"
-python -m pytest -q -m gpu  # 明示実行のみ
 ```
 
-S2UTの新しい補助タスクは `ja_text` / `en_text` のUnicode文字単位です。
-ASCII whitespaceは `<space>` に畳み、それ以外は大小文字・句読点・結合文字を保持します。
-辞書はtrainのみで作成し、未知文字・空列・ID欠落・TTS textとの内容差を拒否します。
-`source_letter` / `target_letter` / `decoder_target_ctc` の接続層とloss weightは
-パッケージ内 `src/direct_s2st/s2ut/multitask.yaml` に明示し、data-lockにも保存します。
-`configs/s2ut/prepare.yaml` の `multitask` マッピングで全3タスクを指定して上書きできます。
+モデルのCPUテストには追加でtorch／torchaudio 2.7.1が必要です。
+GPUテストは対応環境と指定artifactを準備して明示的に実行します。
+HuBERT unit列のfairseq経路との一致確認を含む手順は[再現手順](docs/REPRODUCTION.md)を参照してください。
+
+## ドキュメント
+
+- [設計とデータの不変条件](DESIGN.md)
+- [実行環境・artifactの準備](docs/REPRODUCTION.md)
+- [3方式の実行・再開・完了判定](docs/PIPELINE_COMPLETION.md)
+- [Translatotron 2のモデル構成](docs/TRANSLATOTRON2.md)
+- [reference preset・分散学習・原論文との対応](docs/REFERENCE_PARITY.md)
+- [実装状況と検証記録](docs/IMPLEMENTATION_STATUS.md)
