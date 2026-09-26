@@ -25,7 +25,14 @@ canonical-speaker出力を対象とし、話者性の保持は行いません。
 
 コーパスや学習済みcheckpointは同梱しません。コーパスの生成もこのリポジトリの対象外です。
 入力コーパスは読み取り専用で扱い、特徴量などの派生物は別の保存先に作成します。
-本番のデータ処理はDocker内で実行し、ホストPythonは実行ドライバと開発テストに使用します。
+通常のデータ処理はDocker内で実行します。Colabでは専用の固定Python環境を使用します。
+
+## Google Colabで使う
+
+[Colab用ノートブック](notebooks/colab_training.ipynb)をColabへアップロードし、GPUランタイムで実行してください。
+Dockerなしで環境構築・前処理・TT2／S2UT／vocoder学習を実行できます。
+学習を短い区間に分けてGoogle Driveへcheckpointを検証付きで保存し、切断後は最後の保存点から再開します。
+初期設定は2更新です。時間予算、保存頻度、本学習への切り替え、注意事項は[Colab手順](docs/COLAB.md)を参照してください。
 
 ## セットアップ
 
