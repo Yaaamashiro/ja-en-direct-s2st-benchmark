@@ -95,7 +95,8 @@ def test_vocoder_duration_targets_are_real_run_lengths():
         run_lengths([1.5, 2])
 
 
-def test_real_pinned_generator_and_official_discriminator_optimizer():
+@pytest.mark.parametrize('batch_size', [1, 2])
+def test_real_pinned_generator_and_official_discriminator_optimizer(batch_size):
     torch = pytest.importorskip('torch')
     pytest.importorskip('torchaudio')
     from direct_s2st.vocoders.train import gan_step
@@ -123,7 +124,7 @@ def test_real_pinned_generator_and_official_discriminator_optimizer():
     optim_g = torch.optim.AdamW(generator.parameters(), lr=1e-4)
     optim_d = torch.optim.AdamW(discriminators.parameters(), lr=1e-4)
     # Synthetic tensors explicitly test optimization mechanics, not corpus E2E.
-    conditioning, real = torch.randn(1, 4, 64), torch.randn(1, 1, 256).tanh()
+    conditioning, real = torch.randn(batch_size, 4, 64), torch.randn(batch_size, 1, 256).tanh()
     before = generator.conv_pre.weight_v.detach().clone()
     def spectral_fixture(x):
         return torch.stft(x, 64, hop_length=16, window=torch.hann_window(64),

@@ -101,7 +101,8 @@ def test_phoneme_state_changes_acoustic_output(setup):
     assert not torch.allclose(before[0], after[0])
 
 
-def test_training_cli_updates_and_resumes(setup, tmp_path, monkeypatch):
+@pytest.mark.parametrize('workers', [0, 2])
+def test_training_cli_updates_and_resumes(setup, tmp_path, monkeypatch, workers):
     from direct_s2st.translatotron2 import train
     model, batch = setup
 
@@ -118,7 +119,8 @@ def test_training_cli_updates_and_resumes(setup, tmp_path, monkeypatch):
 
     monkeypatch.setattr(train, 'PreparedDataset', SyntheticDataset)
     monkeypatch.setattr(train, 'fingerprint', lambda root: {'fixture': 'synthetic'})
-    arguments = ['tt2-train', '--data-root', str(tmp_path / 'data'), '--run-root', str(tmp_path / 'run'),
+    arguments = ['tt2-train', '--num-workers', str(workers), '--batch-size', '2',
+                 '--data-root', str(tmp_path / 'data'), '--run-root', str(tmp_path / 'run'),
                  '--max-updates', '2']
     monkeypatch.setattr('sys.argv', arguments)
     train.main()
@@ -133,3 +135,13 @@ def test_training_cli_updates_and_resumes(setup, tmp_path, monkeypatch):
     _, state = load_checkpoint(checkpoint)
     assert state['updates'] == 3
     assert (tmp_path / 'run/losses/00000003.json').is_file()
+    # A fresh uninterrupted run must match the worker-prefetched resumed run.
+    continuous = arguments[:]
+    continuous[continuous.index('--run-root')+1] = str(tmp_path/'continuous')
+    continuous[continuous.index('--max-updates')+1] = '3'
+    continuous[continuous.index('--num-workers')+1] = '0'
+    monkeypatch.setattr('sys.argv', continuous)
+    train.main()
+    _, expected = load_checkpoint(tmp_path/'continuous/checkpoints/checkpoint_last.pt')
+    for name, value in state['model'].items():
+        assert torch.equal(value, expected['model'][name]), name

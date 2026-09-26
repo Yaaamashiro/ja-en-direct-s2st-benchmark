@@ -71,7 +71,13 @@ def gan_step(generator, discriminators, optim_g, optim_d, conditioning, real, me
             adversarial = adversarial + generator_loss(generated)[0]
             feature = feature + feature_loss(features_real, features_fake)
         mel_loss = F.l1_loss(mel(fake.squeeze(1)), mel(real.squeeze(1)))
-        duration = duration_objective(generator, units) if units is not None else fake.new_zeros(())
+        if units is None:
+            duration = fake.new_zeros(())
+        elif isinstance(units[0], (list, tuple)):
+            # No padded phones are introduced into the duration predictor.
+            duration = torch.stack([duration_objective(generator, sequence) for sequence in units]).mean()
+        else:
+            duration = duration_objective(generator, units)
         total = adversarial + feature + 45 * mel_loss + duration_weight * duration
         finite_step(total, optim_g, generator.parameters())
     finally:
@@ -92,6 +98,43 @@ class LogMel(torch.nn.Module):
 
     def forward(self, waveform):
         return self.mel(self.spectrum(waveform)).clamp_min(self.eps).log()
+
+
+def load_wave(row, sample_rate, kind):
+    import soundfile as sf
+    waveform, rate = sf.read(row['en_audio'], dtype='float32', always_2d=True)
+    if waveform.shape[1] != 1:
+        raise ValueError('fitting requires mono audio')
+    wave = torch.from_numpy(waveform[:, 0])[None]
+    if rate != sample_rate:
+        if kind == 'unit':
+            raise ValueError('unit fitting requires original 16 kHz audio')
+        import torchaudio.functional as audio_functional
+        wave = audio_functional.resample(wave, rate, sample_rate)
+    if not torch.isfinite(wave).all() or not torch.count_nonzero(wave):
+        raise ValueError('invalid or silent training audio')
+    return wave
+
+
+def segment_batch(samples, *, spec, hop, segment_frames, mel, device):
+    """Crop equal-length real segments without padding synthetic audio."""
+    available = []
+    for wave, units in samples:
+        length = len(units) if units is not None else wave.size(1) // hop
+        if units is not None and not 0 <= wave.size(1) - length * hop < 2 * hop:
+            raise ValueError('original unit/wave alignment exceeds HuBERT tail tolerance')
+        available.append(length)
+    frames = min(segment_frames, *available)
+    if frames * hop <= spec['n_fft'] // 2:
+        raise ValueError('training segment too short for reflect-padded mel')
+    real, conditioning = [], []
+    for (wave, units), length in zip(samples, available):
+        wave = wave.to(device, non_blocking=True)
+        offset = int(torch.randint(0, length - frames + 1, (1,)))
+        real.append(wave[:, offset * hop:(offset + frames) * hop, None].transpose(1, 2))
+        conditioning.append(torch.tensor([units[offset:offset + frames]], device=device) if units is not None
+                            else mel(wave)[:, :, offset:offset + frames].detach())
+    return torch.cat(conditioning), torch.cat(real)
 
 
 def save_state(path, payload):
@@ -116,12 +159,16 @@ def main():
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--max-updates', type=int, default=2)
     parser.add_argument('--segment-frames', type=int, default=32)
+    parser.add_argument('--batch-size', type=int, default=1)
+    parser.add_argument('--num-workers', type=int, default=0)
+    parser.add_argument('--prefetch-factor', type=int, default=2)
+    parser.add_argument('--save-interval-updates', type=int, default=1)
     parser.add_argument('--learning-rate', type=float, default=0.0002)
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
-    if min(args.max_updates, args.segment_frames) < 1 or args.learning_rate <= 0:
+    if min(args.max_updates, args.segment_frames, args.batch_size, args.prefetch_factor, args.save_interval_updates) < 1 or args.num_workers < 0 or args.learning_rate <= 0:
         parser.error('updates, segment frames and learning rate must be positive')
     if args.resume and args.overwrite:
         parser.error('resume and overwrite are mutually exclusive')
@@ -144,6 +191,8 @@ def main():
                 'config': config, 'learning_rate': args.learning_rate,
                 'segment_frames': args.segment_frames, 'kind': args.kind,
                 'seed': args.seed, 'audio': {}, 'units': {}}
+    if args.batch_size != 1:
+        identity['batch_size'] = args.batch_size
     all_units = {}
     for row in rows:
         audio_hash = sha256_file(Path(row['en_audio']))
@@ -189,40 +238,28 @@ def main():
             torch.cuda.set_rng_state_all(state['cuda_rng'])
         start = state['updates']
     atomic_write_json(args.output_root / 'config.json', config, resume=args.resume, overwrite=args.overwrite)
-    import soundfile as sf
-    for update in range(start + 1, args.max_updates + 1):
-        row = rows[(update - 1) % len(rows)]
-        waveform, rate = sf.read(row['en_audio'], dtype='float32', always_2d=True)
-        if waveform.shape[1] != 1:
-            raise ValueError('fitting requires mono audio')
-        wave = torch.from_numpy(waveform[:, 0]).to(args.device)[None]
-        if rate != spec['sample_rate']:
-            if args.kind == 'unit':
-                raise ValueError('unit fitting requires original 16 kHz audio')
-            import torchaudio.functional as audio_functional
-            wave = audio_functional.resample(wave, rate, spec['sample_rate'])
-        if not torch.isfinite(wave).all() or not torch.count_nonzero(wave):
-            raise ValueError('invalid or silent training audio')
-        hop = math.prod(config['upsample_rates'])
-        units = all_units.get(row['pair_id'])
-        available = len(units) if units is not None else wave.size(1) // hop
-        if units is not None and not 0 <= wave.size(1) - available * hop < 2 * hop:
-            raise ValueError('original unit/wave alignment exceeds HuBERT tail tolerance')
-        frames = min(args.segment_frames, available)
-        if frames * hop <= spec['n_fft'] // 2:
-            raise ValueError('training segment too short for reflect-padded mel')
-        offset = int(torch.randint(0, available - frames + 1, (1,)))
-        real = wave[:, offset * hop:(offset + frames) * hop, None].transpose(1, 2)
-        conditioning = (torch.tensor([units[offset:offset + frames]], device=args.device) if units is not None
-                        else mel(wave)[:, :, offset:offset + frames].detach())
-        losses = gan_step(generator, discriminators, optim_g, optim_d, conditioning, real, mel, units=units)
-        save_state(checkpoint, dict(format='direct-s2st-vocoder-v1', generator=generator.state_dict(),
-                   discriminators=discriminators.state_dict(), optimizer_g=optim_g.state_dict(),
-                   optimizer_d=optim_d.state_dict(), updates=update, identity=identity,
-                   rng=torch.get_rng_state(), cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []))
-        atomic_write_json(args.output_root / 'losses' / f'{update:08d}.json', losses,
-                          overwrite=args.overwrite or args.resume)
-        print(json.dumps({'update': update, **losses}), flush=True)
+    from ..prefetch import ordered_samples
+    def load(index):
+        row = rows[index % len(rows)]
+        return load_wave(row, spec['sample_rate'], args.kind), all_units.get(row['pair_id'])
+    indices = range(start * args.batch_size, args.max_updates * args.batch_size)
+    with ordered_samples(load, indices, args.num_workers, args.prefetch_factor) as loaded:
+        for update in range(start + 1, args.max_updates + 1):
+            samples = [next(loaded) for _ in range(args.batch_size)]
+            conditioning, real = segment_batch(samples, spec=spec,
+                hop=math.prod(config['upsample_rates']), segment_frames=args.segment_frames,
+                mel=mel, device=args.device)
+            units = [sample[1] for sample in samples] if args.kind == 'unit' else None
+            losses = gan_step(generator, discriminators, optim_g, optim_d, conditioning, real, mel, units=units)
+            if update % args.save_interval_updates == 0 or update == args.max_updates:
+                save_state(checkpoint, dict(format='direct-s2st-vocoder-v1', generator=generator.state_dict(),
+                           discriminators=discriminators.state_dict(), optimizer_g=optim_g.state_dict(),
+                           optimizer_d=optim_d.state_dict(), updates=update, identity=identity,
+                           rng=torch.get_rng_state(), cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []))
+            atomic_write_json(args.output_root / 'losses' / f'{update:08d}.json', losses,
+                              overwrite=args.overwrite or args.resume)
+            print(json.dumps({'update': update, **losses}), flush=True)
+
 
 
 if __name__ == '__main__':
