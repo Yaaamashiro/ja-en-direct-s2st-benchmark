@@ -1,0 +1,7 @@
+# Colab runtime: original Python 3.10 dependency family, shared with Docker preparation.
+-r preparation.txt
+Cython==3.2.9
+torch==2.7.1
+torchaudio==2.7.1
+hydra-core==1.0.7
+omegaconf==2.0.6

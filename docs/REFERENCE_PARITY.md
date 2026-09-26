@@ -69,5 +69,5 @@ gradient paths, legacy loading, beam interface, dev immutability and checkpoint
 resume. A real two-process Gloo test verifies bitwise-identical resumed updates.
 Its inputs are synthetic feature tensors, not speech benchmark results.
 Linux Docker/frontend integration, CUDA/NCCL training, trained-vocoder speech,
-unforced real-data decoding and three-system WAV/ASR evaluation remain NOT_RUN
+unforced real-data decoding and four-system WAV/ASR evaluation remain NOT_RUN
 until corpus, compatible runtime and learned artifacts are supplied.

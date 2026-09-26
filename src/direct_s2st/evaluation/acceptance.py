@@ -6,7 +6,7 @@ import numpy as np
 import soundfile as sf
 from ..io import atomic_write_json, read_jsonl
 from ..manifests.reader import read_common_manifest
-from ..predictions import Prediction
+from ..predictions import Prediction, SYSTEMS
 from ..hashing import sha256_file
 
 
@@ -64,8 +64,8 @@ def verify_suite(common_root, run_roots, output_root, *, overwrite=False):
             from ..translatotron2.engine import load_checkpoint
             load_checkpoint(root / 'checkpoints/checkpoint_last.pt')
         reports.append(dict(system_id=next(iter(systems)), run_id=root.name, samples=len(rows), status='PASS'))
-    if {r['system_id'] for r in reports} != {'s2ut', 'translatotron2', 'cascade'} or len(reports) != 3:
-        raise ValueError('exactly three baseline systems required')
+    if {r['system_id'] for r in reports} != set(SYSTEMS) or len(reports) != len(SYSTEMS):
+        raise ValueError('exactly four baseline systems required: ' + ', '.join(SYSTEMS))
     if any(setting != settings[0] for setting in settings[1:]):
         raise ValueError('evaluation conditions differ')
     report = dict(status='PASS', scope='pipeline completeness, not quality or paper parity', runs=reports)

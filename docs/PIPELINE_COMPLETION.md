@@ -1,4 +1,4 @@
-# 実装範囲と3方式の実行手順
+# 実装範囲と4方式の実行手順
 
 ## 今回追加した実装
 
@@ -15,7 +15,7 @@
   有限かつ非ゼロの勾配を監査する実行wrapperを追加した。
 - TT2・S2UT・vocoder・Cascadeの失敗記録と再開、評価の入力内容照合。
   成功したサンプルを再利用する際にも出力hashを確認する。
-- 同一test splitの3方式を23段階で実行し、WAV・ASR結果・評価条件・checkpointを
+- 同一test splitの4方式を25段階で実行し、WAV・ASR結果・評価条件・checkpointを
   確認してから比較reportを生成する。単なる終了コード0をE2E成功としない。
 
 ## 環境が決まってから実行する
@@ -55,14 +55,14 @@ GPUを利用しない全パイプラインを保証するオプションでは�
 
 CPU回帰テストは **92 passed, 3 deselected**。TT2 forward/backward・optimizer更新・checkpoint保存と完全一致再開、
 固定fairseq HiFi-GAN生成器＋公式period識別器のoptimizer更新、duration教師、
-失敗再開・hash拒否・無音WAVの完了拒否・23段階計画を確認した。
+失敗再開・hash拒否・無音WAVの完了拒否・25段階計画を確認した。
 CPU Glooの実2プロセス学習とrank別再開の完全一致も確認した。
 GANのCPUテストはメモリを抑えるため1個のperiod識別器を使う。productionのMPD/MSD全体、
 CodeGeneratorの実音声学習、固定fairseq frontend、Linuxコンテナ統合は未実行である。
 テスト用合成テンソルや制御したEOS出力を実音声E2E成功と扱わない。
 
 このworkspaceには実行可能なDocker／対象corpus／学習済み重みが揃っていないため、
-3方式の実音声E2E成功、収束、音声明瞭度、BLEU結果は未確認である。
+4方式の実音声E2E成功、収束、音声明瞭度、BLEU結果は未確認である。
 2updatesは実行経路の確認用であり、TT2がEOSを出すことやvocoderの品質を保証しない。
 EOS未到達や出力上限超過は失敗として記録し、強制音素・無音・random出力で補わない。
 原論文との対応と数値未検証箇所は[REFERENCE_PARITY.md](REFERENCE_PARITY.md)に残す。
@@ -78,3 +78,12 @@ src/direct_s2st/vocoders/HIFIGAN_LICENSEに同梱している。
 学習レシピはsingle-sample segment、固定LR AdamW、mel weight45・duration weight1の
 benchmark実装であり、元の全training scheduleとの一致を主張しない。
 torch／torchaudio 2.7.1のpinは変更していない。weight_normの非推奨警告は互換性維持のため残す。
+
+## S2T→TTS / four-system extension
+
+The required final systems are `s2ut`, `translatotron2`, `cascade`, and `s2t_tts`.
+The new baseline uses pinned Whisper large-v3 translation and the existing QwenTTS,
+without changing the original turbo ASR → NLLB → TTS model settings.
+See [S2T→TTS implementation and verification](S2T_TTS.md) for commands, Colab,
+new files, dependency limitations, and unverified GPU/E2E items.
+Historical test counts below/above describe their original runs, not current validation.

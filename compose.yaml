@@ -49,6 +49,7 @@ services:
     deploy: *gpu-reservation
     command: ["s2ut", "extract-units", "--profile", "smoke", "--dry-run"]
 
+  # Shared runtime: docker compose run --rm cascade s2t-tts run --profile smoke --split test --dry-run
   cascade:
     image: ja-en-direct-s2st-benchmark-cascade:locked
     build:

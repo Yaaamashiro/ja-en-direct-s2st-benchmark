@@ -4,7 +4,7 @@ Date: 2026-09-13 (Asia/Tokyo). Scope: benchmark repository only.
 No corpus files were edited or regenerated. No trained weights, audio, features,
 predictions or large results were added to Git. No commit/push was performed.
 
-**Not complete as a three-system real-data benchmark.** The user clarified during
+**Not complete as a four-system real-data benchmark.** The user clarified during
 implementation that the execution environment is undecided and should be
 configurable. The `.env`/Docker-context smoke interface supports that request.
 The real-model execution criteria remain unverified, not waived or claimed PASS.
@@ -93,7 +93,7 @@ The real-model execution criteria remain unverified, not waived or claimed PASS.
 - Native experimental Translatotron 2 Conformer/linguistic LSTM/shared attention/
   duration-based autoregressive synthesizer, training and reference-free mel
   inference are implemented. See TRANSLATOTRON2.md for exact differences.
-- Configurable Docker drivers: original S2UT smoke and new 23-stage three-system
+- Configurable Docker drivers: original S2UT smoke and new 25-stage four-system
   suite with train-only vocoder fitting, resume and real-artifact acceptance.
   Both are plan-only by default; neither has run on a provisioned real-data host.
 - Cascade and evaluation model logic preserved; Cascade common input reader
@@ -206,7 +206,7 @@ resume now cover TT2, S2UT generation, vocoding, Cascade and evaluation.
 Cross-run latency parity remains a documented measurement limitation.
 
 Real-data per-stage loss/gradient checks and checkpoint resume, Docker builds,
-HuBERT parity, neural outputs, speaker-model downloads and all three real E2E
+HuBERT parity, neural outputs, speaker-model downloads and all four real E2E
 paths remain unverified. The latest user instruction makes the environment
 selectable; it does not turn these unexecuted checks into success.
 
@@ -257,7 +257,7 @@ README, DESIGN and reproduction instructions. No corpus modifications or push.
 
 - Implemented native vocoder fitting/checkpoint resume, shared per-sample journals,
   S2UT main/aux loss and gradient audit, TT2 attention width512/SpecAugment/batching/
-  selectable learning-rate schedule, 23-stage suite and real-artifact acceptance.
+  selectable learning-rate schedule, then-23-stage suite and real-artifact acceptance.
 - Vendored only official HiFi-GAN discriminators/losses at commit
   4769534d45265d52a904b850da5a622601885777, including MIT license.
 - New modules: vocoders/{train,discriminators}.py, journal.py,
@@ -267,12 +267,12 @@ README, DESIGN and reproduction instructions. No corpus modifications or push.
 - Full CPU result: 82 passed, 3 GPU tests deselected. One upstream weight_norm
   deprecation warning retained for pinned-state compatibility. No actual-speech
   result is inferred from synthetic tensor tests.
-- suite.py plan: PLAN_ONLY, 23 stages, ending in acceptance then comparison.
+- Historical suite.py plan: PLAN_ONLY, 23 stages, ending in acceptance then comparison.
   Vocoder trainer module --help succeeded; fairseq submodule remains pristine;
   git diff --check passed (only CRLF conversion warnings).
 - During verification, automatic command approval briefly hit a service usage
   limit; after the user requested resume, authorized execution succeeded.
-- All three real-data E2E criteria still remain NOT_RUN. See
+- All four real-data E2E criteria still remain NOT_RUN. See
   [complete workflow and limitations](PIPELINE_COMPLETION.md).
 
 ### Reference-component completion (2026-09-13)
@@ -288,8 +288,17 @@ README, DESIGN and reproduction instructions. No corpus modifications or push.
 - Full CPU regression: 92 passed, 3 GPU tests deselected, one pinned upstream
   weight_norm deprecation warning. This includes real two-process Gloo optimizer
   updates with bitwise-equivalent resumed state, using synthetic feature inputs.
-- Paper suite plan: PLAN_ONLY, 23 stages. Git diff check passed; fixed fairseq
+- Historical paper suite plan: PLAN_ONLY, 23 stages. Git diff check passed; fixed fairseq
   submodule pristine. No corpus edits, commit or push.
-- Real-data three-system E2E remains NOT_RUN. CUDA/NCCL and numerical parity
+- Real-data four-system E2E remains NOT_RUN. CUDA/NCCL and numerical parity
   with original-author results remain unverified, not inferred from CPU tests.
   See [reference mapping](REFERENCE_PARITY.md).
+
+## S2T→TTS / four-system extension
+
+The required final systems are `s2ut`, `translatotron2`, `cascade`, and `s2t_tts`.
+The new baseline uses pinned Whisper large-v3 translation and the existing QwenTTS,
+without changing the original turbo ASR → NLLB → TTS model settings.
+See [S2T→TTS implementation and verification](S2T_TTS.md) for commands, Colab,
+new files, dependency limitations, and unverified GPU/E2E items.
+Historical test counts below/above describe their original runs, not current validation.

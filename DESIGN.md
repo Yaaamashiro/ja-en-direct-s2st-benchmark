@@ -3,7 +3,7 @@
 ## Scope
 
 対象は Japanese speech → English speech の一方向のみである。同一の完成済み
-corpus manifest を使い、S2UT、Translatotron 2、Cascade S2ST を比較する。
+corpus manifest を使い、S2UT、Translatotron 2、ASR→MT→TTS Cascade、S2T→TTS Cascade を比較する。
 コーパス生成、逆方向翻訳、UnitY、streaming、複数話者、architecture 改良、
 300時間学習の自動開始は対象外とする。
 
@@ -26,9 +26,10 @@ Python、PyTorch、CUDA、Docker、G2P、評価器を immutable revision/version
 固定する。GPU OOM や device-side assert は process-fatal とし、sample 固有エラーは
 failed record として保持する。
 
-本番の前処理、学習、推論、評価はDocker Compose経由だけで実行する。`common`、
+標準の前処理、学習、推論、評価はDocker Compose経由で実行する。`common`、
 `fairseq`、`cascade`、`evaluation`を分離し、GPU処理には明示的なdevice reservationを
 設定する。`full`学習はDocker実行マーカーと実際のimage digestがない場合は拒否する。
+Colabは別途、固定Python 3.10環境と明示的な学習確認を使うnative実行経路を持つ。
 
 ## Phases
 
@@ -51,7 +52,7 @@ clipping、ASR成功率、失敗率、RTF と段階別 runtime を保存する�
 
 ## Completion criteria
 
-同じ日本語 test 音声を3方式へ入力し、英語音声と共通 prediction を得られること。
+同じ日本語 test 音声を4方式へ入力し、英語音声と共通 prediction を得られること。
 direct 2方式が train split で学習・checkpoint 再開でき、Cascade が同じ test を処理し、
 BLEU、BLASER、speaker similarity、RTF を同条件で比較できること。すべての設定、revision、
 dataset lock が記録され、test leakage がないこと。
@@ -113,3 +114,11 @@ generation batch wall timeのサンプル平均をS2UTのruntimeに保存する�
 純粋な1発話のモデル推論latencyとみなさない。Cascadeとの比較ではtiming_scopeを確認する。
 
 実行・未実行の境界と残課題は [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) に記載する。
+
+## S2T→TTS baseline
+
+`system_id=s2t_tts`。Whisper large-v3のJapanese→English translationを使い、
+既存QwenTTSを共有する。ASR→MT→TTSのturbo/transcribe/NLLBは変更しない。
+configにimmutable revision・language・taskを保存し、共通journalのidentityに含める。
+S2T出力は`s2t_en_text`、時間は`s2t_seconds`に記録する。
+同一common/testと評価configで4方式を検証する。Colabは固定Python 3.10のnative subprocess経路を持つ。

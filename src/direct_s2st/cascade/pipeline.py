@@ -28,13 +28,14 @@ def _fatal_accelerator_error(error: BaseException) -> bool:
     )
 
 
-def run_pipeline(
+def _run_text_pipeline(
     common_manifest: Path,
     output_root: Path,
     *,
     run_id: str,
-    asr: Callable[[Path], str],
-    mt: Callable[[str], str],
+    text_stages: list,
+    system_id: str,
+    strict: bool = False,
     tts: TTS,
     split: str = "test",
     shard_index: int = 0,
@@ -44,6 +45,8 @@ def run_pipeline(
     overwrite: bool = False,
     model_identity: dict | None = None,
 ) -> dict[str, Any]:
+    if num_shards < 1 or not 0 <= shard_index < num_shards or (limit is not None and limit < 1):
+        raise ValueError('invalid shard/limit')
     prediction_path = output_root / "predictions.jsonl"
     if prediction_path.exists() and not (resume or overwrite):
         raise ExistingOutputError(f"output already exists: {prediction_path}")
@@ -55,6 +58,9 @@ def run_pipeline(
     identity = dict(common=sha256_file(common_manifest), models=model_identity, run_id=run_id,
                     split=split, shard_index=shard_index, num_shards=num_shards, limit=limit,
                     source={r['pair_id']: sha256_file(Path(r['ja_audio'])) for r in common_rows})
+    if strict:
+        identity.update(system_id=system_id,
+                        reference={r['pair_id']: sha256_file(Path(r['en_audio'])) for r in common_rows})
     journal = Journal(prediction_path, identity, resume=resume, overwrite=overwrite)
     prior = journal.rows.copy()
     records: list[dict[str, Any]] = []
@@ -70,12 +76,14 @@ def run_pipeline(
         if old and old.get("status") == "success" and Path(old["output_audio"]).is_file() and old.get('output_sha256') == sha256_file(Path(old['output_audio'])):
             records.append(old)
             continue
+        if strict and old and old.get('status') == 'success':
+            raise ValueError(f'output SHA/missing audio on resume: {pair_id}; review or explicitly overwrite')
         output_audio = output_root / "audio" / f"{pair_id}.wav"
         if not output_audio.resolve().is_relative_to((output_root / 'audio').resolve()):
             raise ValueError('unsafe cascade pair ID')
         record: dict[str, Any] = {
             "pair_id": pair_id,
-            "system_id": "cascade",
+            "system_id": system_id,
             "run_id": run_id,
             "split": split,
             "source_audio": str(Path(row["ja_audio"]).resolve()),
@@ -86,19 +94,31 @@ def run_pipeline(
             "status": "failed",
             "error": None,
         }
+        if strict:
+            record.update(s2t_en_text=None, s2t_seconds=0.0, tts_seconds=0.0, output_sha256=None)
         total_started = perf_counter()
         fatal_error = None
         try:
+            text = Path(row["ja_audio"])
+            for field, timing, component in text_stages:
+                started = perf_counter()
+                try:
+                    text = component(text)
+                    record[field] = text
+                finally:
+                    record[timing] = perf_counter() - started
+            if strict and (not isinstance(text, str) or not text.strip()):
+                raise ValueError('empty translated text')
             started = perf_counter()
-            record["asr_ja_text"] = asr(Path(row["ja_audio"]))
-            record["asr_seconds"] = perf_counter() - started
-            started = perf_counter()
-            record["mt_en_text"] = mt(record["asr_ja_text"])
-            record["mt_seconds"] = perf_counter() - started
-            started = perf_counter()
-            tts(record["mt_en_text"], output_audio)
+            tts(text, output_audio)
             record["tts_seconds"] = perf_counter() - started
             record["output_duration"] = _duration(output_audio)
+            if strict:
+                import numpy as np
+                import soundfile as sf
+                waveform, _ = sf.read(output_audio, always_2d=True)
+                if waveform.shape[1] != 1 or not waveform.size or not np.isfinite(waveform).all() or not np.any(waveform):
+                    raise ValueError('invalid/silent generated WAV')
             record["status"] = "success"
             record['output_sha256'] = sha256_file(output_audio)
         except Exception as error:
@@ -122,6 +142,13 @@ def run_pipeline(
         "successes": sum(record["status"] == "success" for record in records),
         "failures": sum(record["status"] == "failed" for record in records),
     }
+
+
+def run_pipeline(common_manifest, output_root, *, run_id, asr, mt, tts, **kwargs):
+    """Existing ASR→MT→TTS contract, including original journal identity."""
+    return _run_text_pipeline(common_manifest, output_root, run_id=run_id, tts=tts,
+        text_stages=[('asr_ja_text', 'asr_seconds', asr), ('mt_en_text', 'mt_seconds', mt)],
+        system_id='cascade', **kwargs)
 
 
 def components_from_config(config: dict[str, Any]) -> tuple[WhisperASR, NllbTranslator, QwenTTS]:

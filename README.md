@@ -9,11 +9,12 @@
 | --- | --- |
 | S2UT | 日本語音声 → 英語離散unit → unit vocoder |
 | Translatotron 2 | 日本語音声 → 音素・内部状態 → mel → mel vocoder |
-| Cascade | 日本語ASR → 日英MT → 英語TTS |
+| ASR→MT→TTS Cascade | Whisper large-v3-turbo → NLLB-200 distilled 600M → Qwen3-TTS |
+| S2T→TTS Cascade | Whisper large-v3（translate）→ Qwen3-TTS |
 
 Translatotron 2はnative PyTorchによる独立実装です。原著者の実装や学習済み重みではなく、
 canonical-speaker出力を対象とし、話者性の保持は行いません。
-実音声での3方式のE2E成功・翻訳品質・原論文の数値再現は未確認です。
+実音声での4方式のE2E成功・翻訳品質・原論文の数値再現は未確認です。
 構成と適用範囲は[モデルの説明](docs/TRANSLATOTRON2.md)を参照してください。
 
 ## 必要なもの
@@ -29,11 +30,17 @@ canonical-speaker出力を対象とし、話者性の保持は行いません。
 
 ## Google Colabで使う
 
-[Colab用ノートブック](notebooks/colab_training.ipynb)をColabへアップロードし、GPUランタイムで実行してください。
+用途別のノートブックをColabへアップロードし、GPUランタイムで実行してください。
+
+- [テスト用](notebooks/colab_smoke.ipynb)：各split 5件・2更新。まず動作確認します。
+- [通常用](notebooks/colab_training.ipynb)：全件データで学習・4方式比較。長期学習は明示確認が必要です。
+
+最初の設定フォームを編集して、番号順に実行します。テストと通常実験は保存先も分離します。
 Dockerなしで環境構築・前処理・TT2／S2UT／vocoder学習を実行できます。
-Colabの学習用Pythonは3.13.7です。旧版からは新しいランタイム・実験保存先で開始してください。
+Colabの学習用Pythonは3.10.18です。旧版からは新しいランタイム・実験保存先で開始してください。
 学習を短い区間に分けてGoogle Driveへcheckpointを検証付きで保存し、切断後は最後の保存点から再開します。
-初期設定は2更新です。時間予算、保存頻度、本学習への切り替え、注意事項は[Colab手順](docs/COLAB.md)を参照してください。
+学習対象をtt2 / s2ut / unit / melから選び、各対象の学習後に4方式比較をONにします。
+時間予算、保存頻度、再開、注意事項は[Colab手順](docs/COLAB.md)を参照してください。
 80GB GPU用の調整開始値はノートブックの `PERFORMANCE='gpu80'` で選択できます。
 バッチ量・CPU並列読み込み・先読み・保存間隔を指定できますが、実機での速度・最大メモリ使用量は未検証です。
 
@@ -77,7 +84,7 @@ docker compose --env-file .env build cascade evaluation
 
 ## 小規模に実行する
 
-まず3方式の実行計画を確認します。このコマンドだけではモデル処理は開始しません。
+まず4方式の実行計画を確認します。このコマンドだけではモデル処理は開始しません。
 
 ```sh
 python scripts/smoke/suite.py --env-file .env --name benchmark-smoke --limit 5 --max-updates 2
@@ -128,7 +135,10 @@ HuBERT unit列のfairseq経路との一致確認を含む手順は[再現手順]
 
 - [設計とデータの不変条件](DESIGN.md)
 - [実行環境・artifactの準備](docs/REPRODUCTION.md)
-- [3方式の実行・再開・完了判定](docs/PIPELINE_COMPLETION.md)
+- [4方式の実行・再開・完了判定](docs/PIPELINE_COMPLETION.md)
 - [Translatotron 2のモデル構成](docs/TRANSLATOTRON2.md)
 - [reference preset・分散学習・原論文との対応](docs/REFERENCE_PARITY.md)
 - [実装状況と検証記録](docs/IMPLEMENTATION_STATUS.md)
+
+S2T→TTSの実行・resume・固定revisionは[実行ガイド](docs/S2T_TTS.md)を参照してください。
+Colabでも同一モデル条件で4方式を実行できます。

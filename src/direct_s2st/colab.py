@@ -165,9 +165,11 @@ def checkpoint_updates(path, kind):
 
 
 def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
-                resume=False, confirm_training=False, runner=subprocess.run, clock=time.monotonic,
+                resume=False, confirm_training=False, restore_only=False, runner=subprocess.run, clock=time.monotonic,
                 inspect_checkpoint=checkpoint_updates):
     work, backup = Path(work).resolve(), Path(backup).resolve()
+    if restore_only and not resume:
+        raise ValueError('restore-only requires resume')
     if min(total, chunk, seconds) <= 0 or not math.isfinite(seconds):
         raise ValueError('total, chunk and seconds must be positive')
     if total > 10 and not confirm_training:
@@ -199,6 +201,8 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
         completed = inspect_checkpoint(checkpoint, config['kind'])
         if completed != previous[1]['updates']:
             raise ValueError('snapshot update count mismatch')
+    if restore_only:
+        return dict(status='RESTORED', durable_updates=completed)
     started = clock()
     while completed < total:
         remaining = seconds - (clock() - started)
@@ -236,11 +240,13 @@ def main():
     parser.add_argument('--chunk-updates', type=int, default=1)
     parser.add_argument('--session-seconds', type=float, default=3600)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--restore-only', action='store_true', help='Verify and restore a Drive snapshot without training')
     parser.add_argument('--confirm-training', action='store_true')
     args = parser.parse_args()
     result = run_session(json.loads(args.config.read_text(encoding='utf-8')), work=args.work_root,
         backup=args.backup_root, total=args.total_updates, chunk=args.chunk_updates,
-        seconds=args.session_seconds, resume=args.resume, confirm_training=args.confirm_training)
+        seconds=args.session_seconds, resume=args.resume, confirm_training=args.confirm_training,
+        restore_only=args.restore_only)
     print(json.dumps(result), flush=True)
 
 
