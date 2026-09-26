@@ -47,7 +47,7 @@ def _accepted_row(root: Path, pair_id: str, split: str) -> dict[str, object]:
     }
 
 
-def test_import_preserves_splits_and_creates_lock(tmp_path: Path) -> None:
+def test_import_preserves_splits_and_creates_lock(tmp_path: Path, capsys) -> None:
     corpus = tmp_path / "corpus"
     manifest = corpus / "production" / "manifests" / "releases" / "accepted.jsonl"
     manifest.parent.mkdir(parents=True)
@@ -62,6 +62,14 @@ def test_import_preserves_splits_and_creates_lock(tmp_path: Path) -> None:
     assert lock["source_manifest_sha256"]
     assert validate_manifest_directory(output)["total_pairs"] == 3
     assert '"split": "test"' in (output / "test.jsonl").read_text(encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in output.iterdir()}
+    import_corpus(manifest, corpus_root=corpus, output_root=output, resume=True)
+    assert before == {p.name: p.read_bytes() for p in output.iterdir()}
+    logs = capsys.readouterr()
+    assert logs.out == ''
+    assert 'corpus: resolve audio paths status=completed checked=3/?' in logs.err
+    assert 'corpus: validate WAV and SHA256 status=completed checked=3/3' in logs.err
+    assert 'corpus: write train status=completed checked=1/1' in logs.err
 
 
 def test_duplicate_pair_id_across_splits_is_rejected(tmp_path: Path) -> None:

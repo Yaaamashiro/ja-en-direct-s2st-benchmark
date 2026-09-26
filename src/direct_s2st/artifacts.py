@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from .progress import activity, operation
 import os
 import urllib.request
 import uuid
@@ -11,6 +12,7 @@ from .hashing import sha256_file
 from .io import ExistingOutputError
 
 
+@operation('direct_s2st/artifacts: download_artifact')
 def download_artifact(
     url: str,
     destination: Path,
@@ -35,10 +37,14 @@ def download_artifact(
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     digest = hashlib.sha256()
     try:
-        with urllib.request.urlopen(url) as response, temporary.open("xb") as handle:
+        with activity(f'download: {destination.name}') as progress, urllib.request.urlopen(url) as response, temporary.open("xb") as handle:
+            received = 0
             while chunk := response.read(1024 * 1024):
                 handle.write(chunk)
                 digest.update(chunk)
+                received += len(chunk)
+                if progress:
+                    progress.activity = f'download: {destination.name} bytes={received}'
             handle.flush()
             os.fsync(handle.fileno())
         actual = digest.hexdigest()

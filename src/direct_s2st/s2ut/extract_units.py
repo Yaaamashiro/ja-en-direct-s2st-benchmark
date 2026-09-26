@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from ..progress import operation, track
 from ..manifests.reader import read_common_manifest
 from typing import Any, Protocol
 
@@ -105,6 +106,7 @@ def assign_kmeans_units(features: Any, centers: Any) -> Any:
     return distances.argmin(axis=1)
 
 
+@operation('s2ut/extract_units: extract_units')
 def extract_units(
     common_root: Path,
     output_root: Path,
@@ -128,7 +130,7 @@ def extract_units(
     processed = 0
     for current_split in splits:
         split_processed = 0
-        for row in read_common_manifest(common_root / f"{current_split}.jsonl"):
+        for row in track(read_common_manifest(common_root / f"{current_split}.jsonl"), f'units: {current_split} (extract/reuse)'):
             pair_id = str(row["pair_id"])
             if stable_shard(pair_id, num_shards) != shard_index:
                 continue
@@ -181,6 +183,7 @@ def extract_units(
     return {"processed": processed, "manifest": str(manifest), **lock}
 
 
+@operation('s2ut/extract_units: extractor_from_config')
 def extractor_from_config(config: dict[str, Any], cache_root: Path) -> HubertKMeansExtractor:
     hubert = config["hubert"]
     kmeans = config["kmeans"]

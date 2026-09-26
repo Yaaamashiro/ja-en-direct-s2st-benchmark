@@ -1,5 +1,6 @@
 """Train fixed-fairseq HiFi-GAN generators with official MPD/MSD losses."""
 import argparse
+from ..progress import operation, track
 import json
 import math
 import os
@@ -148,6 +149,7 @@ def save_state(path, payload):
         Path(temporary).unlink(missing_ok=True)
 
 
+@operation('vocoders/train: main')
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kind', choices=['unit', 'mel'], required=True)
@@ -194,7 +196,7 @@ def main():
     if args.batch_size != 1:
         identity['batch_size'] = args.batch_size
     all_units = {}
-    for row in rows:
+    for row in track(rows, 'vocoder: verify training inputs'):
         audio_hash = sha256_file(Path(row['en_audio']))
         if row.get('en_audio_sha256') and row['en_audio_sha256'] != audio_hash:
             raise ValueError('target audio checksum mismatch')
@@ -244,7 +246,7 @@ def main():
         return load_wave(row, spec['sample_rate'], args.kind), all_units.get(row['pair_id'])
     indices = range(start * args.batch_size, args.max_updates * args.batch_size)
     with ordered_samples(load, indices, args.num_workers, args.prefetch_factor) as loaded:
-        for update in range(start + 1, args.max_updates + 1):
+        for update in track(range(start + 1, args.max_updates + 1), 'vocoder: train updates'):
             samples = [next(loaded) for _ in range(args.batch_size)]
             conditioning, real = segment_batch(samples, spec=spec,
                 hop=math.prod(config['upsample_rates']), segment_frames=args.segment_frames,

@@ -1,5 +1,6 @@
 """Versioned character supervision and strict pinned-fairseq TSV validation."""
 from collections import Counter
+from ..progress import operation, track
 import csv
 import math
 from pathlib import Path
@@ -42,6 +43,7 @@ def validate_task_config(task: str, cfg: dict) -> None:
         raise ValueError(f"positive finite loss_weight required for {task}")
 
 
+@operation('s2ut/multitask: prepare_labels')
 def prepare_labels(rows_by_split: dict, output_root: Path, *, settings: dict | None = None,
                    resume: bool = False, overwrite: bool = False) -> dict:
     settings = load_settings() if settings is None else settings
@@ -97,6 +99,7 @@ def read_tsv(path: Path, columns: tuple[str, ...]) -> dict[str, dict]:
     return rows
 
 
+@operation('s2ut/multitask: validate_prepared')
 def validate_prepared(root: Path, *, clusters: int = 100) -> dict:
     from .reduce_units import validate_units
     cfg = yaml.safe_load((root / "config_multitask.yaml").read_text(encoding="utf-8"))
@@ -110,7 +113,7 @@ def validate_prepared(root: Path, *, clusters: int = 100) -> dict:
         if not main or seen.intersection(main):
             raise ValueError(f"empty split or duplicate pair IDs across splits: {split}")
         seen.update(main)
-        for row in main.values():
+        for row in track(main.values(), f's2ut: validate {split}'):
             units = [int(x) for x in row["tgt_audio"].split()]
             validate_units(units, clusters=clusters)
             if len(units) != int(row["tgt_n_frames"]) or int(row["src_n_frames"]) <= 0:

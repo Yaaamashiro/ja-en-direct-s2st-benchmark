@@ -1,5 +1,6 @@
 """Real-artifact completion gate; exit codes alone never establish E2E."""
 import json
+from ..progress import operation, track
 import math
 from pathlib import Path
 import numpy as np
@@ -10,13 +11,14 @@ from ..predictions import Prediction, SYSTEMS
 from ..hashing import sha256_file
 
 
+@operation('evaluation/acceptance: verify_suite')
 def verify_suite(common_root, run_roots, output_root, *, overwrite=False):
     common = list(read_common_manifest(Path(common_root) / 'test.jsonl'))
     expected = {r['pair_id']: r for r in common}
     if not common or len(common) != len(expected):
         raise ValueError('empty/duplicate common test IDs')
     reports, settings = [], []
-    for root in map(Path, run_roots):
+    for root in track(list(map(Path, run_roots)), 'acceptance: verify runs'):
         rows = list(read_jsonl(root / 'predictions/predictions.jsonl'))
         evaluated = list(read_jsonl(root / 'metrics/per_sample.jsonl'))
         metrics = json.loads((root / 'metrics/metrics.json').read_text(encoding='utf-8'))

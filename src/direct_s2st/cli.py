@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from .progress import operation, track
 import json
 import os
 from collections.abc import Callable
@@ -108,6 +109,7 @@ def _default_config(args: argparse.Namespace) -> Path | None:
     return None
 
 
+@operation('direct_s2st/cli: _run_corpus')
 def _run_corpus(args: argparse.Namespace) -> dict[str, Any]:
     from .manifests.import_corpus import import_corpus
     from .manifests.validate import validate_manifest_directory
@@ -130,6 +132,7 @@ def _run_corpus(args: argparse.Namespace) -> dict[str, Any]:
     return validate_manifest_directory(common_root)
 
 
+@operation('direct_s2st/cli: _run_s2ut')
 def _run_s2ut(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     from .artifacts import download_artifact
     from .s2ut.extract_units import extract_units, extractor_from_config
@@ -207,6 +210,7 @@ def _run_s2ut(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
     raise NotImplementedError(f"unsupported s2ut action: {args.action}")
 
 
+@operation('direct_s2st/cli: _run_translatotron2')
 def _run_translatotron2(
     args: argparse.Namespace, config: dict[str, Any]
 ) -> dict[str, Any]:
@@ -257,7 +261,7 @@ def _run_translatotron2(
         if len(ids) != len(set(ids)):
             raise ValueError('duplicate IDs across splits')
         for dataset in datasets.values():
-            for index in range(len(dataset)):
+            for index in track(range(len(dataset)), 'tt2: validate prepared features'):
                 dataset[index]
         return {'splits': {split: len(dataset) for split, dataset in datasets.items()},
                 'fingerprint': fingerprint(root)}
@@ -310,6 +314,7 @@ def _run_direct_model(
     )
 
 
+@operation('direct_s2st/cli: _run_cascade')
 def _run_cascade(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     from .cascade.pipeline import components_from_config, run_pipeline
 
@@ -345,6 +350,7 @@ def _run_cascade(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, 
     )
 
 
+@operation('direct_s2st/cli: _run_s2t_tts')
 def _run_s2t_tts(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     from .s2t_tts.pipeline import components_from_config, run_pipeline
     from .s2t_tts.s2t import validate_s2t_config
@@ -380,6 +386,7 @@ def _run_s2t_tts(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, 
             torch.cuda.empty_cache()
 
 
+@operation('direct_s2st/cli: _run_evaluate')
 def _run_evaluate(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     from .evaluation.aggregate import aggregate_runs
     from .evaluation.run import evaluate_predictions
@@ -447,6 +454,7 @@ def _run_evaluate(args: argparse.Namespace, config: dict[str, Any]) -> dict[str,
     )
 
 
+@operation('direct_s2st/cli: _run_vocoder')
 def _run_vocoder(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     from .vocoders.runner import run_vocoder_command
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Protocol
+from ..progress import operation
 
 
 class BlaserScorer(Protocol):
@@ -18,6 +19,7 @@ class UnavailableBlaser:
 class SonarBlaser:
     """BLASER 2.0 QE over language-specific SONAR speech embeddings."""
 
+    @operation('model: load SONAR/BLASER')
     def __init__(
         self,
         *,

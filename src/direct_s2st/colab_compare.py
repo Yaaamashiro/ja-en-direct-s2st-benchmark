@@ -1,5 +1,6 @@
 """Native four-system inference/evaluation plans; subprocesses release GPU memory."""
 import json
+from .progress import operation
 from pathlib import Path
 import os
 import shutil
@@ -13,6 +14,7 @@ from .predictions import SYSTEMS
 from .runs import validate_run_id
 
 
+@operation('direct_s2st/colab_compare: stage_file')
 def stage_file(source, target):
     """Copy a trusted restored artifact to Drive without replacing differing data."""
     source, target = Path(source), Path(target)

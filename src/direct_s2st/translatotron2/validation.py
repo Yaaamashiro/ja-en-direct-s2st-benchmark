@@ -1,5 +1,6 @@
 """Teacher-forced dev objectives only; never substitutes for free-running E2E."""
 import torch
+from ..progress import track
 from .batching import collate
 
 
@@ -12,7 +13,7 @@ def validate(model, dataset, device, limit=None):
     counts = [0, 0, 0]
     try:
         model.eval()
-        for index in range(min(len(dataset), limit) if limit else len(dataset)):
+        for index in track(range(min(len(dataset), limit) if limit else len(dataset)), 'tt2: dev validation'):
             sample = {key: value.to(device) for key, value in collate([dataset[index]]).items()}
             output = model(**sample)
             sizes = [int(sample['target_lengths'].sum()), int(sample['phone_lengths'].sum()), sample['source'].size(0)]

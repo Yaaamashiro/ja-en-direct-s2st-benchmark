@@ -88,11 +88,11 @@ def test_full_training_requires_image_digest(
         )
 
 
-def test_external_run_records_environment_and_status(tmp_path: Path) -> None:
+def test_external_run_records_environment_and_status(tmp_path: Path, capsys) -> None:
     data = tmp_path / "data-lock.json"
     _lock(data)
     run = tmp_path / "run"
-    code = "from pathlib import Path; Path(r'%s').write_text('ok')" % (run / "done.txt")
+    code = "from pathlib import Path; print('child progress', flush=True); Path(r'%s').write_text('ok')" % (run / "done.txt")
     result = run_external_experiment(
         tmp_path,
         run,
@@ -104,6 +104,23 @@ def test_external_run_records_environment_and_status(tmp_path: Path) -> None:
     assert result["status"] == "completed"
     assert json.loads((run / "status.json").read_text())["returncode"] == 0
     assert (run / "environment.json").is_file()
+    assert 'child progress' in (run / 'logs/process.log').read_text()
+    logs = capsys.readouterr()
+    assert 'child progress' in logs.err
+    assert logs.out == ''
+
+
+def test_failed_external_run_still_streams_and_records_status(tmp_path, capsys):
+    data = tmp_path / 'data-lock.json'
+    _lock(data)
+    run = tmp_path / 'run'
+    with pytest.raises(RuntimeError, match='exit code 7'):
+        run_external_experiment(tmp_path, run,
+            command=[sys.executable, '-c', "print('child failure'); raise SystemExit(7)"],
+            config={}, dataset_lock=data, seed=1)
+    assert json.loads((run / 'status.json').read_text())['returncode'] == 7
+    assert 'child failure' in (run / 'logs/process.log').read_text()
+    assert 'child failure' in capsys.readouterr().err
 
 
 def test_prediction_schema_retains_failed_samples(tmp_path: Path) -> None:

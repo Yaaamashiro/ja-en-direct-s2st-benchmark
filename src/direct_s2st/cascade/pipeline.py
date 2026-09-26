@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import wave
+from ..progress import operation, track
 from collections.abc import Callable
 from pathlib import Path
 from ..manifests.reader import read_common_manifest
@@ -28,6 +29,7 @@ def _fatal_accelerator_error(error: BaseException) -> bool:
     )
 
 
+@operation('cascade/pipeline: _run_text_pipeline')
 def _run_text_pipeline(
     common_manifest: Path,
     output_root: Path,
@@ -65,7 +67,7 @@ def _run_text_pipeline(
     prior = journal.rows.copy()
     records: list[dict[str, Any]] = []
     selected = 0
-    for row in common_rows:
+    for row in track(common_rows, f'{system_id}: inference (generate/reuse)'):
         pair_id = str(row["pair_id"])
         if stable_shard(pair_id, num_shards) != shard_index:
             continue
@@ -151,6 +153,7 @@ def run_pipeline(common_manifest, output_root, *, run_id, asr, mt, tts, **kwargs
         system_id='cascade', **kwargs)
 
 
+@operation('cascade/pipeline: components_from_config')
 def components_from_config(config: dict[str, Any]) -> tuple[WhisperASR, NllbTranslator, QwenTTS]:
     from .asr import WhisperASR
     from .mt import NllbTranslator

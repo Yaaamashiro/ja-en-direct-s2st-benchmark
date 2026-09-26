@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from ..progress import operation, track
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from .bleu import corpus_bleu, normalize_english, sentence_bleu
 from .runtime import aggregate_runtime, audio_quality
 
 
+@operation('evaluation/run: evaluate_predictions')
 def evaluate_predictions(
     predictions_path: Path,
     output_root: Path,
@@ -32,7 +34,7 @@ def evaluate_predictions(
     identity = {'predictions': sha256_file(predictions_path), 'evaluation': evaluation_identity,
                 'speaker_enabled': speaker_similarity is not None, 'blaser_enabled': blaser is not None,
                 'audio': {}}
-    for raw in predictions:
+    for raw in track(predictions, 'evaluation: verify input hashes'):
         Prediction.from_dict(raw)
         for field in ('output_audio', 'source_audio', 'reference_audio'):
             if raw.get(field) and Path(raw[field]).is_file():
@@ -42,7 +44,7 @@ def evaluate_predictions(
     results: list[dict[str, Any]] = []
     hypotheses: list[str] = []
     references: list[str] = []
-    for raw in predictions:
+    for raw in track(predictions, 'evaluation: score (compute/reuse)'):
         prediction = Prediction.from_dict(raw)
         old = prior.get(prediction.pair_id)
         if old and old.get("evaluation_status") == "success":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from ..progress import operation, track
 import tempfile
 import wave
 import zipfile
@@ -110,6 +111,7 @@ def _extract_logmel_official(
     )
 
 
+@operation('translatotron2/prepare_fairseq: _write_feature_zip')
 def _write_feature_zip(feature_root: Path, zip_path: Path) -> None:
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -119,7 +121,7 @@ def _write_feature_zip(feature_root: Path, zip_path: Path) -> None:
     temporary = Path(temporary_name)
     try:
         with zipfile.ZipFile(temporary, "w", zipfile.ZIP_STORED) as archive:
-            for path in sorted(feature_root.glob("*.npy")):
+            for path in track(sorted(feature_root.glob("*.npy")), 'mel: write ZIP'):
                 archive.write(path, arcname=path.name)
         os.replace(temporary, zip_path)
     except BaseException:
@@ -127,6 +129,7 @@ def _write_feature_zip(feature_root: Path, zip_path: Path) -> None:
         raise
 
 
+@operation('translatotron2/prepare_fairseq: _zip_manifest')
 def _zip_manifest(zip_path: Path) -> tuple[dict[str, str], dict[str, int]]:
     try:
         import io
@@ -137,7 +140,7 @@ def _zip_manifest(zip_path: Path) -> tuple[dict[str, str], dict[str, int]]:
     paths: dict[str, str] = {}
     lengths: dict[str, int] = {}
     with zipfile.ZipFile(zip_path, "r") as archive, zip_path.open("rb") as raw:
-        for info in archive.infolist():
+        for info in track(archive.infolist(), 'mel: validate ZIP'):
             sample_id = Path(info.filename).stem
             if sample_id in paths:
                 raise ValueError(f"duplicate Mel feature in ZIP: {sample_id}")
@@ -157,6 +160,7 @@ def _zip_manifest(zip_path: Path) -> tuple[dict[str, str], dict[str, int]]:
     return paths, lengths
 
 
+@operation('translatotron2/prepare_fairseq: prepare_fairseq')
 def prepare_fairseq(
     common_root: Path,
     phoneme_root: Path,
@@ -192,7 +196,7 @@ def prepare_fairseq(
     target_audio: dict[str, Path] = {}
     for split in ("train", "dev", "test"):
         rows_by_split[split] = []
-        for row in read_common_manifest(common_root / f"{split}.jsonl"):
+        for row in track(read_common_manifest(common_root / f"{split}.jsonl"), f'mel: read {split}'):
             pair_id = str(row["pair_id"])
             sequence = phonemes[split].get(pair_id)
             if sequence is None:
@@ -223,7 +227,7 @@ def prepare_fairseq(
             dir=output_root, prefix=f".{feature_name}."
         ) as temporary_name:
             feature_root = Path(temporary_name)
-            for pair_id, audio_path in sorted(target_audio.items()):
+            for pair_id, audio_path in track(sorted(target_audio.items()), 'mel: extract features'):
                 extractor(audio_path, feature_root / f"{pair_id}.npy", settings)
             _write_feature_zip(feature_root, zip_path)
 

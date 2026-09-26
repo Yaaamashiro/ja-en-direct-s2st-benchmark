@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from ..progress import operation
 import io
 import json
 from pathlib import Path
@@ -21,6 +22,7 @@ FIELDS = (
 )
 
 
+@operation('evaluation/aggregate: aggregate_runs')
 def aggregate_runs(
     run_roots: list[Path],
     output_root: Path,

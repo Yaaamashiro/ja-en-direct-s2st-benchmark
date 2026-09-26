@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from .progress import operation
 import os
 import platform
 import re
@@ -113,6 +114,7 @@ def redact_command(command: list[str]) -> list[str]:
     return redacted
 
 
+@operation('direct_s2st/runs: run_external_experiment')
 def run_external_experiment(
     repository_root: Path,
     run_root: Path,
@@ -159,15 +161,26 @@ def run_external_experiment(
     atomic_write_json(status_path, {"status": "running"}, overwrite=True)
     log_path = run_root / "logs" / "process.log"
     with log_path.open("a" if resume else "w", encoding="utf-8") as log:
-        completed = subprocess.run(
+        with subprocess.Popen(
             command,
             cwd=repository_root,
-            stdout=log,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            check=False,
-        )
-    result = {"status": "completed" if completed.returncode == 0 else "failed", "returncode": completed.returncode}
+            text=True, encoding='utf-8', errors='replace',
+            env={**os.environ, 'PYTHONUNBUFFERED': '1'},
+        ) as process:
+            try:
+                for line in process.stdout:
+                    log.write(line)
+                    log.flush()
+                    print(line, end='', file=sys.stderr, flush=True)
+                returncode = process.wait()
+            except BaseException:
+                process.terminate()
+                process.wait()
+                raise
+    result = {"status": "completed" if returncode == 0 else "failed", "returncode": returncode}
     atomic_write_json(status_path, result, overwrite=True)
-    if completed.returncode:
-        raise RuntimeError(f"experiment command failed with exit code {completed.returncode}")
+    if returncode:
+        raise RuntimeError(f"experiment command failed with exit code {returncode}")
     return result

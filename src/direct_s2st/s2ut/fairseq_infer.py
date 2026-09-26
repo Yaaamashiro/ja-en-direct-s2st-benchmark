@@ -1,5 +1,6 @@
 """Run pinned fairseq generation and preserve numeric dataset ID alignment."""
 import argparse
+from ..progress import operation, track
 import subprocess
 import sys
 import time
@@ -28,6 +29,7 @@ def parse_generated(path: Path, ids: list[str]) -> dict[str, list[int]]:
     return result
 
 
+@operation('s2ut/fairseq_infer: main')
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, required=True)
@@ -90,7 +92,7 @@ def main() -> None:
                 units=validate_units([int(x) for x in fields[2].split()], clusters=100))
         except ValueError as error:
             records[ids[index]] = dict(status='failed', error=str(error), units=None)
-    for pair_id in ids:
+    for pair_id in track(ids, 's2ut: write predictions'):
         row = common[pair_id]
         journal.record({"pair_id": pair_id, "system_id": "s2ut", "run_id": args.run_root.name,
                             "source_audio": row["ja_audio"], "reference_audio": row["en_audio"],

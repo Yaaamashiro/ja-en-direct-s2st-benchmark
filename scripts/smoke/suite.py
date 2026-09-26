@@ -15,6 +15,7 @@ from direct_s2st.io import atomic_write_json, atomic_write_text
 from direct_s2st.journal import digest
 from direct_s2st.runs import validate_run_id
 from direct_s2st.hashing import sha256_file
+from direct_s2st.progress import operation, track
 
 
 def build_suite(name, env_file, *, limit=5, updates=2, docker_context=None, device='cuda', vocoder_mode='train',
@@ -101,6 +102,7 @@ def build_suite(name, env_file, *, limit=5, updates=2, docker_context=None, devi
     return configs, stages
 
 
+@operation('smoke: execute suite')
 def execute(configs, stages, root, *, resume=False, runner=subprocess.run):
     root = Path(root)
     report = root / 'suite-execution.json'
@@ -120,7 +122,7 @@ def execute(configs, stages, root, *, resume=False, runner=subprocess.run):
     def persist(status):
         atomic_write_json(report, dict(identity=identity, status=status, stages=stages), overwrite=report.exists())
     persist('RUNNING')
-    for stage in stages:
+    for stage in track(stages, 'smoke: stages (execute/reuse)'):
         if stage['status'] == 'PASS':
             continue
         retry = stage['status'] in ('FAIL', 'RUNNING')

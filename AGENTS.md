@@ -5,6 +5,7 @@
 - Keep model IDs and immutable revisions together. Reject configurations that omit a revision.
 - Default to the `smoke` profile. Never start `full` training implicitly.
 - Keep long-running operations resumable and use atomic writes for manifests and state.
+- Long-running operations must use `direct_s2st.progress` for flushed start/end and periodic progress logs, including resume/validation, model loading, and backup I/O. Track completed loop items where possible; never present a heartbeat as proof of advancement. Keep CLI result JSON on stdout and progress on stderr.
 - Do not overwrite an existing artifact unless the caller explicitly passes `--overwrite`.
 - Use only the train split for training and vocoder fitting.
 - Keep GPU tests behind the `gpu` pytest marker.

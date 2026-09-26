@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from ..progress import operation, track
 import subprocess
 import unicodedata
 from collections import Counter
@@ -159,6 +160,7 @@ def _resolve_fixed_vocabulary(
     return vocabulary
 
 
+@operation('translatotron2/phonemize: phonemize_manifests')
 def phonemize_manifests(
     common_root: Path,
     output_root: Path,
@@ -190,7 +192,7 @@ def phonemize_manifests(
     for current_split in splits:
         lines: list[str] = []
         split_processed = 0
-        for row in read_common_manifest(common_root / f"{current_split}.jsonl"):
+        for row in track(read_common_manifest(common_root / f"{current_split}.jsonl"), f'phonemize: {current_split} (generate/reuse)'):
             pair_id = str(row["pair_id"])
             if stable_shard(pair_id, num_shards) != shard_index:
                 continue

@@ -1,5 +1,6 @@
 """Run the pinned fairseq trainer with loss/gradient evidence; no model changes."""
 import os
+from ..progress import operation
 from pathlib import Path
 import sys
 import torch
@@ -43,6 +44,7 @@ class TrainingAudit:
         return {'status': 'PASS', 'losses': self.losses, 'max_abs_gradient_by_group': self.gradients}
 
 
+@operation('s2ut/fairseq_train: main')
 def main():
     from fairseq.criterions.speech_to_speech_criterion import SpeechToUnitMultitaskTaskCriterion as Criterion
     from fairseq_cli.train import cli_main

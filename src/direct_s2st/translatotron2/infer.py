@@ -1,5 +1,6 @@
 """Reference-free native TT2 inference; outputs mels, never fabricated WAVs."""
 import argparse
+from ..progress import operation, track
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ from .data import read_table, source_features
 from .engine import load_checkpoint
 
 
+@operation('translatotron2/infer: main')
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-root', type=Path, required=True)
@@ -63,7 +65,7 @@ def main():
                     beam_size=args.beam_size, length_penalty=args.length_penalty)
     journal = Journal(args.predictions, identity, resume=args.resume, overwrite=args.overwrite)
     feature_root.mkdir(parents=True, exist_ok=True)
-    for index, row in enumerate(common):
+    for index, row in enumerate(track(common, 'tt2: inference (generate/reuse)')):
         previous = journal.rows.get(row['pair_id'])
         if previous and previous.get('status') == 'success':
             path = Path(previous['mel_path'])

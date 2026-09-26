@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from ..progress import operation
 
 
 class EcapaSimilarity:
+    @operation('model: load ECAPA')
     def __init__(self, *, model_id: str, revision: str, cache_root: Path) -> None:
         import torch
         from huggingface_hub import snapshot_download
