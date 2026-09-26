@@ -31,6 +31,7 @@ canonical-speaker出力を対象とし、話者性の保持は行いません。
 
 [Colab用ノートブック](notebooks/colab_training.ipynb)をColabへアップロードし、GPUランタイムで実行してください。
 Dockerなしで環境構築・前処理・TT2／S2UT／vocoder学習を実行できます。
+Colabの学習用Pythonは3.13.7です。旧版からは新しいランタイム・実験保存先で開始してください。
 学習を短い区間に分けてGoogle Driveへcheckpointを検証付きで保存し、切断後は最後の保存点から再開します。
 初期設定は2更新です。時間予算、保存頻度、本学習への切り替え、注意事項は[Colab手順](docs/COLAB.md)を参照してください。
 80GB GPU用の調整開始値はノートブックの `PERFORMANCE='gpu80'` で選択できます。

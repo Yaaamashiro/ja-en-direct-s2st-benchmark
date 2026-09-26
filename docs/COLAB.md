@@ -12,7 +12,7 @@ TT2／S2UT／unit・mel vocoderの学習を扱います。Dockerは使いませ�
 - 世代バックアップ：Driveの`checkpoints/<run-name>/<update>-<uuid>`。
 - ランタイム：`/content/s2st-runtime`。VMを作り直すたびにセットアップします。
 
-初回のrepository revisionをDriveへ固定し、Python 3.10.18、torch/torchaudio 2.7.1、
+初回のrepository revisionをDriveへ固定し、Python 3.13.7、torch/torchaudio 2.7.1、
 fairseqとeSpeakの既存固定commitで独立環境を構築します。Colab標準のPython/torchは
 学習に使いません。依存一覧も保存・照合します。依存解決結果やコードが変わった場合は
 再開を拒否します。使い始める前に、このColab対応コードが含まれるrevisionを取得してください。
@@ -21,6 +21,29 @@ fairseqとeSpeakの既存固定commitで独立環境を構築します。Colab�
 Colabでは専用ドライバがnative trainerを明示的に呼び出します。
 既定は2更新、累計10更新超は`--confirm-training`が必要です。
 Colab実機での依存インストール・GPU実音声学習は別途検証が必要です。
+
+### Python 3.13への移行
+
+新しいランタイム・PERSISTENT保存先・run名で開始してください。既存の3.10環境や
+checkpointは削除しません。旧環境のlockを編集して新環境へ強制的に再開することは
+避けてください。NumPy・scikit-learn・Hydraの変更を含むため、数値結果の同等性や
+旧checkpointからの継続は未検証です。
+
+Colab専用依存は`requirements/colab313.txt`で固定します。NumPy 2.1.3、scikit-learn 1.6.1、
+SciPy 1.15.3、Numba 0.61.2、SentencePiece 0.2.1、Hydra 1.3.2／OmegaConf 2.3.0を使用します。
+NumPyとscikit-learnの対応範囲は[NumPy公式](https://numpy.org/devdocs/release/2.1.3-notes.html)・
+[scikit-learn公式](https://scikit-learn.org/stable/install)を参照してください。
+Dockerの従来レシピは維持し、Pythonの標準ライブラリにはパッチを当てません。
+
+固定fairseqのコピーへ`compat313.py`でdataclassのdefault_factory化、Hydra初期化・依存指定、
+廃止されたNumPy型aliasの置換を適用します。パッチと依存ファイルのhashも環境lockへ保存します。
+上流submoduleは変更しません。使わないfairseq独自NAT CUDA拡張はbuildせず、
+PyTorchのCUDA経路は有効にします。setupは`pip check`、コンパイル済みバッチ拡張、
+fairseq学習CLI・設定・mel frontendの確認が失敗した場合に停止します。
+
+WindowsのPython 3.13.7でCPU回帰・fairseqコピーのimport／CLI／mel frontendを確認しています。
+Linuxのネイティブ拡張build、Colab GPU学習、固定HuBERT checkpoint＋実音声を使う
+unit列一致検証は別途必要です。CPU合成データのテストを実音声E2E成功とは扱いません。
 
 ## 切断に備えた仕組み
 

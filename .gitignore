@@ -3,6 +3,8 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv313/
+.compat313/
 .env
 configs/local/
 .test-deps/
