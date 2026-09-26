@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import wave
+from ..progress import operation, track
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ def inspect_wav(path: Path) -> dict[str, int | float]:
     }
 
 
+@operation('manifests/validate: validate_rows')
 def validate_rows(
     rows: list[CommonManifestRow], *, duration_tolerance: float = 0.02
 ) -> dict[str, Any]:
@@ -48,7 +50,7 @@ def validate_rows(
     counts: Counter[str] = Counter()
     ja_seconds: Counter[str] = Counter()
     en_seconds: Counter[str] = Counter()
-    for row in rows:
+    for row in track(rows, 'corpus: validate WAV and SHA256'):
         if row.pair_id in seen:
             raise ManifestValidationError(
                 f"duplicate pair_id {row.pair_id!r} in {seen[row.pair_id]} and {row.split}"
@@ -80,13 +82,14 @@ def validate_rows(
     }
 
 
+@operation('manifests/validate: validate_manifest_directory')
 def validate_manifest_directory(root: Path) -> dict[str, Any]:
     rows: list[CommonManifestRow] = []
     for split in SPLITS:
         path = root / f"{split}.jsonl"
         if not path.is_file():
             raise ManifestValidationError(f"missing split manifest: {path}")
-        for raw in read_common_manifest(path):
+        for raw in track(read_common_manifest(path), f'corpus: read {split}'):
             row = CommonManifestRow.from_dict(raw)
             if row.split != split:
                 raise ManifestValidationError(

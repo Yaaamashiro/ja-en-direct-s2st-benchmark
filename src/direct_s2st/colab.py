@@ -5,6 +5,7 @@ mount is not a transactional filesystem: completion markers and hashes detect
 partial copies, but do not promise that unsynced writes survive VM deletion.
 """
 import argparse
+from .progress import operation, track
 import json
 import math
 import os
@@ -19,6 +20,7 @@ from .hashing import sha256_file
 from .io import atomic_write_json
 
 
+@operation('direct_s2st/colab: make_config')
 def make_config(repository, data, environment_lock, kind='tt2', model_size='smoke', *,
                 performance='smoke', batch_size=None, num_workers=None, prefetch_factor=2,
                 max_tokens=None, update_freq=1, save_interval=None):
@@ -93,13 +95,14 @@ def safe_relative(value):
     return path
 
 
+@operation('direct_s2st/colab: publish')
 def publish(work, destination, identity, updates):
     """Never replace an older recovery point; marker is written last."""
     work, destination = Path(work), Path(destination)
     target = destination / f'{updates:012d}-{uuid.uuid4().hex}'
     target.mkdir(parents=True, exist_ok=False)
     files = {}
-    for source in sorted(work.rglob('*')):
+    for source in track(sorted(work.rglob('*')), 'backup: copy and verify'):
         if source.is_symlink():
             raise ValueError('snapshot cannot contain symlinks')
         if not source.is_file():
@@ -115,6 +118,7 @@ def publish(work, destination, identity, updates):
     return target
 
 
+@operation('direct_s2st/colab: latest')
 def latest(destination, identity):
     for marker in sorted(Path(destination).glob('*/snapshot.json'), reverse=True):
         try:
@@ -124,7 +128,7 @@ def latest(destination, identity):
         if state['identity'] != identity:
             raise ValueError('session identity changed; use a different backup directory')
         valid = bool(state['files'])
-        for name, expected in state['files'].items():
+        for name, expected in track(state['files'].items(), 'backup: verify snapshot'):
             path = marker.parent / 'files' / safe_relative(name)
             if path.is_symlink() or not path.resolve().is_relative_to((marker.parent / 'files').resolve()) or not path.is_file() or sha256_file(path) != expected:
                 valid = False
@@ -134,6 +138,7 @@ def latest(destination, identity):
     return None
 
 
+@operation('direct_s2st/colab: restore')
 def restore(snapshot, work):
     directory, state = snapshot
     work = Path(work)
@@ -141,7 +146,7 @@ def restore(snapshot, work):
     if work.exists():
         work.rename(work.with_name(work.name + '.interrupted-' + uuid.uuid4().hex))
     work.mkdir(parents=True)
-    for name in state['files']:
+    for name in track(state['files'], 'backup: restore and verify'):
         relative = safe_relative(name)
         output = work / relative
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -164,6 +169,7 @@ def checkpoint_updates(path, kind):
     return int(state['updates'])
 
 
+@operation('direct_s2st/colab: run_session')
 def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
                 resume=False, confirm_training=False, restore_only=False, runner=subprocess.run, clock=time.monotonic,
                 inspect_checkpoint=checkpoint_updates):

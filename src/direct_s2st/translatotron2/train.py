@@ -1,5 +1,6 @@
 """Train the native experimental TT2 core on the prepared train split only."""
 import argparse
+from ..progress import operation, track
 from dataclasses import asdict
 import json
 import os
@@ -11,6 +12,7 @@ from .engine import load_checkpoint, optimization_step, save_checkpoint, capture
 from .model import ModelConfig, Translatotron2
 
 
+@operation('translatotron2/train: _main')
 def _main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-root', type=Path, required=True)
@@ -89,7 +91,7 @@ def _main():
                for micro in range(args.update_freq) for i in range(args.batch_size))
     with ordered_samples(lambda i: dataset[i % len(dataset)], indices,
                          args.num_workers, args.prefetch_factor) as samples:
-        for update in range(completed + 1, args.max_updates + 1):
+        for update in track(range(completed + 1, args.max_updates + 1), 'tt2: train updates'):
             batches = [collate([next(samples) for _ in range(args.batch_size)])
                        for _ in range(args.update_freq)]
             for group in optimizer.param_groups:

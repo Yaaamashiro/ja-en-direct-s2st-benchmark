@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import wave
+from ..progress import operation, track
 import json
 from collections import Counter
 from pathlib import Path
@@ -22,6 +23,7 @@ def _ten_ms_frames(path: Path) -> int:
         return handle.getnframes() // 160
 
 
+@operation('s2ut/prepare_fairseq: prepare_fairseq')
 def prepare_fairseq(
     common_root: Path,
     units_root: Path,
@@ -59,7 +61,7 @@ def prepare_fairseq(
     for split in ("train", "dev", "test"):
         lines = ["id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames\n"]
         count = 0
-        for row in rows_by_split[split]:
+        for row in track(rows_by_split[split], f's2ut: prepare {split}'):
             pair_id = str(row["pair_id"])
             unit_record = unit_records.get(pair_id)
             if unit_record is None:

@@ -1,5 +1,6 @@
 """Checkpoint-backed fairseq HiFi-GAN adapters; no synthetic fallback."""
 import argparse
+from ..progress import operation, track
 import json
 import math
 import os
@@ -58,6 +59,7 @@ def write_waveform(path: Path, waveform, sample_rate: int, *, overwrite: bool = 
     return values.size / sample_rate
 
 
+@operation('vocoders/inference: vocode')
 def vocode(kind: str, input_path: Path, output_root: Path, checkpoint: Path, config_path: Path,
            *, sample_rate: int, device: str = "cuda", mel: dict | None = None,
            duration_prediction: bool = True, overwrite: bool = False, resume: bool = False) -> dict:
@@ -101,7 +103,7 @@ def vocode(kind: str, input_path: Path, output_root: Path, checkpoint: Path, con
     if any(not torch.isfinite(p).all() for p in model.parameters()):
         raise ValueError('nonfinite vocoder checkpoint')
     model.eval().to(device)
-    for index, row in enumerate(records):
+    for index, row in enumerate(track(records, 'vocoder: inference (generate/reuse)')):
         previous = journal.rows.get(row['pair_id'])
         if previous and previous.get('status') == 'success':
             path = Path(previous['output_audio'])

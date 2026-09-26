@@ -3,9 +3,11 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from ..progress import operation
 
 
 class QwenTTS:
+    @operation('model: load Qwen TTS')
     def __init__(
         self,
         *,

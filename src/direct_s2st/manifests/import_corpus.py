@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from ..progress import operation, track
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from .validate import validate_rows
 from .reader import portable_row
 
 
+@operation('manifests/import_corpus: import_corpus')
 def import_corpus(
     accepted_manifest: Path,
     *,
@@ -26,7 +28,7 @@ def import_corpus(
         raise ValueError("common manifest output must not be inside corpus_root")
     rows: list[CommonManifestRow] = []
     selected = {split: 0 for split in SPLITS}
-    for raw in read_jsonl(accepted_manifest):
+    for raw in track(read_jsonl(accepted_manifest), 'corpus: resolve audio paths'):
         row = CommonManifestRow.from_corpus_row(
             raw, corpus_root=corpus_root, manifest_parent=accepted_manifest.parent
         )
@@ -52,7 +54,7 @@ def import_corpus(
     for split in SPLITS:
         atomic_write_jsonl(
             output_root / f"{split}.jsonl",
-            (portable_row(row, corpus_root) for row in grouped[split]),
+            (portable_row(row, corpus_root) for row in track(grouped[split], f'corpus: write {split}')),
             resume=resume,
             overwrite=overwrite,
         )

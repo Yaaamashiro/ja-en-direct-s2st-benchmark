@@ -15,6 +15,7 @@ sys.path.insert(0, str(REPOSITORY / "src"))
 from direct_s2st.config import load_config
 from direct_s2st.io import atomic_write_json, atomic_write_text
 from direct_s2st.runs import validate_run_id
+from direct_s2st.progress import track
 import yaml
 
 
@@ -77,7 +78,7 @@ def main() -> int:
     if report.exists():
         raise FileExistsError("choose a new run-id/environment data root; an execution report already exists")
     atomic_write_json(report, {"status": "RUNNING", "stages": stages})
-    for stage in stages:
+    for stage in track(stages, 'smoke: stages'):
         start = time.perf_counter()
         try:
             completed = subprocess.run(stage["command"], cwd=REPOSITORY, check=False)

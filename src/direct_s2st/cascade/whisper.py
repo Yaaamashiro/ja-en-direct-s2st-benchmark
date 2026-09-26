@@ -1,4 +1,8 @@
 """Shared Whisper loading; task semantics belong to ASR/S2T adapters."""
+from ..progress import operation
+
+
+@operation('model: load Whisper')
 def load_whisper_pipeline(model_id, revision, device=0):
     import torch
     from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
@@ -22,4 +26,3 @@ def load_whisper_pipeline(model_id, revision, device=0):
         torch_dtype=dtype,
         device=device,
     )
-

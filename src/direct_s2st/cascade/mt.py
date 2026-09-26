@@ -1,7 +1,9 @@
 from __future__ import annotations
+from ..progress import operation
 
 
 class NllbTranslator:
+    @operation('model: load NLLB')
     def __init__(
         self,
         *,

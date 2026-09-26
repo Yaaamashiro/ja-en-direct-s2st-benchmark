@@ -11,16 +11,21 @@ import tempfile
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'src'))
+from direct_s2st.progress import operation
 PREFIX = Path('/content/s2st-runtime')
 FAIRSEQ = '3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99'
 ESPEAK = '4870adfa25b1a32b4361592f1be8a40337c58d6c'
 PYTHON_VERSION = '3.10.18'
 
 
+@operation('setup: external command')
 def run(*args, **kwargs):
+    print('Setup:', ' '.join(str(a) for a in args), flush=True)
     subprocess.run([str(a) for a in args], check=True, **kwargs)
 
 
+@operation('setup: copy fairseq')
 def prepare_fairseq_copy(source, runtime):
     """Publish a complete copy; preserve dangling links and interrupted copies."""
     source, runtime = Path(source).resolve(), Path(runtime).resolve()
@@ -70,6 +75,7 @@ def prepare_fairseq_copy(source, runtime):
     return copied
 
 
+@operation('setup: runtime construction')
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inference', action='store_true', help='Install shared Cascade/S2T and core evaluation dependencies before locking')
