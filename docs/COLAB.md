@@ -47,6 +47,40 @@ S2UTはfairseq標準の学習状態を保存します。S2UTの区間再開が�
 
 ## 時間・容量の調整
 
+### 80GB・単一GPUでのバッチ並列学習
+
+初回smoke後、新しいRUN_NAMEで設定セルの`PERFORMANCE='gpu80'`を選択します。
+この選択はモデルサイズや総更新数を変更せず、本学習を暗黙に開始しません。
+
+| 設定 | smoke | gpu80（調整開始値、実機未計測） |
+| --- | --- | --- |
+| TT2 batch size | 1 | 8 |
+| unit／mel vocoder batch size | 1 | 16 |
+| S2UT max-tokens | 2000 | 20000 |
+| CPU読み込みworker数 | 0 | 4 |
+| ローカルcheckpoint間隔 | 1更新 | 50更新 |
+| Drive同期・プロセス再起動間隔 | 1更新 | 100更新 |
+
+`BATCH_SIZE`、`NUM_WORKERS`、`MAX_TOKENS`、`SAVE_INTERVAL`で上書きできます。
+`UPDATE_FREQ`はTT2/S2UTの勾配蓄積回数で、同時処理するバッチ数ではありません。
+S2UTはBATCH_SIZEではなくMAX_TOKENSでバッチ量を調整します。
+TT2/vocoderの`PREFETCH_FACTOR`はworkerあたりのCPU先読みサンプル数です。
+CPUスレッドで読み込みを重ね、学習への投入順序を保持します。
+S2UTの読み込みはfairseq標準のworkerを使用します。
+
+vocoderは各バッチ中の最短音声に合わせ、上限segment-frames以内の等長区間を切り出します。
+ゼロ埋めを識別器の教師に使わず、unit duration lossも各音声の実unit列から計算し、
+音声単位で平均します。切り出しの乱数は学習スレッドでのみ消費し、再開用RNGへ保存します。
+
+ローカル保存とDrive同期は別です。VM消失時に保証できる再開点はDrive保存完了分までです。
+区間末尾はSAVE_INTERVALの倍数でなくても保存されます。
+総更新数2のままなら、CHUNK_UPDATES=100でも2更新で終了・保存します。
+設定・batch sizeの変更は新しいrunで行ってください。
+
+80GBでも収まるバッチ量はモデル・音声長に依存します。まず短い試行でGPUメモリと
+1更新の時間を測り、OOM時はバッチ量を減らします。GPU80設定の速度向上や最大使用量は
+未検証です。これは単一モデルのバッチ並列化であり、複数モデルを同時起動する機能ではありません。
+
 Colabのidle timeout、利用可能GPU、最大稼働時間は変動します。固定の時間まで動く保証は
 ありません。[公式FAQ](https://research.google.com/colaboratory/faq.html)を確認してください。
 自動再接続、keep-aliveなどの制限回避処理はありません。

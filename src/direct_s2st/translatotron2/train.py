@@ -22,6 +22,8 @@ def _main():
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--learning-rate', type=float, default=1e-4)
     parser.add_argument('--batch-size', type=int, default=1)
+    parser.add_argument('--num-workers', type=int, default=0)
+    parser.add_argument('--prefetch-factor', type=int, default=2)
     parser.add_argument('--warmup-updates', type=int, default=0)
     parser.add_argument('--update-freq', type=int, default=1)
     parser.add_argument('--l2-regularization', type=float, default=0.0)
@@ -30,6 +32,8 @@ def _main():
     parser.add_argument('--restore-file', type=Path)
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
+    if args.num_workers < 0 or args.prefetch_factor < 1:
+        parser.error('num-workers must be nonnegative and prefetch-factor positive')
     if args.validation_limit is not None and args.validation_limit < 1:
         parser.error('validation-limit must be positive')
     if min(args.max_updates, args.save_interval_updates, args.batch_size, args.update_freq) < 1 or args.learning_rate <= 0 or min(args.warmup_updates, args.validate_interval, args.l2_regularization) < 0:
@@ -79,39 +83,41 @@ def _main():
         torch.manual_seed(args.seed+rank)
     dev = PreparedDataset(args.data_root, 'dev') if args.validate_interval and rank == 0 else None
     from .batching import collate, learning_rate
-    for update in range(completed + 1, args.max_updates + 1):
-        # Deterministic cycling makes checkpoint continuation exact on one device.
-        batches = []
-        for micro in range(args.update_freq):
-            offset = ((update-1)*args.update_freq+micro)*args.batch_size*world_size + rank*args.batch_size
-            samples = [dataset[(offset+i) % len(dataset)] for i in range(args.batch_size)]
-            batches.append(collate(samples))
-        for group in optimizer.param_groups:
-            group['lr'] = learning_rate(args.learning_rate, update, args.warmup_updates)
-        losses = optimization_step(model, optimizer, batches)
-        if rank == 0:
-            atomic_write_json(args.run_root / 'losses' / f'{update:08d}.json',
-                              dict(update=update, **losses), overwrite=args.overwrite or bool(args.restore_file))
-        if args.validate_interval and update % args.validate_interval == 0:
+    from ..prefetch import ordered_samples
+    indices = (((update-1)*args.update_freq+micro)*args.batch_size*world_size + rank*args.batch_size+i
+               for update in range(completed+1, args.max_updates+1)
+               for micro in range(args.update_freq) for i in range(args.batch_size))
+    with ordered_samples(lambda i: dataset[i % len(dataset)], indices,
+                         args.num_workers, args.prefetch_factor) as samples:
+        for update in range(completed + 1, args.max_updates + 1):
+            batches = [collate([next(samples) for _ in range(args.batch_size)])
+                       for _ in range(args.update_freq)]
+            for group in optimizer.param_groups:
+                group['lr'] = learning_rate(args.learning_rate, update, args.warmup_updates)
+            losses = optimization_step(model, optimizer, batches)
             if rank == 0:
-                from .validation import validate
-                validation = validate(core, dev, args.device, args.validation_limit)
-                atomic_write_json(args.run_root / 'validation' / f'{update:08d}.json', validation,
-                                  overwrite=args.overwrite or bool(args.restore_file))
-            if world_size > 1:
-                torch.distributed.barrier()
-        if update % args.save_interval_updates == 0 or update == args.max_updates:
-            local_state = capture_rank_state(model)
-            states = [None]*world_size
-            if world_size > 1:
-                torch.distributed.all_gather_object(states, local_state)
-            else:
-                states = [local_state]
+                atomic_write_json(args.run_root / 'losses' / f'{update:08d}.json',
+                                  dict(update=update, **losses), overwrite=args.overwrite or bool(args.restore_file))
+            if args.validate_interval and update % args.validate_interval == 0:
+                if rank == 0:
+                    from .validation import validate
+                    validation = validate(core, dev, args.device, args.validation_limit)
+                    atomic_write_json(args.run_root / 'validation' / f'{update:08d}.json', validation,
+                                      overwrite=args.overwrite or bool(args.restore_file))
+                if world_size > 1:
+                    torch.distributed.barrier()
+            if update % args.save_interval_updates == 0 or update == args.max_updates:
+                local_state = capture_rank_state(model)
+                states = [None]*world_size
+                if world_size > 1:
+                    torch.distributed.all_gather_object(states, local_state)
+                else:
+                    states = [local_state]
+                if rank == 0:
+                    save_checkpoint(checkpoint, model, optimizer, update, dataset.tokens, identity,
+                                    overwrite=args.overwrite or bool(args.restore_file) or update > 1, rank_states=states)
             if rank == 0:
-                save_checkpoint(checkpoint, model, optimizer, update, dataset.tokens, identity,
-                                overwrite=args.overwrite or bool(args.restore_file) or update > 1, rank_states=states)
-        if rank == 0:
-            print(json.dumps(dict(update=update, **losses)), flush=True)
+                print(json.dumps(dict(update=update, **losses)), flush=True)
 
 
 def main():

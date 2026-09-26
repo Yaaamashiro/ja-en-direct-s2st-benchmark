@@ -19,27 +19,42 @@ from .hashing import sha256_file
 from .io import atomic_write_json
 
 
-def make_config(repository, data, environment_lock, kind='tt2', model_size='smoke'):
-    """Small single-GPU recipes; edit a copy before starting a new run."""
+def make_config(repository, data, environment_lock, kind='tt2', model_size='smoke', *,
+                performance='smoke', batch_size=None, num_workers=None, prefetch_factor=2,
+                max_tokens=None, update_freq=1, save_interval=None):
+    """Explicit throughput knobs; gpu80 is a starting point, not a VRAM guarantee."""
     from .config import load_config
+    if performance not in ('smoke', 'gpu80'):
+        raise ValueError('unknown performance preset')
+    large = performance == 'gpu80'
+    batch_size = batch_size if batch_size is not None else ((16 if kind in ('unit', 'mel') else 8) if large else 1)
+    num_workers = num_workers if num_workers is not None else (4 if large else 0)
+    max_tokens = max_tokens if max_tokens is not None else (20000 if large else 2000)
+    save_interval = save_interval if save_interval is not None else (50 if large else 1)
+    if min(batch_size, prefetch_factor, max_tokens, update_freq, save_interval) < 1 or num_workers < 0:
+        raise ValueError('invalid throughput options')
+    if kind in ('unit', 'mel') and update_freq != 1:
+        raise ValueError('vocoder uses real batches, not gradient accumulation')
     repository, data = Path(repository), Path(data)
     if kind == 'tt2':
         root = data / 'translatotron2/fairseq'
         command = ['{python}', '-m', 'direct_s2st.translatotron2.train',
             '--data-root', str(root), '--run-root', '{run_root}', '--device', 'cuda',
-            '--model-size', model_size, '--batch-size', '1', '--max-updates', '{updates}',
-            '--save-interval-updates', '1']
+            '--model-size', model_size, '--batch-size', str(batch_size), '--max-updates', '{updates}',
+            '--save-interval-updates', str(save_interval), '--num-workers', str(num_workers),
+            '--prefetch-factor', str(prefetch_factor), '--update-freq', str(update_freq)]
         checkpoint = 'checkpoints/checkpoint_last.pt'
     elif kind == 's2ut':
         root = data / 's2ut/fairseq'
         cfg = load_config(repository / 'configs/s2ut/train.yaml')
         command = cfg['training']['command'][:]
         values = dict(data_root=str(root), run_root='{run_root}', max_updates='{updates}',
-                      save_interval_updates='1', seed='1')
+                      save_interval_updates=str(save_interval), seed='1')
         command = [part.format(**values) for part in command]
         command[0] = '{python}'
-        command[command.index('--max-tokens')+1] = '2000'
-        command[command.index('--num-workers')+1] = '0'
+        command[command.index('--max-tokens')+1] = str(max_tokens)
+        command[command.index('--num-workers')+1] = str(num_workers)
+        command[command.index('--update-freq')+1] = str(update_freq)
         from .s2ut.preflight import validate_training
         validate_training(root, command)
         checkpoint = 'checkpoints/checkpoint_last.pt'
@@ -48,7 +63,9 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
         generator = repository / f'configs/vocoder/{kind}-generator.json'
         command = ['{python}', '-m', 'direct_s2st.vocoders.train', '--kind', kind,
             '--common-root', str(root), '--config', str(generator), '--output-root', '{run_root}',
-            '--device', 'cuda', '--max-updates', '{updates}']
+            '--device', 'cuda', '--max-updates', '{updates}', '--batch-size', str(batch_size),
+            '--num-workers', str(num_workers), '--prefetch-factor', str(prefetch_factor),
+            '--save-interval-updates', str(save_interval)]
         if kind == 'unit':
             command += ['--units-root', str(data / 's2ut/units')]
         checkpoint = 'generator.pt'
