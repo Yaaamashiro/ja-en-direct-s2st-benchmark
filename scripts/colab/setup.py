@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
+import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 PREFIX = Path('/content/s2st-runtime')
@@ -17,6 +19,55 @@ PYTHON_VERSION = '3.10.18'
 
 def run(*args, **kwargs):
     subprocess.run([str(a) for a in args], check=True, **kwargs)
+
+
+def prepare_fairseq_copy(source, runtime):
+    """Publish a complete copy; preserve dangling links and interrupted copies."""
+    source, runtime = Path(source).resolve(), Path(runtime).resolve()
+    if runtime == Path(runtime.anchor) or source.is_relative_to(runtime) or runtime.is_relative_to(source):
+        raise ValueError('source and runtime must be separate dedicated directories')
+    corpus = os.environ.get('CORPUS_ROOT')
+    if corpus and runtime.is_relative_to(Path(corpus).resolve()):
+        raise ValueError('runtime must be outside CORPUS_ROOT')
+    if not (source / 'setup.py').is_file():
+        raise FileNotFoundError('missing fairseq source setup.py')
+    runtime.mkdir(parents=True, exist_ok=True)
+    copied = runtime / 'fairseq'
+    if copied.is_symlink() or getattr(copied, 'is_junction', lambda: False)():
+        raise ValueError('fairseq runtime must not be a link')
+    if copied.exists() and not copied.is_dir():
+        raise ValueError('fairseq runtime must be a directory')
+    marker_name = '.s2st-copy-complete.json'
+    marker = copied / marker_name
+    identity = dict(revision=FAIRSEQ, copy_format=1)
+    if marker.is_file():
+        if json.loads(marker.read_text(encoding='utf-8')) != identity:
+            raise ValueError('fairseq copy identity mismatch; use a fresh runtime')
+        if not (copied / 'setup.py').is_file():
+            raise ValueError('completed fairseq copy is damaged')
+        return copied
+    # A failed copy never becomes the active runtime. Keep it for inspection.
+    stage = Path(tempfile.mkdtemp(prefix='.fairseq-copy-', dir=runtime))
+    tree = stage / 'tree'
+    try:
+        shutil.copytree(source, tree, symlinks=True, ignore=shutil.ignore_patterns('.git'))
+        (tree / marker_name).write_text(json.dumps(identity), encoding='utf-8')
+    except BaseException:
+        print('Incomplete fairseq copy retained:', stage, flush=True)
+        raise
+    backup = None
+    if copied.exists():
+        backup = runtime / ('fairseq.incomplete-' + uuid.uuid4().hex)
+        copied.rename(backup)
+        print('Previous unverified fairseq copy retained:', backup, flush=True)
+    try:
+        tree.rename(copied)
+    except BaseException:
+        if backup is not None and not copied.exists():
+            backup.rename(copied)
+        raise
+    stage.rmdir()  # Only the now-empty staging directory; no recursive deletion.
+    return copied
 
 
 def main():
@@ -49,9 +100,7 @@ def main():
     dirty = subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain'], text=True).strip()
     if revision != FAIRSEQ or dirty:
         raise RuntimeError('fairseq must be pristine at the pinned commit')
-    copied = PREFIX / 'fairseq'
-    if not copied.exists():
-        shutil.copytree(source, copied, ignore=shutil.ignore_patterns('.git'))
+    copied = prepare_fairseq_copy(source, PREFIX)
     patch = ROOT / 'patches/fairseq/0001-librosa-mel-keywords.patch'
     probe = subprocess.run(['patch', '--dry-run', '--directory='+str(copied), '-p1', '--forward', '--input='+str(patch)], capture_output=True)
     if probe.returncode == 0:
