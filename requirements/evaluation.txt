@@ -1,5 +1,2 @@
-sacrebleu==2.5.1
+-r evaluation-core.txt
 sonar-space==0.5.0
-soundfile==0.13.1
-speechbrain==1.0.3
-transformers==4.57.3

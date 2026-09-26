@@ -105,7 +105,7 @@ evidence of learned speech generation.
 Still required: real frontend/container integration, real-data optimization and
 checkpoint generation, unforced decoding, compatible trained mel vocoder and
 WAV/ASR evaluation, runtime/memory/quality review, and numerical comparison with
-the original results. Vocoder fitting and the three-system orchestration are now
+the original results. Vocoder fitting and the four-system orchestration are now
 implemented; their real-data execution, S2UT training/E2E and Cascade E2E remain
 unverified. See PIPELINE_COMPLETION.md. The implemented workflow is not evidence
-that the three-system real-data benchmark has already succeeded.
+that the four-system real-data benchmark has already succeeded.

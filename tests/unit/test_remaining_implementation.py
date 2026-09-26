@@ -34,14 +34,14 @@ def test_journal_requires_identical_resume_and_preserves_progress(tmp_path):
 def test_all_system_plan_and_fitted_vocoder_paths(tmp_path):
     suite = load_module('suite_driver', ROOT / 'scripts/smoke/suite.py')
     configs, stages = suite.build_suite('trial', tmp_path / '.env', updates=2)
-    assert len(stages) == 23
+    assert len(stages) == 25
     assert stages[-2]['stage'] == 'acceptance'
     assert stages[-1]['stage'] == 'comparison'
     assert 'unit-fit' in {s['stage'] for s in stages}
     for kind in ('unit', 'mel'):
         command = configs[kind]['infer']['command']
         assert command[command.index('--checkpoint')+1] == '{run_root}/vocoder-'+kind+'/generator.pt'
-    assert configs['comparison']['run_ids'] == ['trial-s2ut', 'trial-translatotron2', 'trial-cascade']
+    assert configs['comparison']['run_ids'] == ['trial-s2ut', 'trial-translatotron2', 'trial-cascade', 'trial-s2t_tts']
     with pytest.raises(ValueError):
         suite.build_suite('trial', tmp_path / '.env', limit=101)
 
@@ -49,7 +49,7 @@ def test_all_system_plan_and_fitted_vocoder_paths(tmp_path):
 def test_paper_suite_frontend_and_vocoder_are_consistent(tmp_path):
     suite = load_module('suite_paper', ROOT / 'scripts/smoke/suite.py')
     configs, stages = suite.build_suite('paper', tmp_path / '.env', tt2_recipe='fisher')
-    assert len(stages) == 23
+    assert len(stages) == 25
     assert configs['tt2-paper-prepare']['mel']['n_mels'] == 128
     assert configs['tt2-paper-prepare']['source_mel']['n_mels'] == 80
     train = configs['mel']['train']['command']

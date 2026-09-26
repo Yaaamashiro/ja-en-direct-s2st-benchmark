@@ -50,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     cascade = systems.add_parser("cascade").add_subparsers(dest="action", required=True)
     _leaf(cascade, "run", "Run the cascade pipeline")
+    s2t_tts = systems.add_parser("s2t-tts").add_subparsers(dest="action", required=True)
+    _leaf(s2t_tts, "run", "Run direct speech translation followed by TTS")
 
     vocoder = systems.add_parser("vocoder").add_subparsers(dest="vocoder_type", required=True)
     for kind in ("unit", "mel"):
@@ -60,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate = systems.add_parser("evaluate").add_subparsers(dest="action", required=True)
     _leaf(evaluate, "run", "Evaluate standardized predictions")
     _leaf(evaluate, "aggregate", "Aggregate experiment metrics")
-    _leaf(evaluate, 'verify', 'Verify three-system real artifact completion')
+    _leaf(evaluate, 'verify', 'Verify four-system real artifact completion')
     return parser
 
 
@@ -97,6 +99,8 @@ def _default_config(args: argparse.Namespace) -> Path | None:
         return root / args.system / f"{name}.yaml"
     if args.system == "cascade":
         return root / "cascade" / "default.yaml"
+    if args.system == "s2t-tts":
+        return root / "s2t_tts" / "default.yaml"
     if args.system == "evaluate":
         return root / "evaluation" / "default.yaml"
     if args.system == "vocoder":
@@ -341,6 +345,41 @@ def _run_cascade(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, 
     )
 
 
+def _run_s2t_tts(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
+    from .s2t_tts.pipeline import components_from_config, run_pipeline
+    from .s2t_tts.s2t import validate_s2t_config
+    from .runs import validate_run_id, collect_model_revisions
+    from .io import atomic_write_json
+    validate_s2t_config(config)
+    roots = RootPaths.from_environment()
+    split = args.split or 'test'
+    run_id = validate_run_id(str(config.get('run_id', f's2t_tts-{args.profile}')))
+    output = roots.runs / run_id / 'predictions'
+    if args.num_shards > 1:
+        output = output / f'shard-{args.shard_index:05d}-of-{args.num_shards:05d}'
+    manifest = roots.experiment_data / 'common' / f'{split}.jsonl'
+    plan = dict(system_id='s2t_tts', run_id=run_id, split=split, manifest=str(manifest),
+                output_root=str(output), config=config, limit=args.limit,
+                shard_index=args.shard_index, num_shards=args.num_shards)
+    if args.dry_run:
+        return plan
+    atomic_write_json(output / 'run-metadata.json',
+        dict(plan=plan, model_revisions=collect_model_revisions(config)),
+        resume=args.resume, overwrite=args.overwrite)
+    s2t, tts = components_from_config(config)
+    try:
+        return run_pipeline(manifest, output, run_id=run_id, s2t=s2t, tts=tts,
+            model_identity=config, split=split, shard_index=args.shard_index,
+            num_shards=args.num_shards, limit=args.limit, resume=args.resume, overwrite=args.overwrite)
+    finally:
+        del s2t, tts
+        import gc
+        gc.collect()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
 def _run_evaluate(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     from .evaluation.aggregate import aggregate_runs
     from .evaluation.run import evaluate_predictions
@@ -466,6 +505,8 @@ def main(argv: list[str] | None = None) -> int:
             payload = _run_translatotron2(args, config)
         elif args.system == "cascade":
             payload = _run_cascade(args, config)
+        elif args.system == "s2t-tts":
+            payload = _run_s2t_tts(args, config)
         elif args.system == "evaluate":
             payload = _run_evaluate(args, config)
         elif args.system == "vocoder":

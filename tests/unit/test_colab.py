@@ -125,3 +125,35 @@ def test_notebook_cells_are_valid_python():
         if cell['cell_type'] == 'code':
             ast.parse(''.join(cell['source']))
             assert cell['outputs'] == []
+
+
+def test_restore_only_never_trains(tmp_path):
+    cfg, calls, runner = fixture(tmp_path)
+    kwargs = dict(work=tmp_path/'work', backup=tmp_path/'drive', runner=runner,
+                  inspect_checkpoint=lambda p, k: int(p.read_text()))
+    run_session(cfg, **kwargs)
+    calls.clear()
+    assert run_session(cfg, resume=True, restore_only=True, **kwargs) == dict(status='RESTORED', durable_updates=2)
+    assert not calls
+
+
+def test_colab_comparison_configs_and_artifact_identity(tmp_path):
+    from direct_s2st.colab_compare import build_configs, save_configs, stage_file
+    root = Path(__file__).resolve().parents[2]
+    configs = build_configs(root, tmp_path/'runs', 'experiment')
+    assert len(configs['comparison']['run_ids']) == 4
+    assert configs['s2t_tts']['s2t']['task'] == 'translate'
+    assert configs['cascade']['asr']['model'].endswith('large-v3-turbo')
+    assert configs['s2t_tts']['tts'] == configs['cascade']['tts']
+    settings = [{k: v for k, v in configs[s+'-eval'].items() if k != 'run_id'}
+                for s in ('s2ut', 'translatotron2', 'cascade', 's2t_tts')]
+    assert all(s == settings[0] for s in settings)
+    save_configs(configs, tmp_path/'configs')
+    save_configs(configs, tmp_path/'configs')
+    source = tmp_path/'trusted'
+    source.write_text('checkpoint fixture')
+    stage_file(source, tmp_path/'copy')
+    stage_file(source, tmp_path/'copy')
+    source.write_text('changed')
+    with pytest.raises(ValueError, match='differs'):
+        stage_file(source, tmp_path/'copy')

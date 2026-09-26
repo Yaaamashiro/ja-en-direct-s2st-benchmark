@@ -1,4 +1,4 @@
-"""Plan/execute/resume all three real-data baselines on a chosen Docker host."""
+"""Plan/execute/resume all four real-data baselines on a chosen Docker host."""
 import argparse
 import json
 from pathlib import Path
@@ -90,7 +90,12 @@ def build_suite(name, env_file, *, limit=5, updates=2, docker_context=None, devi
     configuration('cascade-eval', 'evaluation/default.yaml', name+'-cascade')
     stage('cascade', 'cascade', ['cascade', 'run', '--split', 'test'] + reference('cascade'))
     stage('cascade-evaluate', 'evaluation', ['evaluate', 'run'] + reference('cascade-eval'))
-    configs['comparison'] = {'run_ids': [name+'-'+s for s in ('s2ut', 'translatotron2', 'cascade')]}
+    configuration('s2t-tts', 's2t_tts/default.yaml', name+'-s2t_tts')
+    configuration('s2t-tts-eval', 'evaluation/default.yaml', name+'-s2t_tts')
+    stage('s2t-tts', 'cascade', ['s2t-tts', 'run', '--split', 'test'] + reference('s2t-tts'))
+    stage('s2t-tts-evaluate', 'evaluation', ['evaluate', 'run'] + reference('s2t-tts-eval'))
+    from direct_s2st.predictions import SYSTEMS
+    configs['comparison'] = {'run_ids': [name+'-'+s for s in SYSTEMS]}
     stage('acceptance', 'evaluation', ['evaluate', 'verify'] + reference('comparison'))
     stage('comparison', 'evaluation', ['evaluate', 'aggregate'] + reference('comparison'))
     return configs, stages

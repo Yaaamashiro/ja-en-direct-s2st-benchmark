@@ -30,7 +30,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ESPEAK_DATA_PATH=/opt/espeak-ng/share/espeak-ng-data
 COPY --from=espeak-builder /opt/espeak-ng /opt/espeak-ng
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential ca-certificates git libsndfile1 python3 python3-dev python3-pip sox \
+    build-essential ca-certificates ffmpeg git libsndfile1 python3 python3-dev python3-pip sox \
     && rm -rf /var/lib/apt/lists/*
 RUN espeak-ng --version 2>&1 | grep -F "1.52.0"
 RUN python3 -m pip install --no-cache-dir \

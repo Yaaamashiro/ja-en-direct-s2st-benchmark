@@ -1,0 +1,11 @@
+# HF API openai/whisper-large-v3 revision resolved during implementation.
+s2t:
+  model: openai/whisper-large-v3
+  revision: 06f233fe06e710322aca913c1bc4249a0d71fce1
+  language: japanese
+  task: translate
+tts:
+  model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+  revision: f00cf133b78d3c2c35857faba3b1be9b98c4f971
+  speaker: Ono_Anna
+  language: English

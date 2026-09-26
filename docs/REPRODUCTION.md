@@ -157,7 +157,7 @@ The user explicitly authorized core implementation before real S2UT E2E on
 2026-09-13; real-data acceptance criteria remain unchanged.
 See [core implementation and commands](TRANSLATOTRON2.md). Voice preservation is
 disabled. No upstream duration-free substitute is used. The existing Docker
-`run.py` driver remains S2UT-only; `suite.py` orchestrates all three systems,
+`run.py` driver remains S2UT-only; `suite.py` orchestrates all four systems,
 vocoder fitting, evaluation and fail-closed real-artifact acceptance.
 
 ## Tests
@@ -174,3 +174,12 @@ test. Invoke `pytest -m gpu` explicitly in the provisioned model environment.
 Pass these variables via Compose `-e` if using a container; set
 `S2ST_TEST_DEVICE=cpu` only if intentionally testing pretrained vocoders on CPU.
 Missing artifacts skip those tests and do not count as PASS.
+
+## S2T→TTS / four-system extension
+
+The required final systems are `s2ut`, `translatotron2`, `cascade`, and `s2t_tts`.
+The new baseline uses pinned Whisper large-v3 translation and the existing QwenTTS,
+without changing the original turbo ASR → NLLB → TTS model settings.
+See [S2T→TTS implementation and verification](S2T_TTS.md) for commands, Colab,
+new files, dependency limitations, and unverified GPU/E2E items.
+Historical test counts below/above describe their original runs, not current validation.

@@ -1,138 +1,78 @@
-# Google Colabでの学習と再開
+# Google Colab：テストと通常実験
 
-[notebooks/colab_training.ipynb](../notebooks/colab_training.ipynb)をColabへアップロードし、
-GPUランタイムで上から実行します。このノートブックはコーパスの受け入れ・前処理と、
-TT2／S2UT／unit・mel vocoderの学習を扱います。Dockerは使いません。
+## 使うノートブック
 
-## 保存先
+| 用途 | ノートブック | データ・学習 | Drive保存先 |
+| --- | --- | --- | --- |
+| 最初の動作確認 | [colab_smoke.ipynb](../notebooks/colab_smoke.ipynb) | 各split 5件・2更新・小型TT2 | OUTPUT_BASE/smoke/実験名 |
+| 通常の学習・比較 | [colab_training.ipynb](../notebooks/colab_training.ipynb) | 全件・更新数を明示指定・reference TT2 | OUTPUT_BASE/training/実験名 |
 
-- コーパス：Google Drive上の既存コーパス。変更しません。
-- 派生データ：Drive上の専用DATAディレクトリ。smokeと本学習を分けます。
-- 作業用checkpoint：`/content/s2st-work/<run-name>`。
-- 世代バックアップ：Driveの`checkpoints/<run-name>/<update>-<uuid>`。
-- ランタイム：`/content/s2st-runtime`。VMを作り直すたびにセットアップします。
+コーパス側のノートブックと同様、最初の設定フォームを編集して番号順に実行します。
+コーパスのコード・データは変更しません。smokeの数値を品質評価として使わないでください。
+通常用のreferenceモデルも原論文の完全な学習レシピや収束を保証するものではありません。
 
-初回のrepository revisionをDriveへ固定し、Python 3.13.7、torch/torchaudio 2.7.1、
-fairseqとeSpeakの既存固定commitで独立環境を構築します。Colab標準のPython/torchは
-学習に使いません。依存一覧も保存・照合します。依存解決結果やコードが変わった場合は
-再開を拒否します。使い始める前に、このColab対応コードが含まれるrevisionを取得してください。
+## 手順
 
-通常のDocker専用`full` CLIガードを偽装・解除する仕組みではありません。
-Colabでは専用ドライバがnative trainerを明示的に呼び出します。
-既定は2更新、累計10更新超は`--confirm-training`が必要です。
-Colab実機での依存インストール・GPU実音声学習は別途検証が必要です。
+1. ColabでGPUランタイムを選択します。
+2. セル1でコーパスの保存先・出力先・実験名を指定します。
+3. セル2〜4でDrive接続、コード取得、Python 3.10環境構築、データ準備を実行します。
+4. セル1のTRAIN_TARGETをtt2 / s2ut / unit / melから選び、セル5で学習します。
+   4方式比較には4つの学習済みrunが必要なので、各対象について繰り返します。
+5. 学習が終わったらRUN_BENCHMARKをONにし、セル6〜8で復元・4方式推論・共通評価・比較を実行します。
 
-### Python 3.13への移行
+通常用はCONFIRM_FULL_DATAをONにすると全コーパスを前処理します。
+RUN_TRAININGは初期状態でOFFです。学習する場合だけONにし、
+TOTAL_UPDATES（累計の更新数）とCONFIRM_TRAININGを設定してください。
+データの全件使用と長期学習の許可は別々に確認します。勝手にfull学習を開始しません。
+SESSION_MINUTESは一回の学習subprocess予算です。準備・保存・評価時間は含まれません。
 
-新しいランタイム・PERSISTENT保存先・run名で開始してください。既存の3.10環境や
-checkpointは削除しません。旧環境のlockを編集して新環境へ強制的に再開することは
-避けてください。NumPy・scikit-learn・Hydraの変更を含むため、数値結果の同等性や
-旧checkpointからの継続は未検証です。
+smoke用は5件・2更新に固定され、通常用は件数制限を設けません。
+通常用のPROFILE=pilotはCLI設定選択用であり、コーパスを10時間に切り詰めるものではありません。
+前処理ではS2UTの補助ラベルやTT2の音素・melも生成します。
 
-Colab専用依存は`requirements/colab313.txt`で固定します。NumPy 2.1.3、scikit-learn 1.6.1、
-SciPy 1.15.3、Numba 0.61.2、SentencePiece 0.2.1、Hydra 1.3.2／OmegaConf 2.3.0を使用します。
-NumPyとscikit-learnの対応範囲は[NumPy公式](https://numpy.org/devdocs/release/2.1.3-notes.html)・
-[scikit-learn公式](https://scikit-learn.org/stable/install)を参照してください。
-Dockerの従来レシピは維持し、Pythonの標準ライブラリにはパッチを当てません。
+## 保存・切断後の再開
 
-固定fairseqのコピーへ`compat313.py`でdataclassのdefault_factory化、Hydra初期化・依存指定、
-廃止されたNumPy型aliasの置換を適用します。パッチと依存ファイルのhashも環境lockへ保存します。
-上流submoduleは変更しません。使わないfairseq独自NAT CUDA拡張はbuildせず、
-PyTorchのCUDA経路は有効にします。setupは`pip check`、コンパイル済みバッチ拡張、
-fairseq学習CLI・設定・mel frontendの確認が失敗した場合に停止します。
+同じノートブック、実験名、設定で番号順に再実行します。
+学習snapshotがあれば自動でresumeします。snapshotが壊れていれば停止し、
+黙って初めから学習し直すことはありません。最初の保存区間が完了するまでは復元点はありません。
+学習対象を切り替えても、run名とローカル作業先は実験名・用途・対象別に分離されます。
 
-WindowsのPython 3.13.7でCPU回帰・fairseqコピーのimport／CLI／mel frontendを確認しています。
-Linuxのネイティブ拡張build、Colab GPU学習、固定HuBERT checkpoint＋実音声を使う
-unit列一致検証は別途必要です。CPU合成データのテストを実音声E2E成功とは扱いません。
+- data/: common manifest・前処理データ
+- checkpoints/: hash検証付き学習snapshot
+- runs/: 各方式の予測音声・JSONL・metrics
+- data/results/: 比較レポート・acceptance
+- session.log: コマンドの標準出力とエラー（セルにも逐次表示）
 
-## 切断に備えた仕組み
+切断時の学習再計算は最後の保存区間以降です。
+推論は成功済みpairのSHAを照合して再利用します。
+比較セルは不足するローカルcheckpointをDriveから復元します。
+既存の比較レポートを更新する場合だけ、セル6のOVERWRITE_COMPARISONをTrueにしてください。
 
-1. `chunk-updates`だけ学習し、trainerを正常終了させます。
-2. checkpoint内の累計更新数とoptimizer状態を確認します。
-3. checkpoint・設定・ログを新しいDrive世代へコピーし、SHA-256を照合します。
-4. 全ファイルのコピー後に`snapshot.json`を書き、その世代を再開可能にします。
-5. 次の区間は既存checkpointから続行します。
+コードrevision、学習設定、データ、環境lockの不一致は再開を拒否します。
+条件変更時は新しい実験名を使ってください。過去のcheckpointやsnapshotは削除しません。
+旧版のsmoke-dataや手動run名は自動移動しません。旧実験を継続する場合は、そのrevisionの
+ノートブックを使ってください。旧保存先に新しいlockを上書きしてはいけません。
 
-TT2はモデル・optimizer・RNG・rank別buffer、vocoderは生成器・識別器・両optimizer・RNG、
-S2UTはfairseq標準の学習状態を保存します。S2UTの区間再開が連続GPU実行とbitwise一致する
-とは主張しません。単一GPU用で、複数Colabから同じrunへ同時書き込みしないでください。
+## ランタイムと性能
 
-切断後は同じ保存先で上からセットアップし、学習セルの`RESUME=True`にして実行します。
-`TOTAL_UPDATES`は追加回数ではなく累計到達点です。増やして続行できます。
-データ・モデル構造・学習率等は変えず、変更時は新しいrunを開始してください。
-復元前のローカル作業ディレクトリは`.interrupted-<uuid>`へ退避し、勝手に消しません。
+Colab標準Pythonとは独立したPython 3.10.18とtorch/torchaudio 2.7.1を使用します。
+3.13で構築途中のVMを再利用せず、新しいGPUランタイムで開始してください。
+requirements/colab310.txtで従来の依存を固定し、setup.py --inferenceで
+Cascade・S2T→TTS・共通評価の依存も導入します。
 
-コピー途中や破損した最新世代は採用せず、正常な以前の世代へ戻ります。
-保存完了前の区間は再計算します。最初のバックアップ前に切れた場合は再開点がないため、
-ローカル残骸を確認し、新しいrun名で開始してください。
-ディスク容量不足・学習エラー時も既存バックアップを保持して停止します。
-世代の自動削除はしません。容量を監視し、検証済み世代を残して手動整理してください。
+通常用はPERFORMANCE=gpu80（TT2 batch8、vocoder batch16、workers4、
+S2UT max-tokens20000）を使います。VRAM使用量の保証ではありません。
+smoke用は小さいbatchとworkers0です。
+詳細設定が必要な場合はdirect_s2st.colab.make_configの引数を変更しますが、
+既存runの条件は途中変更しないでください。
 
-## 時間・容量の調整
+モデルはsubprocessの終了時にGPUメモリを解放します。
+BLASERは既定で無効です。SONARの依存は別途検証が必要であり、
+有効化時に黙って省略しません。全方式で同じ評価条件を使ってください。
 
-### 80GB・単一GPUでのバッチ並列学習
+## 検証範囲
 
-初回smoke後、新しいRUN_NAMEで設定セルの`PERFORMANCE='gpu80'`を選択します。
-この選択はモデルサイズや総更新数を変更せず、本学習を暗黙に開始しません。
-
-| 設定 | smoke | gpu80（調整開始値、実機未計測） |
-| --- | --- | --- |
-| TT2 batch size | 1 | 8 |
-| unit／mel vocoder batch size | 1 | 16 |
-| S2UT max-tokens | 2000 | 20000 |
-| CPU読み込みworker数 | 0 | 4 |
-| ローカルcheckpoint間隔 | 1更新 | 50更新 |
-| Drive同期・プロセス再起動間隔 | 1更新 | 100更新 |
-
-`BATCH_SIZE`、`NUM_WORKERS`、`MAX_TOKENS`、`SAVE_INTERVAL`で上書きできます。
-`UPDATE_FREQ`はTT2/S2UTの勾配蓄積回数で、同時処理するバッチ数ではありません。
-S2UTはBATCH_SIZEではなくMAX_TOKENSでバッチ量を調整します。
-TT2/vocoderの`PREFETCH_FACTOR`はworkerあたりのCPU先読みサンプル数です。
-CPUスレッドで読み込みを重ね、学習への投入順序を保持します。
-S2UTの読み込みはfairseq標準のworkerを使用します。
-
-vocoderは各バッチ中の最短音声に合わせ、上限segment-frames以内の等長区間を切り出します。
-ゼロ埋めを識別器の教師に使わず、unit duration lossも各音声の実unit列から計算し、
-音声単位で平均します。切り出しの乱数は学習スレッドでのみ消費し、再開用RNGへ保存します。
-
-ローカル保存とDrive同期は別です。VM消失時に保証できる再開点はDrive保存完了分までです。
-区間末尾はSAVE_INTERVALの倍数でなくても保存されます。
-総更新数2のままなら、CHUNK_UPDATES=100でも2更新で終了・保存します。
-設定・batch sizeの変更は新しいrunで行ってください。
-
-80GBでも収まるバッチ量はモデル・音声長に依存します。まず短い試行でGPUメモリと
-1更新の時間を測り、OOM時はバッチ量を減らします。GPU80設定の速度向上や最大使用量は
-未検証です。これは単一モデルのバッチ並列化であり、複数モデルを同時起動する機能ではありません。
-
-Colabのidle timeout、利用可能GPU、最大稼働時間は変動します。固定の時間まで動く保証は
-ありません。[公式FAQ](https://research.google.com/colaboratory/faq.html)を確認してください。
-自動再接続、keep-aliveなどの制限回避処理はありません。
-
-`SESSION_SECONDS`は学習subprocessへ渡す残り時間です。上限で実行中の区間を停止し、
-最後にDrive保存が完了した区間を再開点にします。初期化・データ照合・コピーには別途
-時間がかかるため、サービスの上限より十分短く設定してください。
-Driveへの書き込みがクラウドへ同期する時刻までは保証できません。
-
-まず`CHUNK_UPDATES=1`で保存まで確認し、更新時間と保存時間を測って調整します。
-短い区間は再計算量を抑えますが、モデル再ロード・保存のコストが大きくなります。
-バックアップはrun全体を世代ごとに保存するため、大規模モデルではDrive容量を多く使います。
-不要な推論音声・巨大データをwork-rootへ置かないでください。
-
-Driveの小ファイルI/Oは遅くなる場合があります。最初はDrive上の派生データを使い、
-必要なら同じ内容を毎回同じ`/content`パスへ復元してから学習してください。
-prepared manifestに絶対パスが含まれるため、途中で保存先だけを変えて再開しないでください。
-
-## 本学習と評価
-
-ノートブックのsmoke設定は品質評価用ではありません。新しいDATAとrun名で本学習データを
-準備し、モデルサイズ・学習率・batch size・更新数を明示的に決めます。
-`make_config`のTT2はsmoke／接続確認用レシピで、model-sizeだけを変えても論文の全設定には
-なりません。[reference recipe](REFERENCE_PARITY.md)を参照してください。
-S2UTの`max-tokens=2000`もメモリ使用量の保証ではありません。
-
-推論・vocoder・評価は既存CLIを使用し、復元先のcheckpointを推論設定に指定します。
-Cascade／評価を使う場合は固定Python環境へ`requirements/cascade.txt`／
-`requirements/evaluation.txt`を追加インストールしてください。学習開始後に依存を変更せず、
-変更が必要なら環境lockを更新して別runとして扱います。
-3方式Docker一括実行の`suite.py`はこのノートブックでは使いません。
-実音声のE2E成功は学習区間の終了とは別に確認します。
+ノートブック構文、テスト/通常の設定分離、全件処理の確認ガード、ログ表示コード、
+既存の学習snapshot・再開処理をCPUテストします。
+実Colabでの環境構築・GPU学習・Drive切断復帰・実音声4方式E2Eは未検証です。
+Python 3.10/Linux向けの学習＋推論依存解決は確認済みです。

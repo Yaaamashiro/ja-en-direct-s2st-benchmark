@@ -7,7 +7,7 @@ from typing import Any
 from .io import read_jsonl
 
 
-SYSTEMS = ("s2ut", "translatotron2", "cascade")
+SYSTEMS = ("s2ut", "translatotron2", "cascade", "s2t_tts")
 
 
 @dataclass(frozen=True)
