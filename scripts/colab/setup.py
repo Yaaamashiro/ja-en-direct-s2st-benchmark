@@ -79,6 +79,7 @@ def prepare_fairseq_copy(source, runtime):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inference', action='store_true', help='Install shared Cascade/S2T and core evaluation dependencies before locking')
+    parser.add_argument('--allow-cpu', action='store_true', help='Allow CPU-only preparation; keep the same CUDA-capable packages for later GPU use')
     args = parser.parse_args()
     if not Path('/content').is_dir() or sys.platform != 'linux':
         raise RuntimeError('This bootstrap is for a Linux Colab runtime')
@@ -133,7 +134,8 @@ def main():
     run(python, '-c', 'import torch, torchaudio; import examples.speech_synthesis.data_utils; '
         'from fairseq.data.audio.audio_utils import get_mel_filters; '
         'assert get_mel_filters(16000,512,80,0,8000).shape == (80,257); '
-        'assert torch.cuda.is_available(), "Select a GPU runtime"; print(torch.cuda.get_device_name())', env=env)
+        f'assert {args.allow_cpu!r} or torch.cuda.is_available(), "Select a GPU runtime"; '
+        'print(torch.cuda.get_device_name() if torch.cuda.is_available() else "CPU preparation runtime")', env=env)
     freeze = subprocess.check_output([str(python), '-m', 'pip', 'freeze'], text=True)
     lock = dict(python=actual, fairseq=FAIRSEQ, espeak=ESPEAK, packages=freeze,
         inference_dependencies=args.inference,
