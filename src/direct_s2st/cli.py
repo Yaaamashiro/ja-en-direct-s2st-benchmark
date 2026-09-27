@@ -129,7 +129,7 @@ def _run_corpus(args: argparse.Namespace) -> dict[str, Any]:
             overwrite=args.overwrite,
             dry_run=args.dry_run,
         )
-    return validate_manifest_directory(common_root)
+    return validate_manifest_directory(common_root, resume=args.resume)
 
 
 @operation('direct_s2st/cli: _run_s2ut')

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import sys
+import time
+from itertools import islice
 from ..progress import operation, track
 from ..manifests.reader import read_common_manifest
 from typing import Any, Protocol
 
 from ..hashing import sha256_file, sha256_text
-from ..io import atomic_write_json, atomic_write_jsonl, atomic_write_text, read_jsonl
+from ..journal import digest
+from ..preparation import Checkpoints, adaptive_map, file_stamp
+from ..io import atomic_write_json, atomic_write_jsonl, atomic_write_text
 from .reduce_units import reduce_consecutive_units, validate_units
 
 
@@ -59,19 +65,89 @@ class HubertKMeansExtractor:
         )
 
     def __call__(self, audio_path: Path) -> list[int]:
-        import soundfile as sf
+        return self.extract_many([audio_path])[0]
 
+    @staticmethod
+    def _read_audio(audio_path):
+        import soundfile as sf
         waveform, sample_rate = sf.read(audio_path, dtype="float32", always_2d=False)
         if sample_rate != 16000 or waveform.ndim != 1:
             raise ValueError(f"HuBERT input must be 16 kHz mono: {audio_path}")
-        inputs = self.processor(waveform, sampling_rate=16000, return_tensors="pt")
-        values = inputs.input_values.to(self.device)
+        return waveform
+
+    def _batch(self, waves):
+        # No padding: HuBERT's group-normalized convolution changes with padding.
+        inputs = self.processor(waves, sampling_rate=16000, return_tensors='pt', padding=False)
         with self.torch.inference_mode():
-            output = self.model(values, output_hidden_states=True)
-        features = output.hidden_states[self.layer][0].float().cpu().numpy()
-        if features.shape[1] != self.centers.shape[1]:
-            raise ValueError("HuBERT feature width does not match k-means centroids")
-        return assign_kmeans_units(features, self.centers).astype(int).tolist()
+            output = self.model(inputs.input_values.to(self.device), output_hidden_states=True)
+        features = output.hidden_states[self.layer].float().cpu().numpy()
+        return [assign_kmeans_units(feature, self.centers).astype(int).tolist() for feature in features]
+
+    def extract_many(self, paths):
+        maximum = int(os.environ.get('S2ST_HUBERT_BATCH_MAX', '8'))
+        if not 1 <= maximum <= 32:
+            raise ValueError('S2ST_HUBERT_BATCH_MAX must be between 1 and 32')
+        waves = list(adaptive_map(self._read_audio, paths))
+        groups = {}
+        for index, waveform in enumerate(waves):
+            groups.setdefault(len(waveform), []).append(index)
+        results = [None] * len(waves)
+        batch_size = min(getattr(self, '_batch_size', 1), maximum)
+        for indices in groups.values():
+            offset = 0
+            while offset < len(indices):
+                chosen = indices[offset:offset + batch_size]
+                started = time.monotonic()
+                try:
+                    values = self._batch([waves[index] for index in chosen])
+                except self.torch.cuda.OutOfMemoryError:
+                    if len(chosen) == 1:
+                        raise
+                    batch_size = max(1, len(chosen) // 2)
+                    self.torch.cuda.empty_cache()
+                    print(f'[adaptive] HuBERT OOM: retry batch={batch_size}', file=sys.stderr, flush=True)
+                    continue
+                for index, value in zip(chosen, values):
+                    results[index] = value
+                offset += len(chosen)
+                rate = len(chosen) / max(time.monotonic() - started, .001)
+                if self.device.type == 'cuda':
+                    free, total = self.torch.cuda.mem_get_info(self.device)
+                    rates = getattr(self, '_batch_rates', {})
+                    previous = rates.get(len(waves[chosen[0]]))
+                    slower = (previous is not None and len(chosen) > previous[0]
+                              and rate < previous[1] * .85)
+                    if free / total < .15 or slower:
+                        batch_size = max(1, batch_size // 2)
+                    elif free / total > .3:
+                        batch_size = min(maximum, batch_size + 1)
+                    rates[len(waves[chosen[0]])] = (len(chosen), rate)
+                    self._batch_rates = rates
+                    now = time.monotonic()
+                    if now - getattr(self, '_last_report', float('-inf')) >= 10:
+                        print(f'[adaptive] HuBERT actual_batch={len(chosen)} next_batch={batch_size} '
+                              f'items_per_s={rate:.3f} free_vram={free}/{total}', file=sys.stderr, flush=True)
+                        self._last_report = now
+        self._batch_size = batch_size
+        return results
+
+
+def _recoverable_units(rows, extractor, cache, clusters):
+    rows = iter(rows)
+    while window := list(islice(rows, 16)):
+        keys = [digest([row, file_stamp(row['en_audio'])]) for row in window]
+        values = [cache.get(key) for key in keys]
+        missing = [index for index, value in enumerate(values) if value is None]
+        paths = [Path(window[index]['en_audio']) for index in missing]
+        extracted = (extractor.extract_many(paths) if hasattr(extractor, 'extract_many')
+                     else map(extractor, paths))
+        for index, units in zip(missing, extracted):
+            values[index] = validate_units(units, clusters=clusters)
+            cache.record(keys[index], values[index])
+        for row, value in zip(window, values):
+            if value is None:
+                raise ValueError('extractor returned too few results')
+            yield row, validate_units(value, clusters=clusters)
 
 
 def load_fairseq_kmeans_centers(path: Path, *, expected_clusters: int) -> Any:
@@ -128,58 +204,45 @@ def extract_units(
     splits = (split,) if split else ("train", "dev", "test")
     records: list[dict[str, Any]] = []
     processed = 0
-    for current_split in splits:
-        split_processed = 0
-        for row in track(read_common_manifest(common_root / f"{current_split}.jsonl"), f'units: {current_split} (extract/reuse)'):
-            pair_id = str(row["pair_id"])
-            if stable_shard(pair_id, num_shards) != shard_index:
-                continue
-            if limit is not None and split_processed >= limit:
-                break
-            original_path = output_root / current_split / "original" / f"{pair_id}.units"
-            reduced_path = output_root / current_split / "reduced" / f"{pair_id}.units"
-            if resume and original_path.is_file() and reduced_path.is_file():
-                original = load_unit_file(original_path, clusters=clusters)
-                reduced = load_unit_file(reduced_path, clusters=clusters)
-            else:
-                original = validate_units(extractor(Path(row["en_audio"])), clusters=clusters)
+    lock = dict(hubert_model=hubert_model, hubert_revision=hubert_revision,
+                hubert_layer=hubert_layer, kmeans_clusters=clusters,
+                kmeans_sha256=kmeans_sha256, kmeans_artifact=kmeans_artifact, num_shards=num_shards)
+    # Publish identity BEFORE outputs, so partial runs cannot mix model revisions.
+    atomic_write_json(output_root / 'unit-lock.json', lock, resume=True, overwrite=overwrite)
+    with Checkpoints(output_root / '.checkpoints', dict(stage='units-v1', **lock),
+                     resume=resume and not overwrite, overwrite=overwrite) as cache:
+        for current_split in splits:
+            selected = [row for row in read_common_manifest(common_root / f"{current_split}.jsonl", parallel=True)
+                        if stable_shard(str(row['pair_id']), num_shards) == shard_index]
+            if limit is not None:
+                selected = selected[:limit]
+            for row, original in track(_recoverable_units(selected, extractor, cache, clusters),
+                                       f'units: {current_split} (extract/reuse)', total=len(selected)):
+                pair_id = str(row['pair_id'])
+                original_path = output_root / current_split / "original" / f"{pair_id}.units"
+                reduced_path = output_root / current_split / "reduced" / f"{pair_id}.units"
                 reduced = reduce_consecutive_units(original)
-                atomic_write_text(original_path, serialize_units(original), overwrite=overwrite)
-                atomic_write_text(reduced_path, serialize_units(reduced), overwrite=overwrite)
-            if reduced != reduce_consecutive_units(original):
-                raise ValueError(f"reduced unit sequence does not match original for {pair_id}")
-            records.append(
-                {
-                    "pair_id": pair_id,
-                    "split": current_split,
-                    "unit_count_original": len(original),
-                    "unit_count_reduced": len(reduced),
-                    "units_original_path": str(original_path.resolve()),
-                    "units_reduced_path": str(reduced_path.resolve()),
-                    "hubert_model": hubert_model,
-                    "hubert_revision": hubert_revision,
-                    "hubert_layer": hubert_layer,
-                    "kmeans_clusters": clusters,
-                    "kmeans_sha256": kmeans_sha256,
-                    "kmeans_artifact": kmeans_artifact,
-                }
-            )
-            processed += 1
-            split_processed += 1
+                atomic_write_text(original_path, serialize_units(original), resume=resume, overwrite=overwrite)
+                atomic_write_text(reduced_path, serialize_units(reduced), resume=resume, overwrite=overwrite)
+                records.append(
+                    {
+                        "pair_id": pair_id,
+                        "split": current_split,
+                        "unit_count_original": len(original),
+                        "unit_count_reduced": len(reduced),
+                        "units_original_path": str(original_path.resolve()),
+                        "units_reduced_path": str(reduced_path.resolve()),
+                        "hubert_model": hubert_model,
+                        "hubert_revision": hubert_revision,
+                        "hubert_layer": hubert_layer,
+                        "kmeans_clusters": clusters,
+                        "kmeans_sha256": kmeans_sha256,
+                        "kmeans_artifact": kmeans_artifact,
+                    }
+                )
+                processed += 1
     manifest = output_root / f"manifest.shard-{shard_index:05d}-of-{num_shards:05d}.jsonl"
     atomic_write_jsonl(manifest, records, resume=resume, overwrite=overwrite)
-    lock = {
-        "hubert_model": hubert_model,
-        "hubert_revision": hubert_revision,
-        "hubert_layer": hubert_layer,
-        "kmeans_clusters": clusters,
-        "kmeans_sha256": kmeans_sha256,
-        "kmeans_artifact": kmeans_artifact,
-        "num_shards": num_shards,
-    }
-    atomic_write_json(
-        output_root / "unit-lock.json", lock, resume=True, overwrite=overwrite
-    )
     return {"processed": processed, "manifest": str(manifest), **lock}
 
 

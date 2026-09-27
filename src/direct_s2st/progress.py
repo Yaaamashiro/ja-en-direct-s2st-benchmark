@@ -31,6 +31,8 @@ class Progress:
         total = '?' if self.total is None else self.total
         counts = (f'checked={self.count}/{total} no_advance={now-self.advanced:.1f}s '
                   if self.counted else '')
+        if self.counted and self.total is not None:
+            counts += f'remaining={max(0, self.total-self.count)} '
         message = (f'[progress] {self.phase} status={status} '
                    f'{counts}elapsed={now-self.started:.1f}s '
                    f'current={self.current} activity={self.activity}')
@@ -78,10 +80,11 @@ def track(items, phase, *, total=None, interval=10.0):
             pass
     with Progress(phase, total=total, interval=interval, counted=True) as progress:
         for item in items:
-            if isinstance(item, dict):
-                label = item.get('pair_id', item.get('id', item.get('stage', '-')))
+            displayed = item[0] if isinstance(item, tuple) and item and isinstance(item[0], dict) else item
+            if isinstance(displayed, dict):
+                label = displayed.get('pair_id', displayed.get('id', displayed.get('stage', '-')))
             else:
-                label = getattr(item, 'pair_id', item)
+                label = getattr(displayed, 'pair_id', displayed)
             progress.current = str(label)[:160]
             yield item
             progress.count += 1

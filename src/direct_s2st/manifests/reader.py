@@ -3,17 +3,20 @@ import os
 from pathlib import Path
 
 from ..io import read_jsonl
+from ..preparation import adaptive_map
 from .paths import resolve_audio_path
 
 
-def read_common_manifest(path: Path, *, corpus_root: Path | None = None):
+def read_common_manifest(path: Path, *, corpus_root: Path | None = None, parallel: bool = False):
     configured = corpus_root or os.environ.get("CORPUS_ROOT")
-    for row in read_jsonl(path):
+    def resolve(row):
         if configured:
             for language in ("ja", "en"):
                 raw = row.get(f"{language}_audio_corpus_relative") or row[f"{language}_audio"]
                 row[f"{language}_audio"] = str(resolve_audio_path(raw, Path(configured)))
-        yield row
+        return row
+    rows = read_jsonl(path)
+    yield from adaptive_map(resolve, rows) if parallel and configured else map(resolve, rows)
 
 
 def portable_row(row, corpus_root: Path) -> dict:

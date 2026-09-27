@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from ..hashing import sha256_file
+from ..preparation import adaptive_map
 from ..io import atomic_write_json, atomic_write_text, read_jsonl
 from .extract_units import load_unit_file
 from .multitask import prepare_labels, validate_prepared
@@ -45,7 +46,7 @@ def prepare_fairseq(
                 raise ValueError(f"duplicate unit record: {pair_id}")
             unit_records[pair_id] = row
 
-    rows_by_split = {split: list(read_common_manifest(common_root / f"{split}.jsonl")) for split in ("train", "dev", "test")}
+    rows_by_split = {split: list(read_common_manifest(common_root / f"{split}.jsonl", parallel=True)) for split in ("train", "dev", "test")}
     seen = set()
     for split, rows in rows_by_split.items():
         for row in rows:
@@ -61,7 +62,7 @@ def prepare_fairseq(
     for split in ("train", "dev", "test"):
         lines = ["id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames\n"]
         count = 0
-        for row in track(rows_by_split[split], f's2ut: prepare {split}'):
+        def prepare_row(row):
             pair_id = str(row["pair_id"])
             unit_record = unit_records.get(pair_id)
             if unit_record is None:
@@ -71,13 +72,17 @@ def prepare_fairseq(
             units = load_unit_file(
                 Path(unit_record["units_reduced_path"]), clusters=clusters
             )
-            if split == "train":
-                frequencies.update(units)
-            lines.append(
+            line = (
                 f"{pair_id}\t{Path(row['ja_audio']).resolve()}\t"
                 f"{_ten_ms_frames(Path(row['ja_audio']))}\t"
                 f"{' '.join(map(str, units))}\t{len(units)}\n"
             )
+            return units, line
+        for units, line in track(adaptive_map(prepare_row, rows_by_split[split]),
+                                 f's2ut: prepare {split}', total=len(rows_by_split[split])):
+            if split == 'train':
+                frequencies.update(units)
+            lines.append(line)
             count += 1
         atomic_write_text(
             output_root / f"{split}.tsv",
