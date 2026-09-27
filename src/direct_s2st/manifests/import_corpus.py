@@ -11,6 +11,7 @@ from .schema import CommonManifestRow, SPLITS
 from .split import group_by_original_split
 from .validate import validate_rows
 from .reader import portable_row
+from ..preparation import adaptive_map
 
 
 @operation('manifests/import_corpus: import_corpus')
@@ -28,15 +29,17 @@ def import_corpus(
         raise ValueError("common manifest output must not be inside corpus_root")
     rows: list[CommonManifestRow] = []
     selected = {split: 0 for split in SPLITS}
-    for raw in track(read_jsonl(accepted_manifest), 'corpus: resolve audio paths'):
-        row = CommonManifestRow.from_corpus_row(
+    def convert(raw):
+        return CommonManifestRow.from_corpus_row(
             raw, corpus_root=corpus_root, manifest_parent=accepted_manifest.parent
         )
+    for row in track(adaptive_map(convert, read_jsonl(accepted_manifest)), 'corpus: resolve audio paths'):
         if limit is not None and selected[row.split] >= limit:
             continue
         rows.append(row)
         selected[row.split] += 1
-    summary = validate_rows(rows)
+    summary = validate_rows(rows, resume=resume,
+        checkpoint_root=None if dry_run else output_root.parent / '.prep-checkpoints/corpus')
     lock = {
         "schema_version": 1,
         "source_manifest_modified_at": datetime.fromtimestamp(

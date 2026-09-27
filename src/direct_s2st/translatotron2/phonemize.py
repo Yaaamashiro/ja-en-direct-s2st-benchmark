@@ -1,13 +1,14 @@
 from __future__ import annotations
+from ..preparation import Checkpoints, checkpoint_map
+from ..journal import digest
 
 import re
-from ..progress import operation, track
+from ..progress import operation
 import subprocess
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
-from ..manifests.reader import read_common_manifest
 from typing import Any, Protocol
 
 from ..hashing import sha256_file
@@ -189,22 +190,28 @@ def phonemize_manifests(
     token_counts: Counter[str] = Counter()
     processed = 0
     suffix = "" if num_shards == 1 else f".shard-{shard_index:05d}-of-{num_shards:05d}"
+    identity = dict(stage='phonemes-v1', engine=engine, version=version, inventory=list(vocabulary),
+                    options={name: getattr(phonemizer, name, None) for name in
+                             ('language', 'preserve_punctuation', 'with_stress', 'word_separator')})
     for current_split in splits:
         lines: list[str] = []
-        split_processed = 0
-        for row in track(read_common_manifest(common_root / f"{current_split}.jsonl"), f'phonemize: {current_split} (generate/reuse)'):
-            pair_id = str(row["pair_id"])
-            if stable_shard(pair_id, num_shards) != shard_index:
-                continue
-            if limit is not None and split_processed >= limit:
-                break
-            sequence = normalize_phonemes(
-                phonemizer(str(row["en_tts_text"])), with_stress=True
-            )
-            lines.append(f"{pair_id}\t{sequence}\n")
-            token_counts.update(sequence.split())
-            processed += 1
-            split_processed += 1
+        # Phonemization needs text, not another stat/open of every WAV on Drive.
+        rows = [row for row in read_jsonl(common_root / f'{current_split}.jsonl')
+                if stable_shard(str(row['pair_id']), num_shards) == shard_index]
+        if limit is not None:
+            rows = rows[:limit]
+        def phonemize(row):
+            return dict(pair_id=str(row['pair_id']), sequence=normalize_phonemes(
+                phonemizer(str(row['en_tts_text'])), with_stress=True))
+        with Checkpoints(output_root / '.checkpoints', identity, resume=resume and not overwrite,
+                         overwrite=overwrite and current_split == splits[0]) as cache:
+            for result in checkpoint_map(phonemize, rows, cache,
+                    lambda row: digest([row['pair_id'], row['en_tts_text']]),
+                    f'phonemize: {current_split} (generate/reuse)', total=len(rows)):
+                sequence = result['sequence']
+                lines.append(f"{result['pair_id']}\t{sequence}\n")
+                token_counts.update(sequence.split())
+                processed += 1
         atomic_write_text(
             output_root / f"{current_split}{suffix}.tsv",
             "".join(lines),

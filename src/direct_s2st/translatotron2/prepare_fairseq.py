@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from ..progress import operation, track
 import tempfile
 import wave
@@ -14,6 +15,8 @@ from typing import Any
 import yaml
 
 from ..hashing import sha256_file
+from ..journal import digest
+from ..preparation import Checkpoints, adaptive_map, checkpoint_map, file_stamp
 from ..io import ExistingOutputError, atomic_write_json, atomic_write_text, read_jsonl
 
 FeatureExtractor = Callable[[Path, Path, dict[str, Any]], None]
@@ -112,7 +115,7 @@ def _extract_logmel_official(
 
 
 @operation('translatotron2/prepare_fairseq: _write_feature_zip')
-def _write_feature_zip(feature_root: Path, zip_path: Path) -> None:
+def _write_feature_zip(feature_root: Path, zip_path: Path, files=None) -> None:
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=zip_path.parent, prefix=f".{zip_path.name}.", suffix=".tmp"
@@ -121,8 +124,9 @@ def _write_feature_zip(feature_root: Path, zip_path: Path) -> None:
     temporary = Path(temporary_name)
     try:
         with zipfile.ZipFile(temporary, "w", zipfile.ZIP_STORED) as archive:
-            for path in track(sorted(feature_root.glob("*.npy")), 'mel: write ZIP'):
-                archive.write(path, arcname=path.name)
+            entries = files if files is not None else [(p.name, p) for p in sorted(feature_root.glob('*.npy'))]
+            for name, path in track(entries, 'mel: write ZIP'):
+                archive.write(path, arcname=name)
         os.replace(temporary, zip_path)
     except BaseException:
         temporary.unlink(missing_ok=True)
@@ -196,7 +200,7 @@ def prepare_fairseq(
     target_audio: dict[str, Path] = {}
     for split in ("train", "dev", "test"):
         rows_by_split[split] = []
-        for row in track(read_common_manifest(common_root / f"{split}.jsonl"), f'mel: read {split}'):
+        for row in track(read_common_manifest(common_root / f"{split}.jsonl", parallel=True), f'mel: read {split}'):
             pair_id = str(row["pair_id"])
             sequence = phonemes[split].get(pair_id)
             if sequence is None:
@@ -208,12 +212,15 @@ def prepare_fairseq(
                 {
                     "id": pair_id,
                     "src_audio": Path(row["ja_audio"]).resolve(),
-                    "src_n_frames": _ten_ms_frames(Path(row["ja_audio"])),
                     "phonemes": sequence,
                 }
             )
 
     for split, rows in rows_by_split.items():
+        def source_frames(row):
+            return {**row, 'src_n_frames': _ten_ms_frames(row['src_audio'])}
+        rows_by_split[split] = list(track(adaptive_map(source_frames, rows),
+                                         f'mel: source headers {split}', total=len(rows)))
         if not rows or {row['id'] for row in rows} != set(phonemes[split]):
             raise ValueError(f'empty split or extra phoneme IDs in {split}')
     output_root.mkdir(parents=True, exist_ok=True)
@@ -221,15 +228,61 @@ def prepare_fairseq(
     zip_path = output_root / f"{feature_name}.zip"
     if zip_path.exists() and not (resume or overwrite):
         raise ExistingOutputError(f"output already exists: {zip_path}")
+    identity = dict(stage='mel-v1', settings=settings, source_settings=source_settings,
+                    dataset=sha256_file(common_root / 'dataset-lock.json'),
+                    manifests={split: sha256_file(common_root / f'{split}.jsonl')
+                               for split in ('train', 'dev', 'test')},
+                    output=str(output_root.resolve()))
+    identity_path = output_root.parent / '.prep-checkpoints' / f'{output_root.name}-mel-input.json'
+    if zip_path.exists() and not identity_path.exists() and not overwrite:
+        old_lock_path = output_root / 'data-lock.json'
+        if not old_lock_path.is_file():
+            raise ValueError('orphan Mel ZIP without configuration lock; use a new output root or --overwrite')
+        old_lock = json.loads(old_lock_path.read_text(encoding='utf-8'))
+        if (old_lock['mel'] != settings or old_lock['source_mel'] != source_settings
+                or old_lock['common_dataset_lock_sha256'] != identity['dataset']):
+            raise ValueError('existing Mel ZIP configuration mismatch')
+    atomic_write_json(identity_path, identity, resume=True, overwrite=overwrite)
     if overwrite or not zip_path.exists():
         extractor = feature_extractor or _extract_logmel_official
-        with tempfile.TemporaryDirectory(
-            dir=output_root, prefix=f".{feature_name}."
-        ) as temporary_name:
-            feature_root = Path(temporary_name)
-            for pair_id, audio_path in track(sorted(target_audio.items()), 'mel: extract features'):
-                extractor(audio_path, feature_root / f"{pair_id}.npy", settings)
-            _write_feature_zip(feature_root, zip_path)
+        if feature_extractor is None:
+            # Load native pools before adaptive_map limits their thread counts.
+            import torchaudio  # noqa: F401
+        with Checkpoints(output_root.parent / '.prep-checkpoints/mel', identity,
+                         resume=resume and not overwrite, overwrite=overwrite) as cache:
+            feature_root = cache.root / 'features'
+            feature_root.mkdir(parents=True, exist_ok=True)
+            def key(item):
+                return digest([item[0], file_stamp(item[1])])
+            def extract(item):
+                import numpy as np
+                pair_id, audio_path = item
+                destination = feature_root / f'{key(item)[:32]}.npy'
+                fd, temporary_name = tempfile.mkstemp(dir=feature_root, suffix='.npy')
+                os.close(fd)
+                temporary = Path(temporary_name)
+                try:
+                    extractor(audio_path, temporary, settings)
+                    array = np.load(temporary, allow_pickle=False)
+                    if array.ndim != 2 or array.shape[1] != settings['n_mels'] or not np.isfinite(array).all():
+                        raise ValueError(f'invalid Mel feature: {pair_id}')
+                    checksum = sha256_file(temporary)
+                    if destination.exists() and not overwrite:
+                        if sha256_file(destination) != checksum:
+                            raise ValueError(f'conflicting cached Mel feature: {pair_id}')
+                    else:
+                        os.replace(temporary, destination)
+                    return dict(id=pair_id, path=str(destination), sha256=checksum)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            files = []
+            for result in checkpoint_map(extract, sorted(target_audio.items()), cache, key,
+                                         'mel: extract/reuse features', total=len(target_audio)):
+                path = Path(result['path'])
+                if sha256_file(path) != result['sha256']:
+                    raise ValueError(f'corrupt cached Mel feature: {path}')
+                files.append((result['id'] + '.npy', path))
+            _write_feature_zip(feature_root, zip_path, files)
 
     target_paths, target_lengths = _zip_manifest(zip_path)
     missing_features = sorted(set(target_audio) - set(target_paths))
