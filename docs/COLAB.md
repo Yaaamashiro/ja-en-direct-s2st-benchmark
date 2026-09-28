@@ -157,6 +157,33 @@ HuBERTの実バッチ数・次の上限・空きVRAM、終了時のcheckpoint保
 CLIでは対応する環境変数`S2ST_PREP_WORKERS`、`S2ST_HUBERT_BATCH_MAX`、
 `S2ST_PREP_RECHECK=1`を指定できます。`S2ST_PREP_ADAPTIVE=0`はCPUワーカーを上限に固定します。
 
+### セル5の常駐・適応学習（任意）
+
+通常ノートブックの `TRAIN_OPTIMIZE=True` は、1 GPU・1学習プロセスをセッション中
+常駐させます。従来の100更新ごとの再起動は行わず、`CHUNK_UPDATES` は旧方式だけに適用します。
+APIの `make_config` は互換性のため `optimize=False` が既定です。
+
+- `TRAIN_MAX_WORKERS=8`: 読込み並列数の上限。TT2/vocoderはCPU負荷・空きRAM・測定速度で約10秒ごとに調整。S2UTはfairseqのepoch境界でのみ調整します。0は逐次読込みです。
+- `TRAIN_CACHE_GB=8`: ローカル音声/ZIP範囲キャッシュの総容量上限。複数worker・終了済workerの残存分も含みます。空きディスクを1 GiB残し、収まらないデータは元ファイルから読みます。コーパスやDrive原本には書きません。セッション終了時に自分の一時キャッシュのみ削除します。
+- `TRAIN_SAVE_INTERVAL=50`: optimizer更新単位の保存間隔。最終更新・時間予算到達時にも保存します。ローカル固定コピーは同期、その後のDriveコピー・SHA-256検証は別スレッドで1件ずつ実行。未確認コピーは最大2件で、遅いDriveには待ち合わせます。
+- `TRAIN_ADAPTIVE_BATCH=False`: ONはTT2/S2UT限定。論理バッチ・サンプル順・更新回数を維持して分割を調整します。ただしTT2のBatchNorm統計やdropoutは変わるため、同一学習結果は保証しません。別の実験条件です。vocoderは2 optimizerを一組として扱い、分割・OOM再試行はしません。
+- `TRAIN_PRECISION='default'`: 既存精度を維持（TT2/vocoder FP32、S2UTのレシピFP16）。明示的にFP32/BF16を選べます。BF16非対応GPUでは停止し、黙って精度を変更しません。
+
+自動分割ON時だけ、optimizer更新前のCUDA OOMを捕捉して勾配・RNG・モデルbufferを戻し、
+同じサンプルを小さい分割で再試行します。1件でもOOM、optimizer中のOOM、device assertは停止します。
+校正は短い試行後に固定し、以後のOOMでは縮小します。GPUが変わると分割校正をやり直します。
+これは最大速度を保証する探索ではありません。GANのOOMは保存済みcheckpointから復旧してください。
+
+`[training-performance]` は処理時間の累計、frames/units等の速度、CPU・RAM・VRAMを表示します。
+CUDA時間には区間内の待ちも含まれ、GPU稼働率そのものではありません。
+`[recovery] learned_at_least` はローカル保存済み更新、`durable_updates` はDriveマウントへの
+コピー検証まで完了した更新です。Driveサーバー側同期の完了までは保証しません。
+切断直前の未保存/未確認更新は再実行します。時間予算はupdate境界で判定し、保存処理の完了待ちは
+予算を超える場合があります。30秒の猶予後も学習が止まらなければ終了を要求し、最後の確認済み保存を使います。
+
+旧runのconfig/revisionを上書きして移行しないでください。新設定は新runで利用します。
+同一設定の再開は従来どおりセル1→5。実GPUでの速度・BF16品質・実Drive切断復旧は未検証です。
+
 ### fairseqコピーで停止した場合
 
 `kaldi_self_train/st/utils`・`steps`の参照先が存在しないことによるコピー失敗は、

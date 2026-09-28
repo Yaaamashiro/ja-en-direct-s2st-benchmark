@@ -64,7 +64,9 @@ def main():
         return output
     Criterion.compute_loss, Criterion.forward = compute, forward
     try:
-        cli_main()
+        from .performance import runtime_hooks
+        with runtime_hooks(audit):
+            cli_main()
         directory = Path(sys.argv[sys.argv.index('--save-dir')+1])
         rank = os.environ.get('RANK', '0')
         atomic_write_json(directory.parent / ('gradient-audit-rank-'+rank+'.json'), audit.result(), overwrite=True)

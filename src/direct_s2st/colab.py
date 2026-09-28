@@ -23,12 +23,19 @@ from .io import atomic_write_json
 @operation('direct_s2st/colab: make_config')
 def make_config(repository, data, environment_lock, kind='tt2', model_size='smoke', *,
                 performance='smoke', batch_size=None, num_workers=None, prefetch_factor=2,
-                max_tokens=None, update_freq=1, save_interval=None):
+                max_tokens=None, update_freq=1, save_interval=None, optimize=False,
+                cache_gb=8, adaptive_batch=False, precision='default'):
     """Explicit throughput knobs; gpu80 is a starting point, not a VRAM guarantee."""
     from .config import load_config
     if performance not in ('smoke', 'gpu80'):
         raise ValueError('unknown performance preset')
     large = performance == 'gpu80'
+    if not math.isfinite(cache_gb) or cache_gb < 0 or precision not in ('default', 'fp32', 'bf16'):
+        raise ValueError('invalid training cache/precision setting')
+    if not optimize and (adaptive_batch or precision != 'default'):
+        raise ValueError('batch/precision tuning requires optimize=True')
+    if kind in ('unit', 'mel') and adaptive_batch:
+        raise ValueError('GAN batch adaptation is unsupported; keep its two-optimizer update fixed')
     batch_size = batch_size if batch_size is not None else ((16 if kind in ('unit', 'mel') else 8) if large else 1)
     num_workers = num_workers if num_workers is not None else (4 if large else 0)
     max_tokens = max_tokens if max_tokens is not None else (20000 if large else 2000)
@@ -57,6 +64,10 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
         command[command.index('--max-tokens')+1] = str(max_tokens)
         command[command.index('--num-workers')+1] = str(num_workers)
         command[command.index('--update-freq')+1] = str(update_freq)
+        if precision != 'default':
+            command.remove('--fp16')
+            if precision == 'bf16':
+                command.append('--bf16')
         from .s2ut.preflight import validate_training
         validate_training(root, command)
         checkpoint = 'checkpoints/checkpoint_last.pt'
@@ -82,10 +93,15 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
     if kind in ('unit', 'mel'):
         identity_files.append(str(generator))
     if kind == 'unit':
-        identity_files += [str(p) for p in sorted((data/'s2ut/units').rglob('*')) if p.is_file()]
-    return dict(kind='vocoder' if kind in ('unit', 'mel') else kind, command=command,
+        identity_files += [str(p) for p in sorted((data/'s2ut/units').rglob('*'))
+                           if p.is_file() and '.checkpoints' not in p.parts]
+    result = dict(kind='vocoder' if kind in ('unit', 'mel') else kind, command=command,
         checkpoint=checkpoint, identity_files=identity_files,
         resume_args=['--resume'] if kind in ('unit', 'mel') else ['--restore-file', '{checkpoint}'])
+    if optimize:
+        result['runtime'] = dict(cache_gb=cache_gb, readers=max(1, num_workers) if kind == 's2ut' else 1,
+                                 adaptive_batch=adaptive_batch, precision=precision)
+    return result
 
 
 def safe_relative(value):
@@ -209,6 +225,13 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
             raise ValueError('snapshot update count mismatch')
     if restore_only:
         return dict(status='RESTORED', durable_updates=completed)
+    if completed >= total:
+        return dict(status='COMPLETE', durable_updates=completed)
+    if config.get('runtime'):
+        from .session_runtime import run_continuous
+        return run_continuous(config, work=work, backup=backup, identity=identity,
+                              completed=completed, total=total, seconds=seconds,
+                              inspect_checkpoint=inspect_checkpoint, publish=publish)
     started = clock()
     while completed < total:
         remaining = seconds - (clock() - started)

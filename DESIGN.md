@@ -23,8 +23,13 @@ PCM16、duration、必須 text を検証し、入力 manifest の hash を datas
 長時間処理は sample または shard 単位で atomic write し、`--resume` では成果物を
 検証して再利用する。既存出力は `--overwrite` なしで破壊しない。モデル、fairseq、
 Python、PyTorch、CUDA、Docker、G2P、評価器を immutable revision/version/digest で
-固定する。GPU OOM や device-side assert は process-fatal とし、sample 固有エラーは
+固定する。GPU OOM や device-side assert は原則 process-fatal とし、sample 固有エラーは
 failed record として保持する。
+
+Colabの明示的な適応microbatch学習だけは、optimizer更新前のCUDA OOMについて
+RNG/buffer/勾配を戻して同一サンプルを縮小再試行できる。optimizer中のOOMと
+device-side assertは再試行しない。分割はBatchNorm等の統計を変えるため既定OFFであり、
+混合精度と同様に実験設定へ記録する。GANの2 optimizer更新は分割しない。
 
 標準の前処理、学習、推論、評価はDocker Compose経由で実行する。`common`、
 `fairseq`、`cascade`、`evaluation`を分離し、GPU処理には明示的なdevice reservationを
