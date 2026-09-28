@@ -117,10 +117,16 @@ def test_real_tt2_checkpoint_survives_snapshot_resume(tmp_path):
         assert torch.equal(tensor, restored.state_dict()[name]), name
 
 
-def test_notebook_cells_are_valid_python():
+@pytest.mark.parametrize('name', ['training', 'smoke'])
+def test_notebook_cells_are_valid_python(name):
     import ast
-    notebook = Path(__file__).resolve().parents[2] / 'notebooks/colab_training.ipynb'
+    notebook = Path(__file__).resolve().parents[2] / f'notebooks/colab_{name}.ipynb'
     state = json.loads(notebook.read_text(encoding='utf-8'))
+    settings = ast.parse(''.join(state['cells'][1]['source']))
+    defaults = {node.targets[0].id: node.value.value for node in settings.body
+                if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Constant)}
+    assert defaults['OUTPUT_BASE'] == '/content/drive/MyDrive/ja-en-direct-s2st-benchmark-data'
     for cell in state['cells']:
         if cell['cell_type'] == 'code':
             ast.parse(''.join(cell['source']))
