@@ -53,25 +53,32 @@ def gan_step(generator, discriminators, optim_g, optim_d, conditioning, real, me
              *, units=None, duration_weight=1.0):
     generator.train()
     discriminators.train()
-    fake = generator(code=conditioning, dur_prediction=False) if units is not None else generator(conditioning)
+    from ..train_runtime import precision_context
+    device = real.device
+    with precision_context(device):
+        fake = generator(code=conditioning, dur_prediction=False) if units is not None else generator(conditioning)
     if fake.shape != real.shape:
         raise ValueError(f'generator/wave alignment mismatch: {fake.shape} vs {real.shape}')
     optim_d.zero_grad(set_to_none=True)
     d_loss = fake.new_zeros(())
-    for discriminator in discriminators:
-        real_scores, fake_scores, _, _ = discriminator(real, fake.detach())
-        d_loss = d_loss + discriminator_loss(real_scores, fake_scores)[0]
+    with precision_context(device):
+        for discriminator in discriminators:
+            real_scores, fake_scores, _, _ = discriminator(real, fake.detach())
+            d_loss = d_loss + discriminator_loss([s.float() for s in real_scores], [s.float() for s in fake_scores])[0]
     finite_step(d_loss, optim_d, discriminators.parameters())
     optim_g.zero_grad(set_to_none=True)
     for parameter in discriminators.parameters():
         parameter.requires_grad_(False)
     try:
         adversarial, feature = fake.new_zeros(()), fake.new_zeros(())
-        for discriminator in discriminators:
-            _, generated, features_real, features_fake = discriminator(real, fake)
-            adversarial = adversarial + generator_loss(generated)[0]
-            feature = feature + feature_loss(features_real, features_fake)
-        mel_loss = F.l1_loss(mel(fake.squeeze(1)), mel(real.squeeze(1)))
+        with precision_context(device):
+            for discriminator in discriminators:
+                _, generated, features_real, features_fake = discriminator(real, fake)
+                adversarial = adversarial + generator_loss([s.float() for s in generated])[0]
+                feature = feature + feature_loss([[v.float() for v in group] for group in features_real],
+                                                [[v.float() for v in group] for group in features_fake])
+        # Keep STFT/log objectives in FP32 even when convolutions use BF16.
+        mel_loss = F.l1_loss(mel(fake.squeeze(1).float()), mel(real.squeeze(1).float()))
         if units is None:
             duration = fake.new_zeros(())
         elif isinstance(units[0], (list, tuple)):
@@ -103,7 +110,9 @@ class LogMel(torch.nn.Module):
 
 def load_wave(row, sample_rate, kind):
     import soundfile as sf
-    waveform, rate = sf.read(row['en_audio'], dtype='float32', always_2d=True)
+    from ..train_runtime import cached_file
+    with cached_file(row['en_audio']) as local:
+        waveform, rate = sf.read(local or row['en_audio'], dtype='float32', always_2d=True)
     if waveform.shape[1] != 1:
         raise ValueError('fitting requires mono audio')
     wave = torch.from_numpy(waveform[:, 0])[None]
@@ -195,6 +204,8 @@ def main():
                 'seed': args.seed, 'audio': {}, 'units': {}}
     if args.batch_size != 1:
         identity['batch_size'] = args.batch_size
+    if os.environ.get('S2ST_TRAIN_PRECISION', 'default') != 'default':
+        identity['precision'] = os.environ['S2ST_TRAIN_PRECISION']
     all_units = {}
     for row in track(rows, 'vocoder: verify training inputs'):
         audio_hash = sha256_file(Path(row['en_audio']))
@@ -241,26 +252,41 @@ def main():
         start = state['updates']
     atomic_write_json(args.output_root / 'config.json', config, resume=args.resume, overwrite=args.overwrite)
     from ..prefetch import ordered_samples
+    from ..train_runtime import Timings, enabled, stopping, checkpoint_saved
+    timing = Timings()
     def load(index):
         row = rows[index % len(rows)]
-        return load_wave(row, spec['sample_rate'], args.kind), all_units.get(row['pair_id'])
+        wave = load_wave(row, spec['sample_rate'], args.kind)
+        if enabled() and args.device.startswith('cuda'):
+            wave = wave.pin_memory()
+        return wave, all_units.get(row['pair_id'])
     indices = range(start * args.batch_size, args.max_updates * args.batch_size)
     with ordered_samples(load, indices, args.num_workers, args.prefetch_factor) as loaded:
         for update in track(range(start + 1, args.max_updates + 1), 'vocoder: train updates'):
-            samples = [next(loaded) for _ in range(args.batch_size)]
-            conditioning, real = segment_batch(samples, spec=spec,
-                hop=math.prod(config['upsample_rates']), segment_frames=args.segment_frames,
-                mel=mel, device=args.device)
+            with timing.measure('data_wait'):
+                samples = [next(loaded) for _ in range(args.batch_size)]
+            with timing.measure('transfer_and_conditioning', args.device if enabled() else None):
+                conditioning, real = segment_batch(samples, spec=spec,
+                    hop=math.prod(config['upsample_rates']), segment_frames=args.segment_frames,
+                    mel=mel, device=args.device)
             units = [sample[1] for sample in samples] if args.kind == 'unit' else None
-            losses = gan_step(generator, discriminators, optim_g, optim_d, conditioning, real, mel, units=units)
-            if update % args.save_interval_updates == 0 or update == args.max_updates:
+            with timing.measure('optimization', args.device if enabled() else None):
+                losses = gan_step(generator, discriminators, optim_g, optim_d, conditioning, real, mel, units=units)
+            stop = stopping()
+            if update % args.save_interval_updates == 0 or update == args.max_updates or stop:
                 save_state(checkpoint, dict(format='direct-s2st-vocoder-v1', generator=generator.state_dict(),
                            discriminators=discriminators.state_dict(), optimizer_g=optim_g.state_dict(),
                            optimizer_d=optim_d.state_dict(), updates=update, identity=identity,
                            rng=torch.get_rng_state(), cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []))
+                with timing.measure('local_freeze'):
+                    checkpoint_saved(args.output_root, checkpoint, update)
             atomic_write_json(args.output_root / 'losses' / f'{update:08d}.json', losses,
                               overwrite=args.overwrite or args.resume)
             print(json.dumps({'update': update, **losses}), flush=True)
+            if enabled():
+                timing.report(update, real.numel() / spec['sample_rate'], units='audio_seconds')
+            if stop:
+                break
 
 
 

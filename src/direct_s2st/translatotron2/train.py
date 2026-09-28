@@ -47,6 +47,8 @@ def _main():
         raise ExistingOutputError(str(checkpoint))
     dataset = PreparedDataset(args.data_root, 'train')
     world_size, rank = int(os.environ.get('WORLD_SIZE', '1')), int(os.environ.get('RANK', '0'))
+    if world_size > 1 and os.environ.get('S2ST_TRAIN_OPTIMIZE') == '1':
+        raise ValueError('optimized Colab runtime supports one GPU/process only')
     if world_size > 1:
         if args.device.startswith('cuda'):
             local_rank = int(os.environ['LOCAL_RANK'])
@@ -57,6 +59,11 @@ def _main():
     identity['training'] = dict(batch_size=args.batch_size, seed=args.seed,
                                learning_rate=args.learning_rate, warmup_updates=args.warmup_updates,
                                world_size=world_size, update_freq=args.update_freq, l2=args.l2_regularization)
+    from ..train_runtime import Timings, Microbatches, enabled, pin_batch, stopping, checkpoint_saved
+    if os.environ.get('S2ST_TRAIN_PRECISION', 'default') != 'default':
+        identity['training']['precision'] = os.environ['S2ST_TRAIN_PRECISION']
+    if os.environ.get('S2ST_TRAIN_ADAPTIVE_BATCH') == '1':
+        identity['training']['adaptive_microbatches'] = True
     torch.manual_seed(args.seed)
     preset = 'fisher' if args.model_size == 'reference' else args.model_size
     config = getattr(ModelConfig, preset)()
@@ -84,6 +91,8 @@ def _main():
     elif not args.restore_file:
         torch.manual_seed(args.seed+rank)
     dev = PreparedDataset(args.data_root, 'dev') if args.validate_interval and rank == 0 else None
+    tuning = Microbatches(state.get('performance_state') if args.restore_file else None)
+    timing = Timings()
     from .batching import collate, learning_rate
     from ..prefetch import ordered_samples
     indices = (((update-1)*args.update_freq+micro)*args.batch_size*world_size + rank*args.batch_size+i
@@ -92,11 +101,16 @@ def _main():
     with ordered_samples(lambda i: dataset[i % len(dataset)], indices,
                          args.num_workers, args.prefetch_factor) as samples:
         for update in track(range(completed + 1, args.max_updates + 1), 'tt2: train updates'):
-            batches = [collate([next(samples) for _ in range(args.batch_size)])
-                       for _ in range(args.update_freq)]
+            with timing.measure('data_wait_and_collate'):
+                batches = [collate([next(samples) for _ in range(args.batch_size)])
+                           for _ in range(args.update_freq)]
+                if enabled() and args.device.startswith('cuda'):
+                    batches = [pin_batch(batch) for batch in batches]
             for group in optimizer.param_groups:
                 group['lr'] = learning_rate(args.learning_rate, update, args.warmup_updates)
-            losses = optimization_step(model, optimizer, batches)
+            with timing.measure('optimization', args.device if enabled() else None):
+                losses = tuning.run(model, optimizer, batches,
+                                    lambda pieces: optimization_step(model, optimizer, pieces))
             if rank == 0:
                 atomic_write_json(args.run_root / 'losses' / f'{update:08d}.json',
                                   dict(update=update, **losses), overwrite=args.overwrite or bool(args.restore_file))
@@ -108,7 +122,8 @@ def _main():
                                       overwrite=args.overwrite or bool(args.restore_file))
                 if world_size > 1:
                     torch.distributed.barrier()
-            if update % args.save_interval_updates == 0 or update == args.max_updates:
+            stop = stopping()
+            if update % args.save_interval_updates == 0 or update == args.max_updates or stop:
                 local_state = capture_rank_state(model)
                 states = [None]*world_size
                 if world_size > 1:
@@ -116,10 +131,18 @@ def _main():
                 else:
                     states = [local_state]
                 if rank == 0:
-                    save_checkpoint(checkpoint, model, optimizer, update, dataset.tokens, identity,
-                                    overwrite=args.overwrite or bool(args.restore_file) or update > 1, rank_states=states)
+                    with timing.measure('checkpoint_and_local_freeze'):
+                        save_checkpoint(checkpoint, model, optimizer, update, dataset.tokens, identity,
+                                        overwrite=args.overwrite or bool(args.restore_file) or update > 1,
+                                        rank_states=states, performance_state=tuning.state())
+                        checkpoint_saved(args.run_root, checkpoint, update)
             if rank == 0:
                 print(json.dumps(dict(update=update, **losses)), flush=True)
+                if enabled():
+                    timing.report(update, sum(int(b['source_lengths'].sum()) for b in batches),
+                                  units='source_frames', microbatch=tuning.size if tuning.active else args.batch_size)
+            if stop:
+                break
 
 
 def main():

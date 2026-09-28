@@ -52,9 +52,11 @@ def load_mel(root, locator):
     path = (Path(root) / name).resolve()
     if not path.is_relative_to(Path(root).resolve()) or min(int(offset), int(length)) < 0:
         raise ValueError('unsafe mel ZIP locator')
-    with path.open('rb') as stream:
-        stream.seek(int(offset))
-        values = np.load(io.BytesIO(stream.read(int(length))), allow_pickle=False)
+    from ..train_runtime import cached_file
+    with cached_file(path, int(offset), int(length)) as local:
+        with (local or path).open('rb') as stream:
+            stream.seek(0 if local else int(offset))
+            values = np.load(io.BytesIO(stream.read(int(length))), allow_pickle=False)
     if values.ndim != 2 or values.shape[0] == 0 or not np.isfinite(values).all():
         raise ValueError('invalid target mel')
     return torch.from_numpy(values.copy()).float()
@@ -64,7 +66,9 @@ def source_features(path, spec):
     # Fixed-fairseq frontend, same as target preparation; source-only CMVN.
     with tempfile.TemporaryDirectory(prefix='tt2-source-') as directory:
         output = Path(directory) / 'source.npy'
-        _extract_logmel_official(Path(path), output, spec)
+        from ..train_runtime import cached_file
+        with cached_file(path) as local:
+            _extract_logmel_official(local or Path(path), output, spec)
         values = torch.from_numpy(np.load(output, allow_pickle=False).copy()).float()
     if values.ndim != 2 or values.size(0) < 2 or not torch.isfinite(values).all():
         raise ValueError('invalid source mel')

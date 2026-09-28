@@ -1,6 +1,7 @@
 """Native PyTorch optimization/checkpoints; no upstream fairseq substitution."""
 from dataclasses import asdict
 import os
+import random
 from pathlib import Path
 import tempfile
 import torch
@@ -10,6 +11,7 @@ from .model import ModelConfig, Translatotron2
 
 def optimization_step(model, optimizer, batch):
     from contextlib import nullcontext
+    from ..train_runtime import forward_backward_guard, precision_context
     batches = batch if isinstance(batch, list) else [batch]
     if not batches:
         raise ValueError('empty optimizer update')
@@ -25,23 +27,25 @@ def optimization_step(model, optimizer, batch):
     if distributed:
         torch.distributed.all_reduce(counts)
     values = dict(loss=0., mel_loss=0., phone_loss=0., duration_loss=0.)
-    for index, sample in enumerate(batches):
-        sample = {key: value.to(device) for key, value in sample.items()}
-        synchronize = index == len(batches)-1 or not hasattr(model, 'no_sync')
-        with nullcontext() if synchronize else model.no_sync():
-            output = model(**sample)
-            if any(not torch.isfinite(output[name]) for name in values):
-                raise ValueError('nonfinite TT2 objective')
-            weights = [float(sample['target_lengths'].sum()) / float(counts[0]),
-                       float(sample['phone_lengths'].sum()) / float(counts[1]),
-                       sample['source'].size(0) / float(counts[2])]
-            weighted = [output[name]*weight for name, weight in zip(
-                ('mel_loss', 'phone_loss', 'duration_loss'), weights)]
-            loss = weighted[0] + core.config.phone_weight*weighted[1] + core.config.duration_weight*weighted[2]
-            (loss*world_size).backward()
-            values['loss'] += float(loss.detach())
-            for name, value in zip(('mel_loss', 'phone_loss', 'duration_loss'), weighted):
-                values[name] += float(value.detach())
+    guard = forward_backward_guard() if os.environ.get('S2ST_TRAIN_ADAPTIVE_BATCH') == '1' else nullcontext()
+    with guard:
+        for index, sample in enumerate(batches):
+            sample = {key: value.to(device, non_blocking=True) for key, value in sample.items()}
+            synchronize = index == len(batches)-1 or not hasattr(model, 'no_sync')
+            with (nullcontext() if synchronize else model.no_sync()), precision_context(device):
+                output = model(**sample)
+                if any(not torch.isfinite(output[name]) for name in values):
+                    raise ValueError('nonfinite TT2 objective')
+                weights = [float(sample['target_lengths'].sum()) / float(counts[0]),
+                           float(sample['phone_lengths'].sum()) / float(counts[1]),
+                           sample['source'].size(0) / float(counts[2])]
+                weighted = [output[name]*weight for name, weight in zip(
+                    ('mel_loss', 'phone_loss', 'duration_loss'), weights)]
+                loss = weighted[0] + core.config.phone_weight*weighted[1] + core.config.duration_weight*weighted[2]
+                (loss*world_size).backward()
+                values['loss'] += float(loss.detach())
+                for name, value in zip(('mel_loss', 'phone_loss', 'duration_loss'), weighted):
+                    values[name] += float(value.detach())
     for name, parameter in model.named_parameters():
         if parameter.requires_grad and (parameter.grad is None or not torch.isfinite(parameter.grad).all()):
             raise ValueError(f'missing/nonfinite gradient: {name}')
@@ -57,23 +61,32 @@ def optimization_step(model, optimizer, batch):
 
 
 def capture_rank_state(model):
+    import numpy as np
+    numpy_state = np.random.get_state()
     core = model.module if hasattr(model, 'module') else model
     return dict(rng=torch.get_rng_state(),
+                python_rng=random.getstate(),
+                numpy_rng=(numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
                 cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
                 buffers={name: buffer.detach().cpu().clone() for name, buffer in core.named_buffers()})
 
 
 def restore_rank_state(model, state):
+    import numpy as np
     core = model.module if hasattr(model, 'module') else model
     with torch.no_grad():
         for name, buffer in core.named_buffers():
             buffer.copy_(state['buffers'][name].to(buffer.device))
     torch.set_rng_state(state['rng'])
+    if 'python_rng' in state:
+        random.setstate(state['python_rng'])
+        numpy_state = state['numpy_rng']
+        np.random.set_state((numpy_state[0], np.asarray(numpy_state[1], dtype=np.uint32), *numpy_state[2:]))
     if state['cuda_rng'] and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(state['cuda_rng'])
 
 
-def save_checkpoint(path, model, optimizer, updates, tokens, data_fingerprint, *, overwrite=False, rank_states=None):
+def save_checkpoint(path, model, optimizer, updates, tokens, data_fingerprint, *, overwrite=False, rank_states=None, performance_state=None):
     model = model.module if hasattr(model, 'module') else model
     path = Path(path)
     if updates < 1 or not optimizer.state:
@@ -83,7 +96,7 @@ def save_checkpoint(path, model, optimizer, updates, tokens, data_fingerprint, *
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(format='direct-s2st-tt2-v2', model_config=asdict(model.config),
                    model=model.state_dict(), optimizer=optimizer.state_dict(), updates=updates,
-                   tokens=tokens, data_fingerprint=data_fingerprint, rank_states=rank_states, rng=torch.get_rng_state(),
+                   tokens=tokens, data_fingerprint=data_fingerprint, rank_states=rank_states, performance_state=performance_state, rng=torch.get_rng_state(),
                    cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [])
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, suffix='.pt.tmp')
     os.close(descriptor)
