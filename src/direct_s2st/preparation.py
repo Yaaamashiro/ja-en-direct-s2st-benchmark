@@ -58,6 +58,8 @@ class Checkpoints:
                     if key in self.rows and self.rows[key] != value:
                         raise ValueError(f'conflicting preparation checkpoint: {key}')
                     self.rows[key] = value
+        print(f'[checkpoint] path={self.root} loaded={len(self.rows)} resume={resume}',
+              file=sys.stderr, flush=True)
 
     def get(self, key):
         value = self.rows.get(key)
@@ -186,6 +188,13 @@ def checkpoint_map(function, items, cache, key, phase, *, total=None):
         return dict(pair_id=label, identity=identity,
                     result=prior if prior is not None else function(item))
 
+    reported = time.monotonic()
+    computed = 0
     for completed in track(adaptive_map(work, jobs()), phase, total=total):
+        computed += completed['identity'] not in cache.rows
         cache.record(completed['identity'], completed['result'])
+        if time.monotonic() - reported >= 10:
+            print(f'[checkpoint-progress] {phase} reused={cache.reused} computed={computed} '
+                  f'persisted={len(cache.rows)-len(cache.pending)}', file=sys.stderr, flush=True)
+            reported = time.monotonic()
         yield completed['result']

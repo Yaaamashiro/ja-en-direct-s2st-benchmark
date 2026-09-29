@@ -47,7 +47,11 @@ def evaluate_predictions(
     for raw in track(predictions, 'evaluation: score (compute/reuse)'):
         prediction = Prediction.from_dict(raw)
         old = prior.get(prediction.pair_id)
-        if old and old.get("evaluation_status") == "success":
+        if (old and old.get("evaluation_status") == "success"
+                and (blaser is None or old.get("blaser") is not None)
+                and (speaker_similarity is None or (
+                    old.get("speaker_similarity_source") is not None
+                    and old.get("speaker_similarity_reference") is not None))):
             result = old
         else:
             result = {

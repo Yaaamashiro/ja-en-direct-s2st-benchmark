@@ -96,3 +96,26 @@ def test_aggregate_writes_comparison_report(tmp_path: Path) -> None:
     aggregate_runs([run], output)
     assert "s2ut" in (output / "comparison.csv").read_text()
     assert "# S2ST comparison" in (output / "report.md").read_text()
+    (output / 'report.md').unlink()
+    aggregate_runs([run], output, resume=True)
+    assert (output / 'report.md').is_file()
+    aggregate_runs([run], output, resume=True)
+
+
+def test_resume_retries_failed_optional_metric_then_reuses_success(tmp_path):
+    audio = tmp_path / 'output.wav'
+    _wav(audio)
+    predictions = tmp_path / 'predictions.jsonl'
+    predictions.write_text(json.dumps(_prediction('ok', audio, 'success')) + '\n')
+    calls = []
+    def metric(*args):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError('temporary failure')
+        return .9
+    kwargs = dict(transcribe=lambda _: 'The book is new.', blaser=metric, resume=True)
+    output = tmp_path / 'metrics'
+    assert evaluate_predictions(predictions, output, **kwargs)['blaser'] is None
+    assert evaluate_predictions(predictions, output, **kwargs)['blaser'] == .9
+    assert evaluate_predictions(predictions, output, **kwargs)['blaser'] == .9
+    assert len(calls) == 2

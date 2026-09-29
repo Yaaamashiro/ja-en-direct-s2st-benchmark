@@ -28,6 +28,7 @@ def aggregate_runs(
     output_root: Path,
     *,
     overwrite: bool = False,
+    resume: bool = False,
 ) -> dict[str, Any]:
     metrics: list[dict[str, Any]] = []
     samples: list[dict[str, Any]] = []
@@ -40,15 +41,15 @@ def aggregate_runs(
     writer = csv.DictWriter(stream, fieldnames=FIELDS, extrasaction="ignore", lineterminator="\n")
     writer.writeheader()
     writer.writerows(metrics)
-    atomic_write_text(output_root / "comparison.csv", stream.getvalue(), overwrite=overwrite)
-    atomic_write_jsonl(output_root / "per_sample.jsonl", samples, overwrite=overwrite)
+    atomic_write_text(output_root / "comparison.csv", stream.getvalue(), overwrite=overwrite, resume=resume)
+    atomic_write_jsonl(output_root / "per_sample.jsonl", samples, overwrite=overwrite, resume=resume)
     payload = {"runs": metrics}
-    atomic_write_json(output_root / "metrics.json", payload, overwrite=overwrite)
+    atomic_write_json(output_root / "metrics.json", payload, overwrite=overwrite, resume=resume)
     lines = ["# S2ST comparison", "", "| System | Run | BLEU | BLASER | RTF | Failure rate |", "|---|---|---:|---:|---:|---:|"]
     for row in metrics:
         lines.append(
             f"| {row.get('system_id')} | {row.get('run_id')} | {row.get('bleu')} | "
             f"{row.get('blaser')} | {row.get('mean_rtf')} | {row.get('failure_rate')} |"
         )
-    atomic_write_text(output_root / "report.md", "\n".join(lines) + "\n", overwrite=overwrite)
+    atomic_write_text(output_root / "report.md", "\n".join(lines) + "\n", overwrite=overwrite, resume=resume)
     return payload

@@ -134,7 +134,7 @@ def _write_feature_zip(feature_root: Path, zip_path: Path, files=None) -> None:
 
 
 @operation('translatotron2/prepare_fairseq: _zip_manifest')
-def _zip_manifest(zip_path: Path) -> tuple[dict[str, str], dict[str, int]]:
+def _zip_manifest(zip_path: Path, *, resume=False) -> tuple[dict[str, str], dict[str, int]]:
     try:
         import io
         import numpy as np
@@ -143,7 +143,10 @@ def _zip_manifest(zip_path: Path) -> tuple[dict[str, str], dict[str, int]]:
 
     paths: dict[str, str] = {}
     lengths: dict[str, int] = {}
-    with zipfile.ZipFile(zip_path, "r") as archive, zip_path.open("rb") as raw:
+    with Checkpoints(zip_path.parent.parent / '.prep-checkpoints' / f'{zip_path.stem}-index',
+                     dict(stage='mel-index-v1'), resume=resume) as cache, \
+            zipfile.ZipFile(zip_path, "r") as archive, zip_path.open("rb") as raw:
+        stamp = file_stamp(zip_path)
         for info in track(archive.infolist(), 'mel: validate ZIP'):
             sample_id = Path(info.filename).stem
             if sample_id in paths:
@@ -154,13 +157,18 @@ def _zip_manifest(zip_path: Path) -> tuple[dict[str, str], dict[str, int]]:
                 + len(info.filename.encode("utf-8"))
                 + len(info.extra)
             )
-            raw.seek(offset)
-            payload = raw.read(info.file_size)
-            array = np.load(io.BytesIO(payload), allow_pickle=False)
-            if array.ndim != 2:
-                raise ValueError(f"expected a 2-D Mel feature for {sample_id}")
+            key = digest([stamp, info.filename, offset, info.file_size])
+            saved = cache.get(key) if os.environ.get('S2ST_PREP_RECHECK') != '1' else None
+            if saved is None:
+                raw.seek(offset)
+                payload = raw.read(info.file_size)
+                array = np.load(io.BytesIO(payload), allow_pickle=False)
+                if array.ndim != 2:
+                    raise ValueError(f"expected a 2-D Mel feature for {sample_id}")
+                saved = dict(frames=int(array.shape[0]))
+                cache.record(key, saved)
             paths[sample_id] = f"{zip_path.name}:{offset}:{info.file_size}"
-            lengths[sample_id] = int(array.shape[0])
+            lengths[sample_id] = saved['frames']
     return paths, lengths
 
 
@@ -218,9 +226,15 @@ def prepare_fairseq(
 
     for split, rows in rows_by_split.items():
         def source_frames(row):
-            return {**row, 'src_n_frames': _ten_ms_frames(row['src_audio'])}
-        rows_by_split[split] = list(track(adaptive_map(source_frames, rows),
-                                         f'mel: source headers {split}', total=len(rows)))
+            return {'frames': _ten_ms_frames(row['src_audio'])}
+        with Checkpoints(output_root.parent / '.prep-checkpoints' / f'source-headers-{split}',
+                         dict(stage='source-headers-v1'), resume=resume and not overwrite and os.environ.get('S2ST_PREP_RECHECK') != '1',
+                         overwrite=overwrite) as cache:
+            frames = list(checkpoint_map(source_frames, rows, cache,
+                                    lambda row: digest(file_stamp(row['src_audio'])),
+                                    f'mel: source headers {split}', total=len(rows)))
+            rows_by_split[split] = [{**row, 'src_n_frames': saved['frames']}
+                                   for row, saved in zip(rows, frames)]
         if not rows or {row['id'] for row in rows} != set(phonemes[split]):
             raise ValueError(f'empty split or extra phoneme IDs in {split}')
     output_root.mkdir(parents=True, exist_ok=True)
@@ -243,7 +257,8 @@ def prepare_fairseq(
                 or old_lock['common_dataset_lock_sha256'] != identity['dataset']):
             raise ValueError('existing Mel ZIP configuration mismatch')
     atomic_write_json(identity_path, identity, resume=True, overwrite=overwrite)
-    if overwrite or not zip_path.exists():
+    sharded = zip_path.with_suffix('.shards.json').is_file()
+    if overwrite or not zip_path.exists() or sharded:
         extractor = feature_extractor or _extract_logmel_official
         if feature_extractor is None:
             # Load native pools before adaptive_map limits their thread counts.
@@ -282,9 +297,13 @@ def prepare_fairseq(
                 if sha256_file(path) != result['sha256']:
                     raise ValueError(f'corrupt cached Mel feature: {path}')
                 files.append((result['id'] + '.npy', path))
-            _write_feature_zip(feature_root, zip_path, files)
-
-    target_paths, target_lengths = _zip_manifest(zip_path)
+            from .recovery import publish_archives
+            target_paths, target_lengths, archive_hashes = publish_archives(
+                files, zip_path, resume=resume, overwrite=overwrite)
+    else:
+        # Existing single-ZIP datasets retain their locators and lock format.
+        target_paths, target_lengths = _zip_manifest(zip_path, resume=resume)
+        archive_hashes = {zip_path.name: sha256_file(zip_path)}
     missing_features = sorted(set(target_audio) - set(target_paths))
     if missing_features:
         raise ValueError(f"missing Mel features: {', '.join(missing_features)}")
@@ -381,15 +400,15 @@ def prepare_fairseq(
         "common_dataset_lock_sha256": sha256_file(common_root / "dataset-lock.json"),
         "mel": settings,
         "source_mel": source_settings,
-        "mel_zip_sha256": sha256_file(zip_path),
+        "mel_zip_sha256": archive_hashes[zip_path.name],
         "phoneme_vocabulary_source": "fixed_espeak_inventory",
         "phoneme_inventory_sha256": sha256_file(phoneme_root / "inventory.txt"),
         "preparation_reference": "fairseq prep_s2spect_data.py",
         "splits": split_counts,
     }
-    atomic_write_json(
-        output_root / "data-lock.json", lock, resume=resume, overwrite=overwrite
-    )
+    if len(archive_hashes) > 1:
+        lock['mel_shards_sha256'] = archive_hashes
+    atomic_write_json(output_root / "data-lock.json", lock, resume=resume, overwrite=overwrite)
     atomic_write_json(
         output_root / "mel-spec.json",
         {**settings, "log_transform": "natural_log_clamp_eps", "normalization": "none"},

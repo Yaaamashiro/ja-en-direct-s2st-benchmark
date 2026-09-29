@@ -11,7 +11,8 @@ from .schema import CommonManifestRow, SPLITS
 from .split import group_by_original_split
 from .validate import validate_rows
 from .reader import portable_row
-from ..preparation import adaptive_map
+from ..preparation import adaptive_map, Checkpoints, checkpoint_map
+from ..journal import digest
 
 
 @operation('manifests/import_corpus: import_corpus')
@@ -33,11 +34,22 @@ def import_corpus(
         return CommonManifestRow.from_corpus_row(
             raw, corpus_root=corpus_root, manifest_parent=accepted_manifest.parent
         )
-    for row in track(adaptive_map(convert, read_jsonl(accepted_manifest)), 'corpus: resolve audio paths'):
-        if limit is not None and selected[row.split] >= limit:
-            continue
-        rows.append(row)
-        selected[row.split] += 1
+    def collect(converted):
+        for row in converted:
+            if limit is not None and selected[row.split] >= limit:
+                continue
+            rows.append(row)
+            selected[row.split] += 1
+    if dry_run:
+        collect(track(adaptive_map(convert, read_jsonl(accepted_manifest)), 'corpus: resolve audio paths'))
+    else:
+        with Checkpoints(output_root.parent / '.prep-checkpoints/paths',
+                         dict(stage='corpus-paths-v1', corpus=str(corpus_root.resolve()),
+                              manifest=sha256_file(accepted_manifest)),
+                         resume=resume and not overwrite, overwrite=overwrite) as cache:
+            converted = checkpoint_map(lambda raw: convert(raw).to_dict(), read_jsonl(accepted_manifest),
+                                       cache, digest, 'corpus: resolve audio paths')
+            collect(CommonManifestRow.from_dict(row) for row in converted)
     summary = validate_rows(rows, resume=resume,
         checkpoint_root=None if dry_run else output_root.parent / '.prep-checkpoints/corpus')
     lock = {

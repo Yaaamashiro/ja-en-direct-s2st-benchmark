@@ -5,6 +5,7 @@ from ..journal import digest
 import re
 from ..progress import operation
 import subprocess
+import sys
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable
@@ -123,11 +124,23 @@ class EspeakNgPhonemizer:
                 text=True,
                 encoding="utf-8",
             )
+            if not result.stdout.strip():
+                # Unicode symbols such as U+22EF (⋯, category Sm) survive
+                # strip_punctuation but may have no spoken form in eSpeak.
+                # Preserve all previously successful pronunciations, including
+                # symbols that eSpeak does pronounce; never drop lexical words.
+                if all(unicodedata.category(char)[0] in {'P', 'S'} for char in word):
+                    print(f'[phonemize] ignored non-spoken symbol={word!r}',
+                          file=sys.stderr, flush=True)
+                    continue
+                raise ValueError(f'eSpeak returned empty IPA for word={word!r}; stderr={result.stderr!r}')
             rendered.append(
                 " ".join(
                     tokenize_espeak_ipa(result.stdout, with_stress=self.with_stress)
                 )
             )
+        if not rendered:
+            raise ValueError('text contains no spoken phonemes')
         return normalize_phonemes(
             f" {self.word_separator} ".join(rendered),
             with_stress=self.with_stress,
@@ -201,8 +214,12 @@ def phonemize_manifests(
         if limit is not None:
             rows = rows[:limit]
         def phonemize(row):
-            return dict(pair_id=str(row['pair_id']), sequence=normalize_phonemes(
-                phonemizer(str(row['en_tts_text'])), with_stress=True))
+            try:
+                return dict(pair_id=str(row['pair_id']), sequence=normalize_phonemes(
+                    phonemizer(str(row['en_tts_text'])), with_stress=True))
+            except (ValueError, subprocess.CalledProcessError) as error:
+                raise ValueError(f"phonemization failed: pair_id={row['pair_id']!r} "
+                                 f"text={row['en_tts_text']!r}: {error}") from error
         with Checkpoints(output_root / '.checkpoints', identity, resume=resume and not overwrite,
                          overwrite=overwrite and current_split == splits[0]) as cache:
             for result in checkpoint_map(phonemize, rows, cache,
