@@ -48,15 +48,19 @@ def test_notebooks_separate_data_models_and_training_guards():
         cfg = {}
         exec(codes[0], cfg)
         settings[name] = cfg
+        assert cfg['CONFIRM_FULL_DATA'] is True
+        assert cfg['PREP_MAX_WORKERS'] == cfg['HUBERT_MAX_BATCH'] == 32
         calls = []
         preparation = next(s for s in codes if 'limit_args =' in s)
         if name == 'training':
             import pytest
             with pytest.raises(AssertionError, match='CONFIRM_FULL_DATA'):
-                exec(preparation, cfg | {'cli': lambda *args: calls.append(args), 'DATA': 'fixture'})
+                exec(preparation, cfg | {'CONFIRM_FULL_DATA': False,
+                     'cli': lambda *args: calls.append(args), 'DATA': 'fixture'})
             assert not calls
         runtime_calls = []
         exec(preparation, cfg | {'CONFIRM_FULL_DATA': True, 'cli': lambda *args: calls.append(args),
+             'run': lambda *args: calls.append(args), 'PYTHON': 'python',
              'DATA': 'fixture', 'ensure_runtime': lambda **kw: runtime_calls.append(kw)})
         assert runtime_calls == [{'require_gpu': False}]
         assert all(call[0] != 's2ut' for call in calls)
@@ -87,12 +91,12 @@ def test_notebooks_split_gpu_stage_and_restore_before_training(tmp_path):
         (common / 'dataset-lock.json').write_text('{}')
         stage = next(s for s in codes if s.startswith('#@title 4B.'))
         exec(stage, cfg | {'CONFIRM_FULL_DATA': True, 'DATA': tmp_path,
+             'run': lambda *args: calls.append(args), 'PYTHON': 'python',
              'ensure_runtime': lambda **kw: calls.append(('runtime', kw)),
              'cli': lambda *args: calls.append(args)})
         assert calls[0] == ('runtime', {'require_gpu': True})
-        assert [call[:2] for call in calls[1:]] == [
-            ('s2ut', 'fetch-artifacts'), ('s2ut', 'extract-units'),
-            ('s2ut', 'prepare'), ('s2ut', 'validate')]
+        assert len(calls) == 2
+        assert calls[1][:5] == ('python', '-m', 'direct_s2st.preparation_workflow', '--stage', '4b')
         train = next(s for s in codes if s.startswith('#@title 5.'))
         assert train.index('ensure_runtime(require_gpu=True)') < train.index('CONFIG =')
         exec(train, cfg | {'RUN_TRAINING': False,

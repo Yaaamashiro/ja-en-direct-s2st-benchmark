@@ -255,16 +255,8 @@ def _run_translatotron2(
         root = roots.experiment_data / 'translatotron2' / 'fairseq'
         if args.dry_run:
             return {'data_root': str(root), 'action': 'validate'}
-        from .translatotron2.data import PreparedDataset, fingerprint
-        datasets = {split: PreparedDataset(root, split) for split in ('train', 'dev', 'test')}
-        ids = [row['id'] for dataset in datasets.values() for row in dataset.rows]
-        if len(ids) != len(set(ids)):
-            raise ValueError('duplicate IDs across splits')
-        for dataset in datasets.values():
-            for index in track(range(len(dataset)), 'tt2: validate prepared features'):
-                dataset[index]
-        return {'splits': {split: len(dataset) for split, dataset in datasets.items()},
-                'fingerprint': fingerprint(root)}
+        from .translatotron2.recovery import validate_prepared
+        return validate_prepared(root, resume=args.resume, overwrite=args.overwrite)
     if args.action in ("train", "infer"):
         return _run_direct_model("translatotron2", args, config, roots)
     raise NotImplementedError(f"unsupported translatotron2 action: {args.action}")
@@ -402,8 +394,8 @@ def _run_evaluate(args: argparse.Namespace, config: dict[str, Any]) -> dict[str,
             return {"run_roots": [str(path) for path in run_roots], "output_root": str(output)}
         if args.action == 'verify':
             from .evaluation.acceptance import verify_suite
-            return verify_suite(roots.experiment_data / 'common', run_roots, output, overwrite=args.overwrite)
-        return aggregate_runs(run_roots, output, overwrite=args.overwrite)
+            return verify_suite(roots.experiment_data / 'common', run_roots, output, overwrite=args.overwrite, resume=args.resume)
+        return aggregate_runs(run_roots, output, overwrite=args.overwrite, resume=args.resume)
 
     run_id = config.get("run_id")
     if not isinstance(run_id, str) or not run_id:

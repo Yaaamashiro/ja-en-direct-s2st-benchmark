@@ -12,7 +12,7 @@ from .multitask import read_tsv, validate_prepared
 from .reduce_units import validate_units
 
 
-def parse_generated(path: Path, ids: list[str]) -> dict[str, list[int]]:
+def parse_generated(path: Path, ids: list[str], *, require_complete=True) -> dict[str, list[int]]:
     result = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.startswith("D-"):
@@ -24,9 +24,47 @@ def parse_generated(path: Path, ids: list[str]) -> dict[str, list[int]]:
         if not 0 <= index < len(ids) or ids[index] in result:
             raise ValueError("duplicate or out-of-range fairseq generation ID")
         result[ids[index]] = validate_units([int(x) for x in fields[2].split()], clusters=100)
-    if set(result) != set(ids):
+    if require_complete and set(result) != set(ids):
         raise ValueError("incomplete fairseq generation; sample IDs must match exactly")
     return result
+
+
+@operation('s2ut: resumable generation shards')
+def generate_shards(command, generated, split, ids, identity, *, resume=False, overwrite=False,
+                    runner=None, shard_size=32):
+    import math
+    from ..hashing import sha256_file
+    from ..preparation import Checkpoints
+    runner = runner or subprocess.run
+    count = max(1, math.ceil(len(ids)/shard_size))
+    results, timings = {}, {}
+    with Checkpoints(generated/'.checkpoints', dict(stage='generation-v1', inputs=identity,
+                     num_shards=count), resume=resume and not overwrite, overwrite=overwrite) as cache:
+        for shard in track(range(count), 's2ut: generate/reuse shards'):
+            key = str(shard)
+            saved = cache.get(key)
+            if saved is None:
+                directory = cache.root/f'part-{shard:05d}'
+                args = list(command)
+                args[args.index('--results-path')+1] = str(directory)
+                # Pinned fairseq generate uses distributed size/rank only to shard
+                # its iterator; unlike training, cli_main does not spawn DDP.
+                args += ['--distributed-world-size', str(count), '--distributed-rank', str(shard)]
+                start = time.perf_counter()
+                runner(args, check=True)
+                seconds = time.perf_counter()-start
+                path = directory/f'generate-{split}.txt'
+                values = parse_generated(path, ids, require_complete=False)
+                saved = dict(records=values, seconds=seconds, log_sha256=sha256_file(path))
+                cache.record(key, saved)
+                cache.flush()  # Every successful subprocess is a durable recovery unit.
+            if results.keys() & saved['records'].keys():
+                raise ValueError('duplicate ID across generation shards')
+            results.update(saved['records'])
+            timings.update({key: saved['seconds']/max(1, len(saved['records'])) for key in saved['records']})
+    if results.keys() != set(ids):
+        raise ValueError('incomplete sharded generation; no samples silently skipped')
+    return results, timings
 
 
 @operation('s2ut/fairseq_infer: main')
@@ -73,33 +111,18 @@ def main() -> None:
                "--results-path", str(generated)]
     if args.device == "cpu":
         command.append("--cpu")
-    start = time.perf_counter()
-    subprocess.run(command, check=True)
-    seconds = time.perf_counter() - start
-    records = {}
     ids = list(rows)
-    for line in (generated / f'generate-{args.split}.txt').read_text(encoding='utf-8').splitlines():
-        if not line.startswith('D-'):
-            continue
-        fields = line.split('\t')
-        index = int(fields[0][2:])
-        if not 0 <= index < len(ids) or ids[index] in records:
-            raise ValueError('duplicate/out-of-range generated IDs')
-        try:
-            if len(fields) != 3:
-                raise ValueError('malformed generated record')
-            records[ids[index]] = dict(status='success', error=None,
-                units=validate_units([int(x) for x in fields[2].split()], clusters=100))
-        except ValueError as error:
-            records[ids[index]] = dict(status='failed', error=str(error), units=None)
+    import json
+    records, timings = generate_shards(command, generated, args.split, ids,
+        json.loads(journal.lock.read_text()), resume=args.resume, overwrite=args.overwrite)
     for pair_id in track(ids, 's2ut: write predictions'):
         row = common[pair_id]
         journal.record({"pair_id": pair_id, "system_id": "s2ut", "run_id": args.run_root.name,
                             "source_audio": row["ja_audio"], "reference_audio": row["en_audio"],
                             "reference_text": row["en_text"], "split": args.split,
-                            **records.get(pair_id, dict(status='failed', error='missing generated record', units=None)),
-                            "inference_seconds": seconds / len(ids),
-                            "timing_scope": "generation batch wall time including model load, amortized per sample"})
+                            "status": "success", "error": None, "units": records[pair_id],
+                            "inference_seconds": timings[pair_id],
+                            "timing_scope": "generation shard wall time including model load, amortized per sample"})
 
 
 if __name__ == "__main__":

@@ -109,3 +109,34 @@ def test_unknown_dev_phoneme_is_rejected(tmp_path: Path) -> None:
             tmp_path / "out",
             mel_config={"n_mels": 80},
         )
+
+
+def test_espeak_skips_only_unspoken_symbols(monkeypatch, capsys):
+    from types import SimpleNamespace
+    from direct_s2st.translatotron2 import phonemize as module
+    def run(args, **kwargs):
+        output = 'eSpeak NG 1.52.0' if '--version' in args else (
+            '' if args[-1] in {'⋯', 'broken', '123'} else 'a')
+        return SimpleNamespace(stdout=output, stderr='')
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    engine = module.EspeakNgPhonemizer(expected_version='1.52.0')
+    assert engine("Police organization ⋯ prefecture's police department") == 'a | a | a | a | a | a'
+    assert "ignored non-spoken symbol='⋯'" in capsys.readouterr().err
+    # Pronounced symbols still contribute phones. No leading/trailing empty separator.
+    assert engine('⋯ word ⋯') == 'a'
+    assert engine('word + word') == 'a | a | a'
+    for text in ('broken', '123'):
+        with pytest.raises(ValueError, match='empty IPA for word'):
+            engine(text)
+    with pytest.raises(ValueError, match='no spoken phonemes'):
+        engine('⋯')
+
+
+def test_phonemization_error_reports_exact_pair_and_text(tmp_path):
+    common = tmp_path / 'common'
+    _common(common)
+    def fail(_):
+        raise ValueError('empty IPA')
+    with pytest.raises(ValueError, match="pair_id='pair-train'.*The book is new"):
+        phonemize_manifests(common, tmp_path / 'phones', phonemizer=fail,
+                           engine='fixture', version='1', fixed_vocabulary=['a'], resume=True)

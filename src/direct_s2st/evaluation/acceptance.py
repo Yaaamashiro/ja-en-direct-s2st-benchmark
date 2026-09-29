@@ -9,10 +9,34 @@ from ..io import atomic_write_json, read_jsonl
 from ..manifests.reader import read_common_manifest
 from ..predictions import Prediction, SYSTEMS
 from ..hashing import sha256_file
+from ..journal import digest
+from ..preparation import Checkpoints, file_stamp
+
+
+def _verify_audio(rows, lock, root, *, resume=False, overwrite=False):
+    with Checkpoints(Path(root) / 'metrics/.acceptance-checkpoints',
+                     dict(stage='acceptance-audio-v1', evaluation=digest(lock)),
+                     resume=resume and not overwrite, overwrite=overwrite) as cache:
+        for raw in track(rows, 'acceptance: verify/reuse WAV'):
+            prediction = Prediction.from_dict(raw)
+            if prediction.status != 'success' or not prediction.output_audio:
+                raise ValueError('generation failed: ' + prediction.pair_id)
+            path = Path(prediction.output_audio)
+            key = digest([raw, file_stamp(path)])
+            if cache.get(key) is not None:
+                continue
+            if lock['audio'].get(prediction.output_audio) != sha256_file(path):
+                raise ValueError('evaluated WAV content has changed')
+            waveform, rate = sf.read(path, always_2d=True)
+            if waveform.shape[1] != 1 or waveform.size == 0 or not np.isfinite(waveform).all() or not np.any(waveform):
+                raise ValueError('invalid/silent generated WAV')
+            if prediction.output_duration is None or not math.isclose(prediction.output_duration, len(waveform)/rate, abs_tol=1/rate):
+                raise ValueError('WAV duration metadata mismatch')
+            cache.record(key, dict(verified=True))
 
 
 @operation('evaluation/acceptance: verify_suite')
-def verify_suite(common_root, run_roots, output_root, *, overwrite=False):
+def verify_suite(common_root, run_roots, output_root, *, overwrite=False, resume=False):
     common = list(read_common_manifest(Path(common_root) / 'test.jsonl'))
     expected = {r['pair_id']: r for r in common}
     if not common or len(common) != len(expected):
@@ -31,6 +55,7 @@ def verify_suite(common_root, run_roots, output_root, *, overwrite=False):
         systems = {r['system_id'] for r in rows}
         if len(systems) != 1 or any(r['run_id'] != root.name or r.get('split') != 'test' for r in rows):
             raise ValueError('prediction run/system/split mismatch')
+        _verify_audio(rows, lock, root, resume=resume, overwrite=overwrite)
         for raw in rows:
             prediction = Prediction.from_dict(raw)
             if prediction.status != 'success':
@@ -40,13 +65,6 @@ def verify_suite(common_root, run_roots, output_root, *, overwrite=False):
             for field, key in [('source_audio', 'ja_audio'), ('reference_audio', 'en_audio')]:
                 if Path(getattr(prediction, field)).resolve() != Path(expected[prediction.pair_id][key]).resolve():
                     raise ValueError('source/reference audio mismatch')
-            if lock['audio'].get(prediction.output_audio) != sha256_file(Path(prediction.output_audio)):
-                raise ValueError('evaluated WAV content has changed')
-            waveform, rate = sf.read(prediction.output_audio, always_2d=True)
-            if waveform.shape[1] != 1 or waveform.size == 0 or not np.isfinite(waveform).all() or not np.any(waveform):
-                raise ValueError('invalid/silent generated WAV')
-            if prediction.output_duration is None or not math.isclose(prediction.output_duration, len(waveform)/rate, abs_tol=1/rate):
-                raise ValueError('WAV duration metadata mismatch')
         if any(r.get('evaluation_status') != 'success' or not isinstance(r.get('hypothesis_raw'), str) for r in evaluated):
             raise ValueError('ASR evaluation incomplete')
         if metrics.get('samples') != len(expected) or metrics.get('asr_success_rate') != 1 or not math.isfinite(float(metrics['bleu'])):
@@ -71,5 +89,5 @@ def verify_suite(common_root, run_roots, output_root, *, overwrite=False):
     if any(setting != settings[0] for setting in settings[1:]):
         raise ValueError('evaluation conditions differ')
     report = dict(status='PASS', scope='pipeline completeness, not quality or paper parity', runs=reports)
-    atomic_write_json(Path(output_root) / 'e2e-acceptance.json', report, overwrite=overwrite)
+    atomic_write_json(Path(output_root) / 'e2e-acceptance.json', report, overwrite=overwrite, resume=resume)
     return report

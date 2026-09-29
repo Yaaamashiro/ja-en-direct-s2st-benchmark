@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import wave
+import os
 from ..progress import operation, track
 import json
 from collections import Counter
@@ -10,7 +11,8 @@ from typing import Any
 import yaml
 
 from ..hashing import sha256_file
-from ..preparation import adaptive_map
+from ..preparation import Checkpoints, checkpoint_map, file_stamp
+from ..journal import digest
 from ..io import atomic_write_json, atomic_write_text, read_jsonl
 from .extract_units import load_unit_file
 from .multitask import prepare_labels, validate_prepared
@@ -78,12 +80,22 @@ def prepare_fairseq(
                 f"{' '.join(map(str, units))}\t{len(units)}\n"
             )
             return units, line
-        for units, line in track(adaptive_map(prepare_row, rows_by_split[split]),
-                                 f's2ut: prepare {split}', total=len(rows_by_split[split])):
-            if split == 'train':
-                frequencies.update(units)
-            lines.append(line)
-            count += 1
+        def key(row):
+            record = unit_records.get(row['pair_id'])
+            if record is None:
+                raise ValueError(f"missing units for {row['pair_id']}")
+            return digest([row, record, file_stamp(row['ja_audio']),
+                           file_stamp(record['units_reduced_path'])])
+        with Checkpoints(output_root.parent / '.prep-checkpoints' / f'prepare-{split}',
+                         dict(stage='s2ut-rows-v1', clusters=clusters),
+                         resume=resume and not overwrite and os.environ.get('S2ST_PREP_RECHECK') != '1',
+                         overwrite=overwrite) as cache:
+            for units, line in checkpoint_map(prepare_row, rows_by_split[split], cache, key,
+                                             f's2ut: prepare {split}', total=len(rows_by_split[split])):
+                if split == 'train':
+                    frequencies.update(units)
+                lines.append(line)
+                count += 1
         atomic_write_text(
             output_root / f"{split}.tsv",
             "".join(lines),
