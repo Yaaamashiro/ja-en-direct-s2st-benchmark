@@ -52,6 +52,27 @@ checkpointや完了記録の破損、設定不一致は黙って無視せず停�
 - 実行中のColabに修正は自動反映されません。セル1は保存済みrevisionを使うため、リモート更新だけでも反映されません。
   既存実験のrevision/lockを手動で上書きせず、旧成果物を保持した上で移行してください。
 
+## 固定eSpeak音素辞書の不足でMel準備が停止した場合
+
+eSpeak NG 1.52.0の見本語由来の辞書には、trainで確認された
+`a‍ɪ‍ə`, `a‍ɪ‍ɚ`, `o`, `r`, `ɐ`, `ɑ̃`, `ɔ`が含まれていませんでした。
+準備処理はこの7種類を固定の補足集合として学習用辞書に加えます。
+補足集合・学習用辞書のハッシュを新しいdata-lockに記録します。
+元のphonemes/TSV、inventory、metadata、checkpointは保持するため音素化をやり直す必要はありません。
+dev/testの未知音素を自動追加することはありません。すべてのsplitの辞書範囲をMel抽出前に確認します。
+既に学習を始めたrunにこの新辞書を適用して再開することはできません。
+
+切断後はセル1で同じ実験を指定してから、修正済みコードを取得し、
+`scripts/colab/resume_preparation.py --persistent <実験保存先> --revision <新しい完全SHA> --profile pilot --overwrite`
+を実行します。このスクリプトは保存済み音素化のhash/count/IDを全splitで確認し、
+旧repository-revisionを退避して固定revisionだけを更新します。
+この`--overwrite`はrevision固定情報の変更だけを許可し、音素・Melには`--resume`を使います。
+環境を構築してMel準備と最終検証から続け、成功時に工程完了記録を保存します。
+学習config/checkpointがある実験は停止します。終了後はGPUへ切り替えてセル1→4Bです。
+
+環境再構築では、host Pythonへのuvインストールに旧`PIP_CONSTRAINT`などを継承しません。
+Python 3.10の依存制約は仮想環境の構築後に適用します。
+
 ## 検証範囲
 
 CPUテストで中断・再開、完了結果の再利用、変更/破損の検出、ノートブック呼出し、
