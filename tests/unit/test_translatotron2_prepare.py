@@ -140,3 +140,35 @@ def test_phonemization_error_reports_exact_pair_and_text(tmp_path):
     with pytest.raises(ValueError, match="pair_id='pair-train'.*The book is new"):
         phonemize_manifests(common, tmp_path / 'phones', phonemizer=fail,
                            engine='fixture', version='1', fixed_vocabulary=['a'], resume=True)
+
+
+def test_fixed_espeak_supplement_reuses_saved_labels_without_modifying_them(tmp_path):
+    from direct_s2st.translatotron2.prepare_fairseq import ESPEAK_152_INVENTORY_SUPPLEMENT
+    common, phones, prepared = [tmp_path / name for name in ('common', 'phones', 'fairseq')]
+    _common(common)
+    sequence = 'a ' + ' '.join(ESPEAK_152_INVENTORY_SUPPLEMENT)
+    phonemize_manifests(common, phones, phonemizer=lambda _: sequence,
+                       engine='espeak-ng', version='1.52.0', fixed_vocabulary=['a'], resume=True)
+    before = {p.name: p.read_bytes() for p in phones.iterdir() if p.is_file()}
+    kwargs = dict(mel_config={'n_mels': 80}, feature_extractor=_mel_fixture, resume=True)
+    lock = prepare_fairseq(common, phones, prepared, **kwargs)
+    assert lock['phoneme_inventory_supplement'] == list(ESPEAK_152_INVENTORY_SUPPLEMENT)
+    assert lock['phoneme_vocabulary_source'].endswith('supplement_v1')
+    dictionary = (prepared / 'target_phoneme/dict.txt').read_text(encoding='utf-8')
+    for token in ESPEAK_152_INVENTORY_SUPPLEMENT:
+        assert f'{token} 1\n' in dictionary
+    assert before == {p.name: p.read_bytes() for p in phones.iterdir() if p.is_file()}
+    assert prepare_fairseq(common, phones, prepared, **kwargs) == lock
+
+
+def test_inventory_supplement_never_learns_new_dev_or_test_tokens(tmp_path):
+    common, phones = tmp_path / 'common', tmp_path / 'phones'
+    _common(common)
+    phonemize_manifests(common, phones, phonemizer=lambda _: 'a',
+                       engine='espeak-ng', version='1.52.0', fixed_vocabulary=['a'])
+    (phones / 'dev.tsv').write_text('pair-dev\tNEW_DEV\n', encoding='utf-8')
+    (phones / 'test.tsv').write_text('pair-test\tNEW_TEST\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='unknown phonemes in dev: NEW_DEV; unknown phonemes in test: NEW_TEST'):
+        prepare_fairseq(common, phones, tmp_path / 'prepared', mel_config={'n_mels': 80},
+                       feature_extractor=_mel_fixture, resume=True)
+    assert not (tmp_path / 'prepared').exists()

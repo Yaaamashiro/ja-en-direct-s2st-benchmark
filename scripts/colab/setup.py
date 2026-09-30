@@ -19,6 +19,15 @@ ESPEAK = '4870adfa25b1a32b4361592f1be8a40337c58d6c'
 PYTHON_VERSION = '3.10.18'
 
 
+def bootstrap_environment():
+    env = dict(os.environ)
+    # The notebook may have used Python 3.10 before a revision change. Its pip
+    # inputs must not leak into the host Python 3.13 bootstrap (uv installation).
+    for name in ('PIP_CONSTRAINT', 'PIP_REQUIREMENT', 'PIP_BUILD_CONSTRAINT'):
+        env.pop(name, None)
+    return env
+
+
 @operation('setup: external command')
 def run(*args, **kwargs):
     print('Setup:', ' '.join(str(a) for a in args), flush=True)
@@ -85,11 +94,12 @@ def main():
         raise RuntimeError('This bootstrap is for a Linux Colab runtime')
     run('apt-get', 'update', '-qq')
     run('apt-get', 'install', '-y', 'build-essential', 'cmake', 'git', 'patch', 'libsndfile1', 'sox', 'ffmpeg')
-    run(sys.executable, '-m', 'pip', 'install', 'uv==0.8.22')
-    run(sys.executable, '-m', 'uv', 'python', 'install', PYTHON_VERSION)
+    bootstrap_env = bootstrap_environment()
+    run(sys.executable, '-m', 'pip', 'install', 'uv==0.8.22', env=bootstrap_env)
+    run(sys.executable, '-m', 'uv', 'python', 'install', PYTHON_VERSION, env=bootstrap_env)
     python = PREFIX / 'venv/bin/python'
     if not python.exists():
-        run(sys.executable, '-m', 'uv', 'venv', '--seed', '--python', PYTHON_VERSION, PREFIX / 'venv')
+        run(sys.executable, '-m', 'uv', 'venv', '--seed', '--python', PYTHON_VERSION, PREFIX / 'venv', env=bootstrap_env)
     actual = subprocess.check_output([str(python), '-c', 'import platform; print(platform.python_version())'], text=True).strip()
     if actual != PYTHON_VERSION:
         raise RuntimeError('Different Python runtime found; start a fresh Colab VM instead of reusing the existing venv')

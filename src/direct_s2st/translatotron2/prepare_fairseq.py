@@ -21,6 +21,31 @@ from ..io import ExistingOutputError, atomic_write_json, atomic_write_text, read
 
 FeatureExtractor = Callable[[Path, Path, dict[str, Any]], None]
 
+# Fixed supplement to the probe-derived eSpeak NG 1.52.0 inventory. These
+# additional phones were identified in train data; dev/test never grow it.
+# Keep original phoneme files/metadata and their checkpoint identity intact.
+ESPEAK_152_INVENTORY_SUPPLEMENT = (
+    'a\u200dɪ\u200də', 'a\u200dɪ\u200dɚ', 'o', 'r', 'ɐ', 'ɑ\u0303', 'ɔ',
+)
+
+
+def _training_inventory(phoneme_root, common_root, original):
+    metadata_paths = sorted(phoneme_root.glob('metadata*.json'))
+    if not metadata_paths:
+        return original
+    metadata = [json.loads(path.read_text(encoding='utf-8')) for path in metadata_paths]
+    if not all(row.get('engine') == 'espeak-ng' and row.get('version') == '1.52.0'
+               for row in metadata):
+        return original
+    checksum = sha256_file(phoneme_root / 'inventory.txt')
+    for row in metadata:
+        if row.get('inventory_sha256') != checksum:
+            raise ValueError('phoneme inventory differs from saved metadata')
+        for split, expected in row['common_manifests'].items():
+            if sha256_file(common_root / f'{split}.jsonl') != expected:
+                raise ValueError(f'phoneme metadata refers to stale {split} input')
+    return tuple(sorted(set(original) | set(ESPEAK_152_INVENTORY_SUPPLEMENT)))
+
 
 def _read_phonemes(root: Path, split: str) -> dict[str, str]:
     direct = root / f"{split}.tsv"
@@ -190,19 +215,24 @@ def prepare_fairseq(
         split: _read_phonemes(phoneme_root, split)
         for split in ("train", "dev", "test")
     }
-    inventory = _read_inventory(phoneme_root)
+    original_inventory = _read_inventory(phoneme_root)
+    inventory = _training_inventory(phoneme_root, common_root, original_inventory)
     train_vocabulary = Counter(
         token for sequence in phonemes["train"].values() for token in sequence.split()
     )
     if not train_vocabulary:
         raise ValueError("train phoneme vocabulary is empty")
     known = set(inventory)
+    unknown_by_split = {}
     for split in ("train", "dev", "test"):
         unknown = sorted(
             {token for sequence in phonemes[split].values() for token in sequence.split()} - known
         )
         if unknown:
-            raise ValueError(f"unknown phonemes in {split}: {', '.join(unknown)}")
+            unknown_by_split[split] = unknown
+    if unknown_by_split:
+        raise ValueError('; '.join(f"unknown phonemes in {split}: {', '.join(tokens)}"
+                                  for split, tokens in unknown_by_split.items()))
 
     rows_by_split: dict[str, list[dict[str, Any]]] = {}
     target_audio: dict[str, Path] = {}
@@ -406,6 +436,10 @@ def prepare_fairseq(
         "preparation_reference": "fairseq prep_s2spect_data.py",
         "splits": split_counts,
     }
+    if inventory != original_inventory:
+        lock['phoneme_vocabulary_source'] = 'fixed_espeak_inventory_1.52.0_supplement_v1'
+        lock['phoneme_inventory_supplement'] = list(ESPEAK_152_INVENTORY_SUPPLEMENT)
+        lock['prepared_phoneme_inventory_sha256'] = digest(list(inventory))
     if len(archive_hashes) > 1:
         lock['mel_shards_sha256'] = archive_hashes
     atomic_write_json(output_root / "data-lock.json", lock, resume=resume, overwrite=overwrite)
