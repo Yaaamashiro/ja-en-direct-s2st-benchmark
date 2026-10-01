@@ -134,13 +134,18 @@ class HubertKMeansExtractor:
 
 def _recoverable_units(rows, extractor, cache, clusters):
     rows = iter(rows)
-    while window := list(islice(rows, 16)):
+    maximum = int(os.environ.get('S2ST_HUBERT_BATCH_MAX', '8'))
+    if not 1 <= maximum <= 32:
+        raise ValueError('S2ST_HUBERT_BATCH_MAX must be between 1 and 32')
+    # Supply at least a full configured batch. Exact-length grouping and VRAM
+    # backoff remain the extractor's responsibility; never pad different WAVs.
+    while window := list(islice(rows, max(16, maximum))):
         keys = [digest([row, file_stamp(row['en_audio'])]) for row in window]
         values = [cache.get(key) for key in keys]
         missing = [index for index, value in enumerate(values) if value is None]
         paths = [Path(window[index]['en_audio']) for index in missing]
-        extracted = (extractor.extract_many(paths) if hasattr(extractor, 'extract_many')
-                     else map(extractor, paths))
+        extracted = ((extractor.extract_many(paths) if hasattr(extractor, 'extract_many')
+                      else map(extractor, paths)) if paths else ())
         for index, units in zip(missing, extracted):
             values[index] = validate_units(units, clusters=clusters)
             cache.record(keys[index], values[index])

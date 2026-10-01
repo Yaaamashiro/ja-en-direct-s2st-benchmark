@@ -10,11 +10,8 @@ import tempfile
 import torch
 from torch.nn import functional as F
 
-from ..hashing import sha256_file
 from ..io import ExistingOutputError, atomic_write_json
-from ..manifests.reader import read_common_manifest
 from ..s2ut.reduce_units import validate_units
-from ..s2ut.extract_units import load_unit_file
 from .discriminators import (MultiPeriodDiscriminator, MultiScaleDiscriminator,
                              discriminator_loss, generator_loss, feature_loss)
 from .inference import validate_config
@@ -178,6 +175,9 @@ def main():
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--verification-result', type=Path)
+    parser.add_argument('--verified-inputs', type=Path)
     args = parser.parse_args()
     if min(args.max_updates, args.segment_frames, args.batch_size, args.prefetch_factor, args.save_interval_updates) < 1 or args.num_workers < 0 or args.learning_rate <= 0:
         parser.error('updates, segment frames and learning rate must be positive')
@@ -190,34 +190,29 @@ def main():
     validate_config(args.kind, config, sample_rate=spec['sample_rate'], mel=spec)
     if spec['normalize_volume'] or spec['normalization'] != 'none' or spec['log_transform'] != 'natural_log_clamp_eps':
         raise ValueError('fitting requires unnormalized natural-log mel')
+    from .verification import verify_inputs, save_receipt, load_receipt
+    if args.verify_only:
+        if args.verification_result is None or args.verified_inputs is not None:
+            parser.error('verify-only requires a verification-result and no verified-inputs')
+        save_receipt(args.verification_result, verify_inputs(args.common_root, args.kind, args.units_root))
+        return
     checkpoint = args.output_root / 'generator.pt'
     if args.output_root.exists() and any(args.output_root.iterdir()) and not (args.resume or args.overwrite):
         raise ExistingOutputError(str(args.output_root))
     if args.resume and not checkpoint.is_file():
         raise FileNotFoundError(checkpoint)
-    rows = list(read_common_manifest(args.common_root / 'train.jsonl'))
-    if not rows or len({r['pair_id'] for r in rows}) != len(rows) or any(r['split'] != 'train' for r in rows):
-        raise ValueError('fitting requires nonempty unique train-only rows')
-    identity = {'common': sha256_file(args.common_root / 'train.jsonl'),
+    verified = (load_receipt(args.verified_inputs, args.common_root, args.kind, args.units_root)
+                if args.verified_inputs else verify_inputs(args.common_root, args.kind, args.units_root))
+    rows = verified['rows']
+    identity = {'common': verified['common'],
                 'config': config, 'learning_rate': args.learning_rate,
                 'segment_frames': args.segment_frames, 'kind': args.kind,
-                'seed': args.seed, 'audio': {}, 'units': {}}
+                'seed': args.seed, 'audio': verified['audio'], 'units': verified['units']}
     if args.batch_size != 1:
         identity['batch_size'] = args.batch_size
     if os.environ.get('S2ST_TRAIN_PRECISION', 'default') != 'default':
         identity['precision'] = os.environ['S2ST_TRAIN_PRECISION']
-    all_units = {}
-    for row in track(rows, 'vocoder: verify training inputs'):
-        audio_hash = sha256_file(Path(row['en_audio']))
-        if row.get('en_audio_sha256') and row['en_audio_sha256'] != audio_hash:
-            raise ValueError('target audio checksum mismatch')
-        identity['audio'][row['pair_id']] = audio_hash
-        if args.kind == 'unit':
-            if args.units_root is None or Path(row['pair_id']).name != row['pair_id'] or any(c in row['pair_id'] for c in '/\\:'):
-                raise ValueError('unit fitting requires units-root and safe pair IDs')
-            path = args.units_root / 'train/original' / (row['pair_id'] + '.units')
-            all_units[row['pair_id']] = load_unit_file(path, clusters=100)
-            identity['units'][row['pair_id']] = sha256_file(path)
+    all_units = verified['sequences']
     if args.kind == 'unit':
         if spec['sample_rate'] != 16000:
             raise ValueError('HuBERT units require 16 kHz audio')
@@ -256,7 +251,16 @@ def main():
     timing = Timings()
     def load(index):
         row = rows[index % len(rows)]
+        from ..preparation import file_stamp
+        if file_stamp(row['en_audio']) != row['_verified_audio_stamp']:
+            raise ValueError(f"{row['pair_id']}: audio changed after verification")
+        if args.kind == 'unit':
+            path = args.units_root / 'train/original' / (row['pair_id'] + '.units')
+            if file_stamp(path) != row['_verified_unit_stamp']:
+                raise ValueError(f"{row['pair_id']}: units changed after verification")
         wave = load_wave(row, spec['sample_rate'], args.kind)
+        if file_stamp(row['en_audio']) != row['_verified_audio_stamp']:
+            raise ValueError(f"{row['pair_id']}: audio changed while loading")
         if enabled() and args.device.startswith('cuda'):
             wave = wave.pin_memory()
         return wave, all_units.get(row['pair_id'])

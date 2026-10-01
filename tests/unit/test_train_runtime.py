@@ -197,6 +197,34 @@ def test_optimized_config_is_explicit_and_gan_split_rejected(tmp_path):
         make_config(*args, adaptive_batch=True)
 
 
+def test_resident_session_deadline_excludes_vocoder_preflight(tmp_path, monkeypatch):
+    from direct_s2st import session_runtime
+    from direct_s2st.vocoders import verification
+    from direct_s2st.colab import publish
+    now = [0]
+    monkeypatch.setattr(session_runtime.time, 'monotonic', lambda: now[0])
+    def preflight(args, directory):
+        now[0] = 10000
+        return args
+    monkeypatch.setattr(verification, 'preflight_command', preflight)
+    class Process:
+        returncode = 0
+        def __init__(self, args, env):
+            assert float(env['S2ST_TRAIN_DEADLINE']) == 10010
+            root = Path(env['S2ST_TRAIN_STAGING']) / '1'
+            (root / 'files').mkdir(parents=True)
+            (root / 'files/checkpoint.pt').write_text('1')
+            (root / 'ready.json').write_text('{"updates": 1}')
+        def poll(self):
+            return self.returncode
+    config = dict(kind='tt2', checkpoint='checkpoint.pt', command=['fixture'], resume_args=[],
+        runtime=dict(cache_gb=0, readers=1, precision='default', adaptive_batch=False))
+    result = session_runtime.run_continuous(config, work=tmp_path/'work', backup=tmp_path/'backup',
+        identity={'fixture': True}, completed=0, total=1, seconds=10, publish=publish, popen=Process,
+        inspect_checkpoint=lambda p, k: int(p.read_text()))
+    assert result['durable_updates'] == 1
+
+
 def test_rank_state_restores_python_numpy_and_torch_rng():
     import random
     import numpy as np
