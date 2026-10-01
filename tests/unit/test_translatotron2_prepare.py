@@ -120,7 +120,7 @@ def test_espeak_skips_only_unspoken_symbols(monkeypatch, capsys):
         return SimpleNamespace(stdout=output, stderr='')
     monkeypatch.setattr(module.subprocess, 'run', run)
     engine = module.EspeakNgPhonemizer(expected_version='1.52.0')
-    assert engine("Police organization ⋯ prefecture's police department") == 'a | a | a | a | a | a'
+    assert engine("Police organization ⋯ prefecture's police department") == 'a | a | a | a | a'
     assert "ignored non-spoken symbol='⋯'" in capsys.readouterr().err
     # Pronounced symbols still contribute phones. No leading/trailing empty separator.
     assert engine('⋯ word ⋯') == 'a'

@@ -84,6 +84,40 @@ Python 3.10の依存制約は仮想環境の構築後に適用します。
 音素化・保存済み入力WAVヘッダの互換checkpointは保持しますが、
 ログで`saved=0`だったMel特徴量自体には再利用できる抽出結果がありません。
 
+## 音素生成と辞書の新方式への移行
+
+新規の音素生成では、見本語だけでなく固定版eSpeak NG 1.52.0の
+`base1 → en → en-us`音素定義からIPAを取得して、分割非依存の辞書を作ります。
+他のG2P辞書との混合や、dev/testの出力に応じた自動追加はしません。
+`don't`、`prefecture's`、`3.14`、略語、語内ハイフン、時刻などを分断せずeSpeakへ渡します。
+生成方式と辞書方式のversion、出力TSVのSHAをmetadataに記録します。
+辞書外の音素は、そのサンプルの生成直後にID/本文付きで停止し、不正ラベルを保存しません。
+保存済みラベルもMel抽出前に全splitの辞書範囲・ID・metadataを検証します。
+
+WAVを読まずに確認する場合:
+
+```bash
+python -m direct_s2st.cli translatotron2 validate-phonemes --profile pilot
+```
+
+通常の`--resume`は、完了済みの旧metadataがあれば旧音素生成方式を維持して再利用します。
+旧/新方式のラベルは混在させません。完了metadataがない旧形式の途中結果で
+辞書方式が一致しない場合は、明示的な移行を求めて停止します。
+単なる7音素の補足は旧ラベルを再生成しません。短縮形・数字の生成も修正したい場合は、
+学習開始前に修正済みコードを取得し、次の**明示的な再生成**を使います:
+
+```bash
+python scripts/colab/resume_preparation.py \
+  --persistent <実験保存先> --revision <修正コードの完全SHA> \
+  --profile pilot --overwrite --regenerate-phonemes
+```
+
+旧音素、旧学習用辞書、旧data-lockは`data/translatotron2/phoneme-migrations/<ID>/`へ
+退避して保持します。音素生成はやり直すため時間がかかりますが、入力コーパス、保存済みMel、
+Melの途中checkpoint、公開済みZIPは保持し、互換な特徴量を再利用します。
+移行自体も途中保存されるため、切断したら同じコマンドを再実行できます。
+学習config/checkpointがある実験への自動移行は拒否します。
+
 ## 検証範囲
 
 CPUテストで中断・再開、完了結果の再利用、変更/破損の検出、ノートブック呼出し、

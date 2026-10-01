@@ -143,6 +143,56 @@ def test_restore_only_never_trains(tmp_path):
     assert not calls
 
 
+def test_auto_resume_does_not_mistake_first_partial_copy_for_snapshot(tmp_path, capsys):
+    cfg, calls, runner = fixture(tmp_path)
+    partial = tmp_path / 'drive/000000000001-incomplete'
+    partial.mkdir(parents=True)
+    (partial / 'unfinished').write_text('retained')
+    work = tmp_path / 'work'
+    work.mkdir()
+    (work / 'unpublished').write_text('retained local')
+    kwargs = dict(work=work, backup=tmp_path / 'drive', auto_resume=True, runner=runner,
+                  inspect_checkpoint=lambda p, k: int(p.read_text()))
+    assert run_session(cfg, total=1, **kwargs)['durable_updates'] == 1
+    assert '--restore-file' not in calls[0]
+    assert (partial / 'unfinished').read_text() == 'retained'
+    assert next(tmp_path.glob('work.interrupted-*/unpublished')).read_text() == 'retained local'
+    assert 'starting at update 0' in capsys.readouterr().err
+    calls.clear()
+    assert run_session(cfg, total=2, **kwargs)['durable_updates'] == 2
+    assert '--restore-file' in calls[0]
+
+
+def test_auto_resume_refuses_all_corrupt_published_snapshots(tmp_path):
+    cfg, calls, runner = fixture(tmp_path)
+    kwargs = dict(work=tmp_path/'work', backup=tmp_path/'drive', runner=runner,
+                  inspect_checkpoint=lambda p, k: int(p.read_text()))
+    run_session(cfg, total=1, **kwargs)
+    path = next((tmp_path/'drive').glob('*/files/checkpoints/checkpoint_last.pt'))
+    path.write_text('corrupted')
+    calls.clear()
+    with pytest.raises(ValueError, match='none are valid'):
+        run_session(cfg, auto_resume=True, **kwargs)
+    assert not calls
+
+
+def test_nonresident_budget_starts_after_vocoder_preflight(tmp_path, monkeypatch):
+    from direct_s2st.vocoders import verification
+    cfg, _, runner = fixture(tmp_path)
+    now = [0]
+    def preflight(command, directory):
+        now[0] = 10000  # Longer than the entire optimization budget.
+        return command
+    monkeypatch.setattr(verification, 'preflight_command', preflight)
+    def run(args, **kwargs):
+        assert kwargs['timeout'] == 10
+        return runner(args, **kwargs)
+    result = run_session(cfg, work=tmp_path/'work', backup=tmp_path/'drive', total=1,
+        seconds=10, clock=lambda: now[0], runner=run,
+        inspect_checkpoint=lambda p, k: int(p.read_text()))
+    assert result['durable_updates'] == 1
+
+
 def test_colab_comparison_configs_and_artifact_identity(tmp_path):
     from direct_s2st.colab_compare import build_configs, save_configs, stage_file
     root = Path(__file__).resolve().parents[2]

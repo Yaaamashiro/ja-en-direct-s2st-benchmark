@@ -30,6 +30,23 @@ _ESPEAK_EN_US_INVENTORY_PROBES = (
     "a b c d e f g h i j k l m n o p q r s t u v w x y z"
 )
 
+# Phoneme mnemonics in base1 -> en -> en-us from the immutable 1.52.0
+# phsource/{phonemes,ph_english,ph_english_us} at commit
+# 4870adfa25b1a32b4361592f1be8a40337c58d6c. Exclude stress/pause/virtual
+# controls. Query the pinned engine's IPA rendering, including aliases and
+# rare phones; do not infer the inventory from train/dev/test text.
+_ESPEAK_EN_US_PHONEMES = (
+    '? @ @- a e i o u m- n- N- r- l- r r/ R R2 R3 r" '
+    'l l/ l/2 l/3 l^ l. L/ L w j ; m n n. n^ N ** * r. '
+    'b d d[ dZ dZ; J g B v v# D z Z z. z; Z; J^ Q Q^ Q" '
+    'p t t[ tS tS; c k q f T s S s. s; S; l# C x X h '
+    't2 t# d# z# z/2 w# 3 @2 @5 @L a2 a# aa E E# E2 I I2 I# I2# '
+    '0 0# 02 O2 V U A: A@ A# 3: i: O: O O@ o@ u: '
+    'aU oU oU# aI eI OI e@ i@ i@3 U@ aI@ aI3 aU@ IR VR o: A~ O~ e: e# a#2 @#'
+).split()
+TEXT_PROCESSING_VERSION = 'espeak-lexical-punctuation-v2'
+INVENTORY_VERSION = 'espeak-en-us-1.52.0-phoneme-table-v2'
+
 
 def tokenize_espeak_ipa(value: str, *, with_stress: bool = False) -> list[str]:
     """Split eSpeak IPA while preserving tied phones and combining marks."""
@@ -83,7 +100,28 @@ def normalize_phonemes(
 
 
 def strip_punctuation(text: str) -> str:
-    return "".join(" " if unicodedata.category(char).startswith("P") else char for char in text)
+    """Drop sentence punctuation, not lexical apostrophes/decimal points.
+
+    eSpeak receives contractions, possessives, hyphenated words, abbreviations
+    and numbers intact. Never rewrite the common manifest or TTS source text.
+    """
+    result = []
+    for index, char in enumerate(text):
+        left = text[index - 1] if index else ''
+        right = text[index + 1] if index + 1 < len(text) else ''
+        if char in "'’" and left.isalnum() and (right.isalnum() or left.lower() == 's'):
+            result.append("'")
+        elif char in '-‐‑' and left.isalnum() and right.isalnum():
+            result.append('-')
+        elif char in '.,:/' and left.isdigit() and right.isdigit():
+            result.append(char)
+        elif char == '-' and right.isdigit() and (not left or left.isspace()):
+            result.append(char)
+        elif char == '.' and left.isalpha() and (right.isalpha() or (index >= 2 and text[index - 2] == '.')):
+            result.append(char)
+        else:
+            result.append(' ' if unicodedata.category(char).startswith('P') else char)
+    return ''.join(result)
 
 
 class EspeakNgPhonemizer:
@@ -96,12 +134,17 @@ class EspeakNgPhonemizer:
         preserve_punctuation: bool = False,
         with_stress: bool = False,
         word_separator: str = "|",
+        text_processing_version: str = TEXT_PROCESSING_VERSION,
     ) -> None:
         self.executable = executable
         self.language = language
         self.preserve_punctuation = preserve_punctuation
         self.with_stress = with_stress
         self.word_separator = word_separator
+        if text_processing_version not in ('legacy-v1', TEXT_PROCESSING_VERSION):
+            raise ValueError('unsupported eSpeak text processing version')
+        self.text_processing_version = text_processing_version
+        self.inventory_version = ('probe-v1' if text_processing_version == 'legacy-v1' else INVENTORY_VERSION)
         version = subprocess.run(
             [executable, "--version"], check=True, capture_output=True, text=True
         ).stdout
@@ -111,14 +154,17 @@ class EspeakNgPhonemizer:
             )
 
     def __call__(self, text: str) -> str:
-        source = text if self.preserve_punctuation else strip_punctuation(text)
+        source = text if self.preserve_punctuation else (
+            ''.join(' ' if unicodedata.category(char).startswith('P') else char for char in text)
+            if self.text_processing_version == 'legacy-v1' else strip_punctuation(text))
         words = source.split()
         if not words:
             raise ValueError("text must not be empty after punctuation removal")
         rendered: list[str] = []
         for word in words:
             result = subprocess.run(
-                [self.executable, "-q", "--ipa", "--tie=z", "-v", self.language, word],
+                # '--' prevents lexical minus signs becoming CLI options.
+                [self.executable, "-q", "--ipa", "--tie=z", "-v", self.language, '--', word],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -147,12 +193,25 @@ class EspeakNgPhonemizer:
             word_separator=self.word_separator,
         )
 
+    @operation('phonemes: fixed eSpeak definition inventory')
     def fixed_vocabulary(self) -> tuple[str, ...]:
         if self.language.lower() != "en-us":
             raise ValueError(
                 "the checked inventory probes currently support only the en-us voice"
             )
-        return tuple(sorted(set(self(_ESPEAK_EN_US_INVENTORY_PROBES).split())))
+        tokens = set(self(_ESPEAK_EN_US_INVENTORY_PROBES).split())
+        if self.text_processing_version != 'legacy-v1':
+            from ..progress import track
+            for mnemonic in track(_ESPEAK_EN_US_PHONEMES, 'phonemes: inspect pinned definitions'):
+                result = subprocess.run(
+                    [self.executable, '-q', '--ipa', '--tie=z', '-v', self.language,
+                     '--', f'[[{mnemonic}]]'], check=True, capture_output=True,
+                    text=True, encoding='utf-8')
+                # Some linking aliases are silent without surrounding vowels.
+                if result.stdout.strip():
+                    tokens.update(tokenize_espeak_ipa(result.stdout, with_stress=self.with_stress))
+            tokens.add(self.word_separator)
+        return tuple(sorted(tokens))
 
 
 def _resolve_fixed_vocabulary(
@@ -190,8 +249,30 @@ def phonemize_manifests(
     resume: bool = False,
     overwrite: bool = False,
 ) -> dict[str, Any]:
+    suffix = "" if num_shards == 1 else f".shard-{shard_index:05d}-of-{num_shards:05d}"
+    metadata_path = output_root / f'metadata{suffix}.json'
+    if resume and not overwrite and isinstance(phonemizer, EspeakNgPhonemizer) and metadata_path.is_file():
+        import json
+        previous = json.loads(metadata_path.read_text(encoding='utf-8'))
+        saved_version = previous.get('text_processing_version', 'legacy-v1')
+        if saved_version != phonemizer.text_processing_version:
+            if saved_version != 'legacy-v1':
+                raise ValueError('unsupported saved text processing version; use an explicit migration')
+            # Keep an existing run reproducible, not a mixture of old/new G2P.
+            # Explicit regeneration is provided by the preparation recovery tool.
+            phonemizer.text_processing_version = saved_version
+            phonemizer.inventory_version = previous.get('inventory_version', 'probe-v1')
+            print('[phonemize] retaining saved legacy text processing; '
+                  'use resume_preparation.py --regenerate-phonemes for the corrected labels',
+                  file=sys.stderr, flush=True)
     vocabulary = _resolve_fixed_vocabulary(phonemizer, fixed_vocabulary)
     inventory_content = "".join(f"{token}\n" for token in vocabulary)
+    inventory_path = output_root / 'inventory.txt'
+    if (resume and not overwrite and isinstance(phonemizer, EspeakNgPhonemizer)
+            and inventory_path.is_file()
+            and inventory_path.read_text(encoding='utf-8') != inventory_content):
+        raise ValueError('saved phoneme inventory uses a different generation; '
+                         'use resume_preparation.py --regenerate-phonemes explicitly; old data is retained')
     atomic_write_text(
         output_root / "inventory.txt",
         inventory_content,
@@ -202,10 +283,19 @@ def phonemize_manifests(
     counts: dict[str, int] = {}
     token_counts: Counter[str] = Counter()
     processed = 0
-    suffix = "" if num_shards == 1 else f".shard-{shard_index:05d}-of-{num_shards:05d}"
     identity = dict(stage='phonemes-v1', engine=engine, version=version, inventory=list(vocabulary),
                     options={name: getattr(phonemizer, name, None) for name in
                              ('language', 'preserve_punctuation', 'with_stress', 'word_separator')})
+    processing = getattr(phonemizer, 'text_processing_version', None)
+    if processing and processing != 'legacy-v1':
+        identity['text_processing_version'] = processing
+        identity['inventory_version'] = phonemizer.inventory_version
+    # Retain compatibility with the known old probe dictionary without changing
+    # its cache keys or files. New engines use the definition-based inventory.
+    from .prepare_fairseq import ESPEAK_152_INVENTORY_SUPPLEMENT
+    allowed = set(vocabulary)
+    if engine == 'espeak-ng' and version == '1.52.0':
+        allowed.update(ESPEAK_152_INVENTORY_SUPPLEMENT)
     for current_split in splits:
         lines: list[str] = []
         # Phonemization needs text, not another stat/open of every WAV on Drive.
@@ -215,8 +305,12 @@ def phonemize_manifests(
             rows = rows[:limit]
         def phonemize(row):
             try:
-                return dict(pair_id=str(row['pair_id']), sequence=normalize_phonemes(
-                    phonemizer(str(row['en_tts_text'])), with_stress=True))
+                sequence = normalize_phonemes(phonemizer(str(row['en_tts_text'])), with_stress=True)
+                unknown = set(sequence.split()) - allowed
+                if unknown:
+                    raise ValueError(f'unknown phonemes: {sorted(unknown)}; '
+                                     'review the fixed engine inventory (do not grow it from dev/test)')
+                return dict(pair_id=str(row['pair_id']), sequence=sequence)
             except (ValueError, subprocess.CalledProcessError) as error:
                 raise ValueError(f"phonemization failed: pair_id={row['pair_id']!r} "
                                  f"text={row['en_tts_text']!r}: {error}") from error
@@ -226,6 +320,8 @@ def phonemize_manifests(
                     lambda row: digest([row['pair_id'], row['en_tts_text']]),
                     f'phonemize: {current_split} (generate/reuse)', total=len(rows)):
                 sequence = result['sequence']
+                if not sequence.split() or set(sequence.split()) - allowed:
+                    raise ValueError(f"invalid/unknown cached phonemes: pair_id={result['pair_id']!r}")
                 lines.append(f"{result['pair_id']}\t{sequence}\n")
                 token_counts.update(sequence.split())
                 processed += 1
@@ -250,6 +346,10 @@ def phonemize_manifests(
         "token_counts": dict(sorted(token_counts.items())),
         "inventory_sha256": sha256_file(output_root / "inventory.txt"),
     }
+    if processing and processing != 'legacy-v1':
+        metadata.update(text_processing_version=processing, inventory_version=phonemizer.inventory_version,
+                        phoneme_manifests={current_split: sha256_file(output_root / f'{current_split}{suffix}.tsv')
+                                           for current_split in splits})
     atomic_write_json(
         output_root / f"metadata{suffix}.json",
         metadata,

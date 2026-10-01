@@ -17,7 +17,6 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
                    inspect_checkpoint, publish, popen=subprocess.Popen):
     work.mkdir(parents=True, exist_ok=True)
     settings = config['runtime']
-    deadline = time.monotonic() + seconds
     mapping = dict(python=sys.executable, run_root=str(work),
                    checkpoint=str(work / config['checkpoint']), updates=str(total))
     args = [part.format(**mapping) for part in config['command']]
@@ -27,6 +26,10 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
         temporary = Path(temporary).resolve()
         staging = temporary / 'snapshots'
         staging.mkdir()
+        from .vocoders.verification import preflight_command
+        args = preflight_command(args, temporary)
+        # Input verification is resumable preparation, not optimization time.
+        deadline = time.monotonic() + seconds
         env = dict(os.environ, S2ST_TRAIN_OPTIMIZE='1',
                    S2ST_TRAIN_STAGING=str(staging), S2ST_TRAIN_DEADLINE=str(deadline),
                    S2ST_TRAIN_CACHE=str(temporary / 'cache'),

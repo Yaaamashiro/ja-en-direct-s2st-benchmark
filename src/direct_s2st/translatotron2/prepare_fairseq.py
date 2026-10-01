@@ -44,6 +44,10 @@ def _training_inventory(phoneme_root, common_root, original):
         for split, expected in row['common_manifests'].items():
             if sha256_file(common_root / f'{split}.jsonl') != expected:
                 raise ValueError(f'phoneme metadata refers to stale {split} input')
+        suffix = '' if row.get('num_shards', 1) == 1 else f".shard-{row['shard_index']:05d}-of-{row['num_shards']:05d}"
+        for split, expected in row.get('phoneme_manifests', {}).items():
+            if sha256_file(phoneme_root / f'{split}{suffix}.tsv') != expected:
+                raise ValueError(f'phoneme labels differ from saved {split} metadata')
     return tuple(sorted(set(original) | set(ESPEAK_152_INVENTORY_SUPPLEMENT)))
 
 
@@ -57,7 +61,7 @@ def _read_phonemes(root: Path, split: str) -> dict[str, str]:
         with path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 pair_id, separator, sequence = line.rstrip("\n").partition("\t")
-                if not separator or not pair_id or not sequence:
+                if not separator or not pair_id or not sequence.split():
                     raise ValueError(f"invalid phoneme row at {path}:{line_number}")
                 if pair_id in values:
                     raise ValueError(f"duplicate phoneme row: {pair_id}")
@@ -75,6 +79,26 @@ def _read_inventory(root: Path) -> tuple[str, ...]:
     if len(tokens) != len(set(tokens)):
         raise ValueError(f"duplicate token in phoneme inventory: {path}")
     return tokens
+
+
+@operation('phonemes: dictionary and saved-label preflight (no WAV reads)')
+def validate_phonemes(common_root, phoneme_root):
+    common_root, phoneme_root = Path(common_root), Path(phoneme_root)
+    inventory = _training_inventory(phoneme_root, common_root, _read_inventory(phoneme_root))
+    known, counts, problems = set(inventory), {}, []
+    for split in ('train', 'dev', 'test'):
+        labels = _read_phonemes(phoneme_root, split)
+        ids = [row['pair_id'] for row in read_jsonl(common_root / f'{split}.jsonl')]
+        if not ids or len(ids) != len(set(ids)) or set(ids) != labels.keys():
+            raise ValueError(f'phoneme IDs do not match {split} common manifest')
+        for pair_id, sequence in track(labels.items(), f'phonemes: validate {split} dictionary', total=len(labels)):
+            unknown = set(sequence.split()) - known
+            if unknown:
+                problems.append(f'{split}/{pair_id}: {sorted(unknown)}')
+        counts[split] = len(labels)
+    if problems:
+        raise ValueError(f'unknown phonemes in {len(problems)} samples: ' + '; '.join(problems[:20]))
+    return dict(splits=counts, inventory_size=len(inventory), wav_reads=0)
 
 
 def _ten_ms_frames(path: Path) -> int:
@@ -237,6 +261,8 @@ def prepare_fairseq(
     if unknown_by_split:
         raise ValueError('; '.join(f"unknown phonemes in {split}: {', '.join(tokens)}"
                                   for split, tokens in unknown_by_split.items()))
+    # Catch missing/extra/empty labels before resolving/opening all WAVs.
+    validate_phonemes(common_root, phoneme_root)
 
     rows_by_split: dict[str, list[dict[str, Any]]] = {}
     target_audio: dict[str, Path] = {}

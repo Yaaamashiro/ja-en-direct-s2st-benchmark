@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -187,7 +188,7 @@ def checkpoint_updates(path, kind):
 
 @operation('direct_s2st/colab: run_session')
 def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
-                resume=False, confirm_training=False, restore_only=False, runner=subprocess.run, clock=time.monotonic,
+                resume=False, auto_resume=False, confirm_training=False, restore_only=False, runner=subprocess.run, clock=time.monotonic,
                 inspect_checkpoint=checkpoint_updates):
     work, backup = Path(work).resolve(), Path(backup).resolve()
     if restore_only and not resume:
@@ -211,6 +212,20 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
         raise ValueError('identity_files must include data lock and environment lock')
     identity = dict(config=config, work=str(work), inputs={p: sha256_file(Path(p)) for p in config['identity_files']})
     previous = latest(backup, identity)
+    if auto_resume:
+        if resume or restore_only:
+            raise ValueError('auto-resume cannot be combined with explicit resume/restore-only')
+        if not previous and any(backup.glob('*/snapshot.json')):
+            raise ValueError('backups exist but none are valid; inspect them before restarting')
+        resume = previous is not None
+        if not resume:
+            print('[recovery] no verified snapshot; starting at update 0. '
+                  'Incomplete Drive copies are retained.', file=sys.stderr, flush=True)
+            if work.exists() and any(work.iterdir()):
+                retained = work.with_name(work.name + '.interrupted-' + uuid.uuid4().hex)
+                work.rename(retained)
+                print(f'[recovery] retained unpublished local files: {retained}',
+                      file=sys.stderr, flush=True)
     if previous and not resume:
         raise FileExistsError('backup exists; use --resume')
     if resume and not previous:
@@ -232,6 +247,18 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
         return run_continuous(config, work=work, backup=backup, identity=identity,
                               completed=completed, total=total, seconds=seconds,
                               inspect_checkpoint=inspect_checkpoint, publish=publish)
+    work.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.s2st-preflight-', dir=work.parent) as temporary:
+        from .vocoders.verification import preflight_command
+        mapping = dict(python=sys.executable, run_root=str(work), checkpoint=str(checkpoint), updates=str(total))
+        verified_command = preflight_command([part.format(**mapping) for part in command], temporary)
+        return _run_chunks(config, work, backup, checkpoint, identity, completed, total, chunk,
+                           seconds, runner, clock, inspect_checkpoint,
+                           verified_command[len(command):])
+
+
+def _run_chunks(config, work, backup, checkpoint, identity, completed, total, chunk,
+                seconds, runner, clock, inspect_checkpoint, preflight_args):
     started = clock()
     while completed < total:
         remaining = seconds - (clock() - started)
@@ -239,7 +266,7 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
             break
         target = min(total, completed + chunk)
         mapping = dict(python=sys.executable, run_root=str(work), checkpoint=str(checkpoint), updates=str(target))
-        args = [part.format(**mapping) for part in command]
+        args = [part.format(**mapping) for part in config['command']] + preflight_args
         if completed:
             args += [part.format(**mapping) for part in config['resume_args']]
         work.mkdir(parents=True, exist_ok=True)
@@ -269,12 +296,15 @@ def main():
     parser.add_argument('--chunk-updates', type=int, default=1)
     parser.add_argument('--session-seconds', type=float, default=3600)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--auto-resume', action='store_true',
+                        help='Resume a verified snapshot, or explicitly report starting at zero; retain partial copies')
     parser.add_argument('--restore-only', action='store_true', help='Verify and restore a Drive snapshot without training')
     parser.add_argument('--confirm-training', action='store_true')
     args = parser.parse_args()
     result = run_session(json.loads(args.config.read_text(encoding='utf-8')), work=args.work_root,
         backup=args.backup_root, total=args.total_updates, chunk=args.chunk_updates,
-        seconds=args.session_seconds, resume=args.resume, confirm_training=args.confirm_training,
+        seconds=args.session_seconds, resume=args.resume, auto_resume=args.auto_resume,
+        confirm_training=args.confirm_training,
         restore_only=args.restore_only)
     print(json.dumps(result), flush=True)
 

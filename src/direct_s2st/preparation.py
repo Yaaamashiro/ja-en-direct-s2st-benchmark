@@ -174,23 +174,26 @@ They do not promise parallel speedup for pure-Python CPU loops.
 
 
 def checkpoint_map(function, items, cache, key, phase, *, total=None):
-    """Only main-thread code reads/writes the checkpoint index."""
-    def jobs():
-        for item in items:
-            identity = key(item)
-            yield identity, item, cache.get(identity)
+    """Parallelize metadata keys too; only the coordinator publishes results.
 
-    def work(job):
-        identity, item, prior = job
+    Workers consult a frozen index, never mutate the live checkpoint dictionary.
+    This avoids serial Drive stat/resolve calls before each job is submitted.
+    """
+    saved = dict(cache.rows)
+    def work(item):
+        identity = key(item)
+        prior = saved.get(identity)
         label = item.get('pair_id', '-') if isinstance(item, dict) else getattr(item, 'pair_id', '-')
         if isinstance(item, tuple) and item and isinstance(item[0], str):
             label = item[0]
         return dict(pair_id=label, identity=identity,
+                    reused=prior is not None,
                     result=prior if prior is not None else function(item))
 
     reported = time.monotonic()
     computed = 0
-    for completed in track(adaptive_map(work, jobs()), phase, total=total):
+    for completed in track(adaptive_map(work, items), phase, total=total):
+        cache.reused += completed['reused']
         computed += completed['identity'] not in cache.rows
         cache.record(completed['identity'], completed['result'])
         if time.monotonic() - reported >= 10:

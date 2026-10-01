@@ -43,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     for system, actions in {
         "s2ut": ("fetch-artifacts", "extract-units", "prepare", "validate", "train", "infer"),
-        "translatotron2": ("phonemize", "prepare", "validate", "train", "infer"),
+        "translatotron2": ("phonemize", "validate-phonemes", "prepare", "validate", "train", "infer"),
     }.items():
         commands = systems.add_parser(system).add_subparsers(dest="action", required=True)
         for action in actions:
@@ -96,7 +96,7 @@ def _default_config(args: argparse.Namespace) -> Path | None:
     if args.system == "corpus":
         return None
     if args.system in ("s2ut", "translatotron2"):
-        name = "prepare" if args.action in ("fetch-artifacts", "extract-units", "phonemize", "prepare", "validate") else args.action
+        name = "prepare" if args.action in ("fetch-artifacts", "extract-units", "phonemize", "validate-phonemes", "prepare", "validate") else args.action
         return root / args.system / f"{name}.yaml"
     if args.system == "cascade":
         return root / "cascade" / "default.yaml"
@@ -220,6 +220,11 @@ def _run_translatotron2(
     roots = RootPaths.from_environment()
     common = roots.experiment_data / "common"
     phonemes = roots.experiment_data / "translatotron2" / "phonemes"
+    if args.action == 'validate-phonemes':
+        from .translatotron2.prepare_fairseq import validate_phonemes
+        if args.dry_run:
+            return dict(phoneme_root=str(phonemes), wav_reads=0)
+        return validate_phonemes(roots.experiment_data / 'common', phonemes)
     if args.action == "phonemize":
         if args.dry_run:
             return {"common_root": str(common), "output_root": str(phonemes)}
