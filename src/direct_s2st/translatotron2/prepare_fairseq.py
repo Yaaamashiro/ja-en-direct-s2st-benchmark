@@ -136,6 +136,10 @@ def _extract_logmel_official(
         f_min=settings["f_min"],
         f_max=settings["f_max"],
         eps=settings["eps"],
+        # Our caller reserves a new private temporary file with mkstemp.
+        # fairseq otherwise sees that empty file and skips feature extraction.
+        # This does not authorize replacing any published/cached feature.
+        overwrite=True,
     )
 
 

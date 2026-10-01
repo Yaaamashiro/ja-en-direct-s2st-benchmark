@@ -172,3 +172,36 @@ def test_inventory_supplement_never_learns_new_dev_or_test_tokens(tmp_path):
         prepare_fairseq(common, phones, tmp_path / 'prepared', mel_config={'n_mels': 80},
                        feature_extractor=_mel_fixture, resume=True)
     assert not (tmp_path / 'prepared').exists()
+
+
+def test_official_mel_adapter_writes_reserved_temp_file_and_resumes(tmp_path, monkeypatch):
+    import sys
+    from types import ModuleType
+    np = pytest.importorskip('numpy')
+    calls = []
+    audio = ModuleType('torchaudio')
+    audio.load = lambda _: (object(), 16000)
+    audio_utils = ModuleType('fairseq.data.audio.audio_utils')
+    audio_utils.convert_waveform = lambda waveform, rate, **kwargs: (waveform, rate)
+    data_utils = ModuleType('examples.speech_synthesis.data_utils')
+    def extract(waveform, sample_rate, output_path, *, overwrite=False, **settings):
+        # Match the pinned fairseq helper's existing-file early return.
+        assert output_path.is_file() and output_path.stat().st_size == 0
+        calls.append(overwrite)
+        if output_path.is_file() and not overwrite:
+            return
+        np.save(output_path, np.zeros((11, settings['n_mels']), dtype=np.float32))
+    data_utils.extract_logmel_spectrogram = extract
+    for module in (audio, audio_utils, data_utils):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    common, phones, prepared = [tmp_path / name for name in ('common', 'phones', 'prepared')]
+    _common(common)
+    phonemize_manifests(common, phones, phonemizer=lambda _: 'a',
+                       engine='fixture', version='1', fixed_vocabulary=['a'])
+    kwargs = dict(mel_config={'n_mels': 80}, resume=True)
+    lock = prepare_fairseq(common, phones, prepared, **kwargs)
+    assert calls == [True, True, True]
+    before = {p.relative_to(prepared): p.read_bytes() for p in prepared.rglob('*') if p.is_file()}
+    assert prepare_fairseq(common, phones, prepared, **kwargs) == lock
+    assert calls == [True, True, True]
+    assert before == {p.relative_to(prepared): p.read_bytes() for p in prepared.rglob('*') if p.is_file()}
