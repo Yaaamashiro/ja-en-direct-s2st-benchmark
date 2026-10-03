@@ -325,15 +325,15 @@ def prepare_fairseq(
             import torchaudio  # noqa: F401
         with Checkpoints(output_root.parent / '.prep-checkpoints/mel', identity,
                          resume=resume and not overwrite, overwrite=overwrite) as cache:
-            feature_root = cache.root / 'features'
-            feature_root.mkdir(parents=True, exist_ok=True)
+            from .mel_storage import feature_path, resolve_feature
             def key(item):
                 return digest([item[0], file_stamp(item[1])])
             def extract(item):
                 import numpy as np
                 pair_id, audio_path = item
-                destination = feature_root / f'{key(item)[:32]}.npy'
-                fd, temporary_name = tempfile.mkstemp(dir=feature_root, suffix='.npy')
+                destination = feature_path(cache.root, f'{key(item)[:32]}.npy')
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                fd, temporary_name = tempfile.mkstemp(dir=destination.parent, suffix='.npy')
                 os.close(fd)
                 temporary = Path(temporary_name)
                 try:
@@ -353,9 +353,7 @@ def prepare_fairseq(
             files = []
             for result in checkpoint_map(extract, sorted(target_audio.items()), cache, key,
                                          'mel: extract/reuse features', total=len(target_audio)):
-                path = Path(result['path'])
-                if sha256_file(path) != result['sha256']:
-                    raise ValueError(f'corrupt cached Mel feature: {path}')
+                path = resolve_feature(cache.root, result)
                 files.append((result['id'] + '.npy', path))
             from .recovery import publish_archives
             target_paths, target_lengths, archive_hashes = publish_archives(
