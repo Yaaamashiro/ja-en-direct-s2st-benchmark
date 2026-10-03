@@ -12,7 +12,7 @@
 | セル1〜3・ランタイム構築 | 保存済みrevision/環境lock、構築済みコンポーネント | 新VMではPython環境やライブラリの構築が必要。ビルド途中の命令は再実行 |
 | 4A・コーパス取込 | 音声パス解決、WAV/SHA256検証をレコード単位で記録 | 未保存レコード。マニフェスト読込み・メタデータ確認は必要 |
 | 4A・音素化 | サンプル単位の音素列 | 未保存サンプル。最終TSV/inventoryは保存結果から再構成 |
-| 4A・Mel準備 | 入力WAVヘッダ、生成済みNPY、分割ZIP | 未保存NPYと作成途中のZIP。新規ZIPは原則512件または256MiBで分割（単一の巨大NPYは例外） |
+| 4A・Mel準備 | 入力WAVヘッダ、生成済み分散NPY、分割ZIP | 未保存NPYと作成途中のZIP。NPYは256フォルダへ分散、新規ZIPは原則512件または256MiBで分割（単一の巨大NPYは例外） |
 | 4A・最終検証 | サンプル単位の検証成功記録 | 未保存サンプル。最終fingerprintのファイルハッシュ処理は再実行 |
 | 4B・HuBERT | 抽出済みUnitとサンプル単位の記録 | 未保存サンプル/バッチ。モデル読込みは再実行 |
 | 4B・学習データ準備 | サンプル単位のUnit読込み・WAVヘッダ結果、最終TSV/辞書 | 未保存サンプル。テキストラベル作成・TSV整合性確認は再走査 |
@@ -123,3 +123,89 @@ Melの途中checkpoint、公開済みZIPは保持し、互換な特徴量を再�
 CPUテストで中断・再開、完了結果の再利用、変更/破損の検出、ノートブック呼出し、
 学習snapshot復元、推論/評価journal、集計の再実行を検証します。
 実Colabの24時間切断、Drive同期障害、全14万件と実GPUによる全工程E2Eは未検証です。
+
+## 大量のMel NPYでDriveのInput/output errorが出た場合
+
+旧版は1個の`features/`フォルダに全NPYを保存していました。
+[Colab公式FAQ](https://research.google.com/colaboratory/intl/en-GB/faq.html#drive-timeout)では、
+フォルダ内の大量ファイルが`Input/output error`を招く場合があり、各フォルダを約1万件未満に
+抑えることを推奨しています。同じエラーは操作/帯域quotaなどでも発生するので、
+このログだけでファイルの破損・消失とは判定できません。
+
+修正版は`<Mel checkpoint root>/features-v2/<ファイル名の先頭2桁>/<32桁>.npy`へ
+保存します。256個のフォルダへ分散し、**旧`features/`の下には作りません**。
+抽出設定・checkpoint identity/keyは変えず、旧checkpointも上書きしません。
+通常の再開は、検証済み分散コピーを優先します。旧ファイルが読めれば元を保持したままコピーします。
+読めない場合やSHA不一致では停止し、既存NPYを削除・再生成・移動しません。
+
+各コピーは元checkpointのSHA256との一致と公開後の読戻しを確認してから再利用します。
+次回はSHAとファイルのパス/サイズ/更新時刻を保存した不変receiptが一致すれば内容読込みを省略します。
+同じサイズ/更新時刻のまま内容を変更することは検出できません。必要時は`S2ST_PREP_RECHECK=1`で
+内容を再検証します。これは既存Melの再抽出を指定するものではありません。
+
+### 旧フォルダがマウント経由で読めないときの救済
+
+`scripts/colab/repair_mel_cache.py`は、Drive APIで**旧フォルダを読み取り専用で**一覧取得し、
+ファイルIDを使ってダウンロードできます。旧NPYのマウントパスを開くことはありません。
+コピーの保存だけはDriveマウント上の分散フォルダへ行います。
+元ファイル・checkpointは残すので、**コピー分に加え、その後のZIP作成分の空き容量が必要**です。
+APIの権限、ファイルの同期、Drive/APIのquota、保存先の書込み障害は別途解消する必要があります。
+この手順で必ず復旧する・短時間で終わるという保証はありません。
+
+同じ実験のセル1を実行後、処理を実行していない状態で修正版checkoutを取得します。
+`REVISION`にはこの修正を含む公開済みcommitの完全SHAを指定します。
+保存済みrevisionはまだ手で編集せず、音素・Mel・checkpointも削除しないでください。
+
+```python
+import sys
+ensure_workspace()
+configure_preparation()
+REVISION = '<修正版の完全SHA>'
+run('git', '-C', REPO, 'fetch', 'origin', REVISION)
+run('git', '-C', REPO, 'checkout', '--detach', REVISION)
+```
+
+DriveのWeb画面で、ログに出たcheckpointフォルダ内の**旧`features`フォルダ**を開き、
+URLの`/folders/`より後のIDを控えます。例のcache rootは実際のエラーログのものに合わせます。
+`features-v2`、`mel`、実験フォルダ全体のIDではありません。
+認証はノートブック上で、マウントと同じアカウントに対して行います。
+
+```python
+from google.colab import auth
+auth.authenticate_user()
+MEL_CACHE = DATA / 'translatotron2/.prep-checkpoints/mel/2b2a74082e7462215d32ceca'
+FEATURES_FOLDER_ID = '<旧featuresフォルダのID>'
+# host Pythonを使用。仮想環境のPYTHONではありません。
+repair_args = [sys.executable, REPO / 'scripts/colab/repair_mel_cache.py',
+               '--cache-root', MEL_CACHE, '--drive-folder-id', FEATURES_FOLDER_ID]
+run(*repair_args, '--limit', '3')  # まずSHA一致・保存先への書込みを3件で確認
+```
+
+成功したら同じセル内、または次のセルで上限なしでコピーします。
+
+```python
+run(*repair_args)
+```
+
+`[mel-recovery] copied=... reused=... remaining=...`で実際の進捗を確認できます。
+3件の試行だけでは全件のquota/書込み成功は保証できません。
+中断したら同じ認証・同じ引数で再実行します。検証済みコピーは再ダウンロードしません。
+完全なDriveファイルID一覧は同じcheckpoint rootへ保存し、再利用します。
+一覧の途中で停止した場合は一覧取得をやり直します。APIの一覧が古い場合のみ
+`--refresh-index`を追加し、旧一覧を退避して取り直します（旧NPY/chunkは変更しません）。
+ファイルが欠落・重複している場合やSHA256が違う場合は黙って先へ進みません。
+API認証/権限不足は`authenticate_user()`だけでは解消しない場合があります。
+quotaエラーで連続実行するのではなく、公式FAQの対処とアクセス権・空き容量を確認してください。
+
+コピー完了後、保存済みrevisionを専用スクリプトで更新してMel準備と最終検証を再開します。
+この`--overwrite`はrevision固定情報の更新を許可するだけで、Mel再生成ではありません。
+既に音素移行が完了していれば`--regenerate-phonemes`は付けません。
+
+```python
+run(sys.executable, REPO / 'scripts/colab/resume_preparation.py',
+    '--persistent', PERSISTENT, '--revision', REVISION,
+    '--profile', PROFILE, '--overwrite')
+```
+
+これで互換な保存済みMelを使い、未保存分の抽出とZIP/TSV/最終検証へ進みます。
+元の音声・音素・学習用辞書はこのストレージ修復で変更しません。
