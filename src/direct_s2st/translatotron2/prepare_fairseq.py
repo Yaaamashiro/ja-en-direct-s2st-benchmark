@@ -318,46 +318,31 @@ def prepare_fairseq(
             raise ValueError('existing Mel ZIP configuration mismatch')
     atomic_write_json(identity_path, identity, resume=True, overwrite=overwrite)
     sharded = zip_path.with_suffix('.shards.json').is_file()
-    if overwrite or not zip_path.exists() or sharded:
+    legacy_shards = sharded and json.loads(zip_path.with_suffix('.shards.json').read_text())['version'] == 1
+    storage = os.environ.get('S2ST_MEL_STORAGE', 'packed')
+    if storage not in ('packed', 'files'):
+        raise ValueError('S2ST_MEL_STORAGE must be packed or files')
+    completed_archives = None
+    if legacy_shards and resume and not overwrite:
+        from .recovery import reuse_completed_archives
+        completed_archives = reuse_completed_archives(zip_path, target_audio)
+    if completed_archives is not None:
+        target_paths, target_lengths, archive_hashes = completed_archives
+    elif overwrite or not zip_path.exists() or sharded:
         extractor = feature_extractor or _extract_logmel_official
         if feature_extractor is None:
             # Load native pools before adaptive_map limits their thread counts.
             import torchaudio  # noqa: F401
         with Checkpoints(output_root.parent / '.prep-checkpoints/mel', identity,
                          resume=resume and not overwrite, overwrite=overwrite) as cache:
-            from .mel_storage import feature_path, resolve_feature
-            def key(item):
-                return digest([item[0], file_stamp(item[1])])
-            def extract(item):
-                import numpy as np
-                pair_id, audio_path = item
-                destination = feature_path(cache.root, f'{key(item)[:32]}.npy')
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                fd, temporary_name = tempfile.mkstemp(dir=destination.parent, suffix='.npy')
-                os.close(fd)
-                temporary = Path(temporary_name)
-                try:
-                    extractor(audio_path, temporary, settings)
-                    array = np.load(temporary, allow_pickle=False)
-                    if array.ndim != 2 or array.shape[1] != settings['n_mels'] or not np.isfinite(array).all():
-                        raise ValueError(f'invalid Mel feature: {pair_id}')
-                    checksum = sha256_file(temporary)
-                    if destination.exists() and not overwrite:
-                        if sha256_file(destination) != checksum:
-                            raise ValueError(f'conflicting cached Mel feature: {pair_id}')
-                    else:
-                        os.replace(temporary, destination)
-                    return dict(id=pair_id, path=str(destination), sha256=checksum)
-                finally:
-                    temporary.unlink(missing_ok=True)
-            files = []
-            for result in checkpoint_map(extract, sorted(target_audio.items()), cache, key,
-                                         'mel: extract/reuse features', total=len(target_audio)):
-                path = resolve_feature(cache.root, result)
-                files.append((result['id'] + '.npy', path))
-            from .recovery import publish_archives
-            target_paths, target_lengths, archive_hashes = publish_archives(
-                files, zip_path, resume=resume, overwrite=overwrite)
+            if (not legacy_shards or overwrite) and storage == 'packed':
+                from .mel_packs import prepare_packed
+                target_paths, target_lengths, archive_hashes = prepare_packed(
+                    cache, sorted(target_audio.items()), extractor, settings, zip_path,
+                    resume=resume, overwrite=overwrite)
+            else:
+                target_paths, target_lengths, archive_hashes = _prepare_legacy_features(
+                    cache, target_audio, extractor, settings, zip_path, resume=resume, overwrite=overwrite)
     else:
         # Existing single-ZIP datasets retain their locators and lock format.
         target_paths, target_lengths = _zip_manifest(zip_path, resume=resume)
@@ -480,3 +465,37 @@ def prepare_fairseq(
         {**source_settings, 'log_transform': 'natural_log_clamp_eps', 'normalization': 'utterance_cmvn'},
         resume=resume, overwrite=overwrite)
     return lock
+
+
+def _prepare_legacy_features(cache, target_audio, extractor, settings, zip_path, *, resume, overwrite):
+    """Compatibility for already published version-1 archive plans."""
+    from .mel_storage import feature_path, resolve_feature
+    from .recovery import publish_archives
+    import numpy as np
+    def key(item):
+        return digest([item[0], file_stamp(item[1])])
+    def extract(item):
+        pair_id, audio_path = item
+        destination = feature_path(cache.root, f'{key(item)[:32]}.npy')
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(dir=destination.parent, suffix='.npy')
+        os.close(fd)
+        temporary = Path(name)
+        try:
+            extractor(audio_path, temporary, settings)
+            array = np.load(temporary, allow_pickle=False)
+            if array.ndim != 2 or array.shape[1] != settings['n_mels'] or not np.isfinite(array).all():
+                raise ValueError(f'invalid Mel feature: {pair_id}')
+            checksum = sha256_file(temporary)
+            if destination.exists() and not overwrite:
+                if sha256_file(destination) != checksum:
+                    raise ValueError(f'conflicting cached Mel feature: {pair_id}')
+            else:
+                os.replace(temporary, destination)
+            return dict(id=pair_id, path=str(destination), sha256=checksum)
+        finally:
+            temporary.unlink(missing_ok=True)
+    files = [(result['id'] + '.npy', resolve_feature(cache.root, result))
+             for result in checkpoint_map(extract, sorted(target_audio.items()), cache, key,
+                 'mel: extract/reuse features', total=len(target_audio))]
+    return publish_archives(files, zip_path, resume=resume, overwrite=overwrite)

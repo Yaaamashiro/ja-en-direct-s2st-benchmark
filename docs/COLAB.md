@@ -126,10 +126,13 @@ Colabでは画面と`session.log`に記録されます。学習・推論の外�
 
 ### 4A/4Bの並列処理と中断再開
 
-Mel NPYは`features-v2/<先頭2桁>/`の256フォルダへ分散保存します。
-旧版の単一`features/`でDrive I/Oエラーが出る場合は、再生成・削除せず、
-[分散コピーへの救済手順](RESUME.md#大量のmel-npyでdriveのinputoutput-errorが出た場合)を使います。
-既存checkpointを保持し、元SHA256に一致したコピーだけを再利用します。
+新規Mel抽出はVMのローカル一時ディスクで処理し、最大128件・目安256MiBずつの
+非圧縮ZIPにまとめ、読戻しSHA256を確認してDriveへ保存します。
+Driveへ14万個のNPYを個別保存する方式ではありません。
+ZIPと不変receiptは`packs-v1/<先頭2桁>/`へ保存し、次回はZIP単位で検証・再利用します。
+旧版の`features/`・`features-v2/`やcheckpointは削除・移動しません。
+[既存MelのZIP救済手順](RESUME.md#大量のmel-npyでdriveのinputoutput-errorが出た場合)を使えます。
+以前に完成・作成開始した旧形式の学習用ZIPは互換経路で維持します。
 
 セル1に次の設定があります。セル5の学習設定・バッチサイズは変更しません。
 
@@ -148,14 +151,21 @@ GPU使用率100%や最大速度、特定の高速化倍率を保証するもの�
 
 - WAV検証: `data/.prep-checkpoints/corpus/`
 - 音素: `data/translatotron2/phonemes/.checkpoints/`
-- Mel: `data/translatotron2/.prep-checkpoints/mel/`（抽出済みnpyも保持するためZIPとは別に容量が必要）
+- Mel: `data/translatotron2/.prep-checkpoints/mel/`（新方式は`packs-v1/`のZIP。学習用ZIPの分も別途容量が必要。旧NPYは保持）
 - Unit: `data/s2ut/units/.checkpoints/` と既存の`.units`ファイル
 
-完了記録を64件または約10秒ごと（次の結果受取時）に小さなJSONへ原子的に保存します。
+Mel以外の完了記録を64件または約10秒ごと（次の結果受取時）に小さなJSONへ原子的に保存します。
 通常の例外・中断でも受取済み結果を保存します。VMの強制終了では未保存チャンクと
 処理中の小さなウィンドウをやり直します。最終TSV/ZIPの作成中に止まった場合は、
 抽出済みデータを使ってその集約工程をやり直します。破損した公開済み記録・成果物は
 黙って上書きせず停止します。モデル・入力が変わった場合は旧結果を無条件再利用しません。
+
+新方式のMelは最大128件/256MiBのZIPごとに保存し、32件以上たまった場合は
+約60秒経過時（次の結果受取時）にも保存します。正常な例外・中断では受取済みの
+小さな残りZIPも保存します。VM強制終了では未公開ZIPと処理中のワーカー分だけを
+やり直します。`persisted`がDrive保存済み件数、`pending_local`がローカルだけの件数です。
+`S2ST_MEL_LOCAL_WORK`でローカル作業親ディレクトリを指定できます（既定はローカルtemp）。
+Driveパスやコーパス内を作業場所に指定しないでください。
 
 中断後は**同じ実験名・同じコードrevision・同じ設定でセル1→4Aまたは4B**を実行してください。
 `--resume`はセルに設定済みで、VM消失/GPU変更後の環境構築も自動実行します。

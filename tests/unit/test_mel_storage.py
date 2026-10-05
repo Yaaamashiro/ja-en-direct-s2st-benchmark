@@ -205,6 +205,7 @@ def test_prepare_resumes_actual_legacy_checkpoint_without_reextracting(tmp_path,
     from direct_s2st.translatotron2.phonemize import phonemize_manifests
     from direct_s2st.translatotron2.prepare_fairseq import prepare_fairseq
     monkeypatch.setenv('S2ST_PREP_WORKERS', '1')
+    monkeypatch.setenv('S2ST_MEL_STORAGE', 'files')
     common, phones, output = [tmp_path / p for p in ('common', 'phones', 'fairseq')]
     _common(common)
     phonemize_manifests(common, phones, phonemizer=lambda _: 'a',
@@ -233,6 +234,7 @@ def test_prepare_resumes_actual_legacy_checkpoint_without_reextracting(tmp_path,
     before = chunk.read_bytes()
     new.unlink()
     calls.clear()
+    monkeypatch.setenv('S2ST_MEL_STORAGE', 'packed')
     def remaining(audio, dest, settings):
         calls.append(audio.name)
         _mel_fixture(audio, dest, settings)
@@ -240,7 +242,8 @@ def test_prepare_resumes_actual_legacy_checkpoint_without_reextracting(tmp_path,
                     feature_extractor=remaining, resume=True)
     assert len(calls) == 2 and 'dev-en.wav' not in calls
     assert chunk.read_bytes() == before
-    assert new.read_bytes() == old.read_bytes()
+    assert not new.exists()  # Legacy bytes are now packed, not copied into Drive NPYs.
+    assert old.is_file()
     assert (output / 'logmelspec80.zip').is_file()
 
 
@@ -275,7 +278,7 @@ def test_drive_index_pagination_cache_missing_and_duplicate_safety(tmp_path):
     pages = [dict(files=[api_entry(names[0])], nextPageToken='page2'),
              dict(files=[api_entry(names[1])])]
     service = FakeDrive(root.name, pages)
-    reader = repair.DriveReader(service, None)
+    reader = repair.DriveReader(service, None, interval=0)
     index = reader.index('folder-id', root, set(names))
     assert index == {n: 'id-' + n for n in names}
     assert len([c for c in service.calls if c[0] == 'list']) == 2
@@ -283,7 +286,7 @@ def test_drive_index_pagination_cache_missing_and_duplicate_safety(tmp_path):
     assert len([c for c in service.calls if c[0] == 'list']) == 2
     assert all(call[0] in ('get', 'list') for call in service.calls)
     other, _, _ = legacy_cache(tmp_path / 'other', 1)
-    reader = repair.DriveReader(FakeDrive(other.name, [dict(files=[])]), None)
+    reader = repair.DriveReader(FakeDrive(other.name, [dict(files=[])]), None, interval=0)
     with pytest.raises(ValueError, match='missing from Drive'):
         reader.index('folder-id', other, set(names))
     reader.service.pages = [dict(files=[api_entry(names[0]), api_entry(names[0])])]
@@ -301,7 +304,7 @@ def test_drive_read_only_download_and_folder_validation(tmp_path):
             assert request == 'request' and chunksize == 4 * 1024 * 1024
             self.handle = handle
         def next_chunk(self, num_retries):
-            assert num_retries == 2
+            assert num_retries == 0
             self.handle.write(b'mel')
             return None, True
     repair.DriveReader(service, Downloader).download('file-id', tmp_path / 'temp')
@@ -315,7 +318,7 @@ def test_drive_read_only_download_and_folder_validation(tmp_path):
         reader.index("bad'id", root, set(payloads))
 
 
-def test_new_extraction_uses_distributed_layout_and_retains_zip(tmp_path):
+def test_new_extraction_uses_packed_layout_and_retains_zip(tmp_path):
     from test_translatotron2_prepare import _common, _mel_fixture
     from direct_s2st.translatotron2.phonemize import phonemize_manifests
     from direct_s2st.translatotron2.prepare_fairseq import prepare_fairseq
@@ -327,7 +330,8 @@ def test_new_extraction_uses_distributed_layout_and_retains_zip(tmp_path):
     prepare_fairseq(common, phones, output, **settings)
     root = next((tmp_path / '.prep-checkpoints/mel').iterdir())
     assert not (root / 'features').exists()
-    assert len(list((root / 'features-v2').glob('*/*.npy'))) == 3
+    assert not (root / 'features-v2').exists()
+    assert len(list((root / 'packs-v1').glob('*/pack-*.zip'))) == 1
     before = (output / 'logmelspec80.zip').read_bytes()
     def forbidden(*args):
         pytest.fail('completed Mel must not be regenerated')

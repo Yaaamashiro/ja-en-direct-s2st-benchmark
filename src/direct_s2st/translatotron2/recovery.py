@@ -14,6 +14,39 @@ from ..preparation import Checkpoints, file_stamp
 from ..progress import operation, track
 
 
+@operation('mel: reuse completed legacy archive plan')
+def reuse_completed_archives(zip_path, expected_ids):
+    """Completed v1 ZIPs need no per-NPY mount access on resume."""
+    from .mel_storage import exists_checked, verify_feature
+    plan = json.loads(zip_path.with_suffix('.shards.json').read_text())
+    if plan.get('version') != 1:
+        return None
+    paths, lengths, hashes = {}, {}, {}
+    for index, group in track(enumerate(plan['groups']), 'mel: reuse legacy ZIP shards', total=len(plan['groups'])):
+        archive = zip_path if index == 0 else zip_path.with_name(f'{zip_path.stem}-{index:05d}.zip')
+        marker = archive.with_suffix('.complete.json')
+        if not exists_checked(marker) or not exists_checked(archive):
+            return None  # Partial publication uses the existing recovery path.
+        if archive.is_symlink() or marker.is_symlink():
+            raise ValueError('Mel archive/receipt must not be symlinks')
+        prior = json.loads(marker.read_text())
+        if prior.get('receipt_sha256') != digest({k: v for k, v in prior.items() if k != 'receipt_sha256'}):
+            raise ValueError(f'corrupt Mel archive receipt: {marker}')
+        ids = {Path(name).stem for name in group}
+        if ids != prior['paths'].keys() or ids != prior['lengths'].keys() or paths.keys() & ids:
+            raise ValueError('legacy Mel archive plan/receipt mismatch')
+        if any(not value.startswith(archive.name + ':') for value in prior['paths'].values()):
+            raise ValueError('legacy Mel archive locator mismatch')
+        if file_stamp(archive) != prior['stamp'] or os.environ.get('S2ST_PREP_RECHECK') == '1':
+            verify_feature(archive, prior['sha256'])
+        paths.update(prior['paths'])
+        lengths.update(prior['lengths'])
+        hashes[archive.name] = prior['sha256']
+    if paths.keys() != set(expected_ids):
+        raise ValueError('completed Mel archives differ from common manifest')
+    return paths, lengths, hashes
+
+
 @operation('mel: publish bounded archives')
 def publish_archives(files, zip_path, *, resume=False, overwrite=False,
                      max_files=512, max_bytes=256 * 1024**2):
