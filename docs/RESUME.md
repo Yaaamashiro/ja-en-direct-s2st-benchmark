@@ -132,14 +132,16 @@ CPUテストで中断・再開、完了結果の再利用、変更/破損の検�
 抑えることを推奨しています。同じエラーは操作/帯域quotaなどでも発生するので、
 このログだけでファイルの破損・消失とは判定できません。
 
-修正版は`<Mel checkpoint root>/features-v2/<ファイル名の先頭2桁>/<32桁>.npy`へ
-保存します。256個のフォルダへ分散し、**旧`features/`の下には作りません**。
+新方式はローカル作業ディスクでNPYを扱い、最大128件/目安256MiBずつのZIPを
+`<Mel checkpoint root>/packs-v1/<先頭2桁>/pack-<ID>.zip`へ保存します。
+フォルダを分けるだけでは個別読書き回数は減らないため、NPY単位のDrive書込みをやめました。
+ZIP保存後にreceiptを公開した分だけが再開時に再利用されます。
 抽出設定・checkpoint identity/keyは変えず、旧checkpointも上書きしません。
-通常の再開は、検証済み分散コピーを優先します。旧ファイルが読めれば元を保持したままコピーします。
-読めない場合やSHA不一致では停止し、既存NPYを削除・再生成・移動しません。
+既存`features-v2/`のコピーも元SHA256で照合してZIPに取り込みます。
+旧`features/`・`features-v2/`・chunkは削除・再生成・移動しません。
 
-各コピーは元checkpointのSHA256との一致と公開後の読戻しを確認してから再利用します。
-次回はSHAとファイルのパス/サイズ/更新時刻を保存した不変receiptが一致すれば内容読込みを省略します。
+各NPYは元checkpointのSHA256と照合し、ZIPは書込み後の読戻しSHA256を確認します。
+次回はZIPのパス/サイズ/更新時刻を保存した不変receiptが一致すれば内容読込みを省略します。
 同じサイズ/更新時刻のまま内容を変更することは検出できません。必要時は`S2ST_PREP_RECHECK=1`で
 内容を再検証します。これは既存Melの再抽出を指定するものではありません。
 
@@ -147,10 +149,42 @@ CPUテストで中断・再開、完了結果の再利用、変更/破損の検�
 
 `scripts/colab/repair_mel_cache.py`は、Drive APIで**旧フォルダを読み取り専用で**一覧取得し、
 ファイルIDを使ってダウンロードできます。旧NPYのマウントパスを開くことはありません。
-コピーの保存だけはDriveマウント上の分散フォルダへ行います。
-元ファイル・checkpointは残すので、**コピー分に加え、その後のZIP作成分の空き容量が必要**です。
+ダウンロード・ZIP作成はローカルで行い、保存済みZIPだけDriveマウントへ書き込みます。
+元ファイル・checkpointは残すので、**救済ZIPに加え、その後の学習用ZIPの空き容量が必要**です。
 APIの権限、ファイルの同期、Drive/APIのquota、保存先の書込み障害は別途解消する必要があります。
 この手順で必ず復旧する・短時間で終わるという保証はありません。
+
+### 推奨: ダウンロード済みフォルダZIPから救済する
+
+DriveのWeb画面等で旧`features`をZIPとしてダウンロードできる場合、そのZIPを
+Colabのローカルディスクへ置き、次の引数で取り込めます。分割ZIPは`--source-zip`を
+繰り返してすべて指定します。ZIPを展開してDriveへNPYを戻す必要はありません。
+Webからの大量ダウンロード自体も成功・短時間完了を保証するものではありません。
+
+```python
+MEL_CACHE = PERSISTENT / 'data/translatotron2/.prep-checkpoints/mel/2b2a74082e7462215d32ceca'
+repair_args = [sys.executable, REPO / 'scripts/colab/repair_mel_cache.py',
+               '--cache-root', MEL_CACHE, '--storage', 'packed',
+               '--source-zip', '/content/features-part-1.zip',
+               '--source-zip', '/content/features-part-2.zip']
+run(*repair_args, '--limit', '3')
+run(*repair_args)
+```
+
+各NPYのSHA256が保存済みcheckpointと一致したものだけを保存します。
+ZIPにない未救済分は既存分散コピー、読める旧ファイルの順に参照します。
+旧マウントが読めず不足分がある場合は下記API引数も追加できます。
+ZIPはこのスクリプトが取得・削除するものではありません。VM消失後、未救済分の
+読込みに必要な元ZIPは再び配置してください。保存済みpackは再利用されます。
+
+### ZIPを用意できない場合: APIによる一度だけの旧データ移行
+
+旧データをAPIで1ファイルずつ読む回数そのものは減らせません。batch APIもmediaの
+一括ダウンロードには使えません。初回救済が長時間になる可能性は残ります。
+一覧/ダウンロードを既定1秒間隔に抑え、403のrateLimitExceeded/userRateLimitExceeded・
+429・一時的な5xxだけを最大8回バックオフ再試行します。制限に当たると要求間隔も
+増やし、同じプロセス内で維持します。権限不足や日次制限等は無条件再試行しません。
+1秒間隔がすべての割当に対して安全という保証はありません。
 
 同じ実験のセル1を実行後、処理を実行していない状態で修正版checkoutを取得します。
 `REVISION`にはこの修正を含む公開済みcommitの完全SHAを指定します。
@@ -177,7 +211,8 @@ MEL_CACHE = DATA / 'translatotron2/.prep-checkpoints/mel/2b2a74082e7462215d32cec
 FEATURES_FOLDER_ID = '<旧featuresフォルダのID>'
 # host Pythonを使用。仮想環境のPYTHONではありません。
 repair_args = [sys.executable, REPO / 'scripts/colab/repair_mel_cache.py',
-               '--cache-root', MEL_CACHE, '--drive-folder-id', FEATURES_FOLDER_ID]
+               '--cache-root', MEL_CACHE, '--storage', 'packed',
+               '--drive-folder-id', FEATURES_FOLDER_ID, '--api-interval', '1']
 run(*repair_args, '--limit', '3')  # まずSHA一致・保存先への書込みを3件で確認
 ```
 
@@ -187,15 +222,19 @@ run(*repair_args, '--limit', '3')  # まずSHA一致・保存先への書込み�
 run(*repair_args)
 ```
 
-`[mel-recovery] copied=... reused=... remaining=...`で実際の進捗を確認できます。
+`[mel-recovery] packed=... reused=... persisted=... pending_local=... remaining=...`で
+実際の進捗を確認できます。`packed`は今回取り込んだ件数、`persisted`はZIP保存済み、
+`pending_local`は未公開のローカル件数です。強制終了時は未公開分だけやり直します。
 3件の試行だけでは全件のquota/書込み成功は保証できません。
-中断したら同じ認証・同じ引数で再実行します。検証済みコピーは再ダウンロードしません。
+中断したら同じ認証・同じ引数で再実行します。保存済みpackは再ダウンロードしません。
+分散コピー済み分は再ダウンロードせず、元を保持したままZIPに取り込みます。
 完全なDriveファイルID一覧は同じcheckpoint rootへ保存し、再利用します。
 一覧の途中で停止した場合は一覧取得をやり直します。APIの一覧が古い場合のみ
 `--refresh-index`を追加し、旧一覧を退避して取り直します（旧NPY/chunkは変更しません）。
 ファイルが欠落・重複している場合やSHA256が違う場合は黙って先へ進みません。
 API認証/権限不足は`authenticate_user()`だけでは解消しない場合があります。
-quotaエラーで連続実行するのではなく、公式FAQの対処とアクセス権・空き容量を確認してください。
+再試行上限でもquotaが続く場合は連続実行せず、要求間隔（`--api-interval 2`等）、
+公式FAQの対処とアクセス権・空き容量を確認してください。バックオフはquotaを増やしません。
 
 コピー完了後、保存済みrevisionを専用スクリプトで更新してMel準備と最終検証を再開します。
 この`--overwrite`はrevision固定情報の更新を許可するだけで、Mel再生成ではありません。

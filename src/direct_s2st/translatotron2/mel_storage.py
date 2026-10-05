@@ -42,9 +42,18 @@ def feature_path(root, name):
 
 
 def checked_row(root, row):
+    return _checked_row(guarded_root(root), row, check_links=True)
+
+
+def _checked_row(root, row, *, check_links=False):
+    """Lexical validation for bulk indexes; filesystem checks happen at I/O."""
     source = Path(os.path.abspath(row['path']))
-    target = feature_path(root, source.name)
-    if source not in (guarded_root(root) / 'features' / source.name, target):
+    if not re.fullmatch(r'[0-9a-f]{32}\.npy', source.name):
+        raise ValueError('invalid Mel cache filename')
+    target = root / 'features-v2' / source.name[:2] / source.name
+    if check_links and any(p.is_symlink() for p in (target, target.parent, target.parent.parent)):
+        raise ValueError('Mel feature paths must not contain symlinks')
+    if source not in (root / 'features' / source.name, target):
         raise ValueError(f'Mel checkpoint references a path outside its cache: {source}')
     if not re.fullmatch(r'[0-9a-f]{64}', row['sha256']) or not row.get('id'):
         raise ValueError('invalid Mel checkpoint result')
@@ -170,7 +179,7 @@ def load_rows(root):
                 or document['sha256'] != digest(document['rows'])):
             raise ValueError(f'corrupt Mel checkpoint: {path}')
         for key, row in document['rows'].items():
-            source, _ = checked_row(root, row)
+            source, _ = _checked_row(root, row)
             if not re.fullmatch(r'[0-9a-f]{64}', key) or source.name != key[:32] + '.npy':
                 raise ValueError(f'Mel checkpoint filename/key mismatch: {path}')
             if key in rows and rows[key] != row:
