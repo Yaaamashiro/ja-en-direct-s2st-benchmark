@@ -13,6 +13,8 @@ from .prepare_fairseq import _extract_logmel_official
 
 
 def read_table(path):
+    from ..drive_staging import local_path
+    path = local_path(path)
     with Path(path).open(encoding='utf-8', newline='') as stream:
         rows = list(csv.DictReader(stream, delimiter='\t'))
     ids = [row['id'] for row in rows]
@@ -49,10 +51,21 @@ def fingerprint(root):
 
 def load_mel(root, locator):
     name, offset, length = locator.rsplit(':', 2)
-    path = (Path(root) / name).resolve()
-    if not path.is_relative_to(Path(root).resolve()) or min(int(offset), int(length)) < 0:
+    path = Path(os.path.abspath(Path(root) / name))
+    if not path.is_relative_to(Path(os.path.abspath(root))) or min(int(offset), int(length)) < 0:
         raise ValueError('unsafe mel ZIP locator')
     from ..train_runtime import cached_file
+    from ..drive_staging import local_path
+    staged = local_path(path)
+    if staged != path:
+        with staged.open('rb') as stream:
+            stream.seek(int(offset))
+            values = np.load(io.BytesIO(stream.read(int(length))), allow_pickle=False)
+        if values.ndim != 2 or values.shape[0] == 0 or not np.isfinite(values).all():
+            raise ValueError('invalid target mel')
+        return torch.from_numpy(values.copy()).float()
+    if not path.resolve().is_relative_to(Path(root).resolve()):
+        raise ValueError('unsafe mel ZIP locator')
     with cached_file(path, int(offset), int(length)) as local:
         with (local or path).open('rb') as stream:
             stream.seek(0 if local else int(offset))
@@ -100,7 +113,8 @@ class PreparedDataset:
         row = self.rows[index]
         if self.corpus_root is None:
             source = Path(row['src_audio'])
-            if not source.is_absolute() or not source.is_file():
+            from ..drive_staging import local_path
+            if not source.is_absolute() or not local_path(source).is_file():
                 raise ValueError('CORPUS_ROOT required to resolve portable source audio')
         else:
             source = resolve_audio_path(row['src_audio'], self.corpus_root)

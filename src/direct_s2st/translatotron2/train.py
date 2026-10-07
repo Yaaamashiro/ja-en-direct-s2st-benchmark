@@ -135,7 +135,8 @@ def _main():
                         save_checkpoint(checkpoint, model, optimizer, update, dataset.tokens, identity,
                                         overwrite=args.overwrite or bool(args.restore_file) or update > 1,
                                         rank_states=states, performance_state=tuning.state())
-                        checkpoint_saved(args.run_root, checkpoint, update)
+                        checkpoint_saved(args.run_root, checkpoint, update,
+                                         force=stop or update == args.max_updates)
             if rank == 0:
                 print(json.dumps(dict(update=update, **losses)), flush=True)
                 if enabled():

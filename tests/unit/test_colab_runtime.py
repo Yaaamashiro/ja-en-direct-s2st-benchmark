@@ -32,7 +32,9 @@ def test_notebook_preserves_four_system_workflow():
             ast.parse(''.join(cell['source']))
 
 
-def test_notebooks_separate_data_models_and_training_guards():
+def test_notebooks_separate_data_models_and_training_guards(monkeypatch):
+    import os
+    monkeypatch.setattr(os, 'environ', dict(os.environ))
     settings = {}
     for name in ('training', 'smoke'):
         notebook = json.loads((ROOT/f'notebooks/colab_{name}.ipynb').read_text(encoding='utf-8'))
@@ -79,7 +81,9 @@ def test_notebooks_separate_data_models_and_training_guards():
     assert not settings['training']['CONFIRM_TRAINING']
 
 
-def test_notebooks_split_gpu_stage_and_restore_before_training(tmp_path):
+def test_notebooks_split_gpu_stage_and_restore_before_training(tmp_path, monkeypatch):
+    import os
+    monkeypatch.setattr(os, 'environ', dict(os.environ))
     for name in ('training', 'smoke'):
         nb = json.loads((ROOT/f'notebooks/colab_{name}.ipynb').read_text(encoding='utf-8'))
         codes = [''.join(c['source']) for c in nb['cells'] if c['cell_type'] == 'code']

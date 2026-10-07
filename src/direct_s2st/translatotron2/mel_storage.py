@@ -167,9 +167,10 @@ def resolve_feature(root, row):
 
 @operation('mel recovery: load immutable checkpoints')
 def load_rows(root):
+    from ..preparation import checkpoint_chunks
     root = guarded_root(root)
     rows, identity = {}, None
-    for path in track(sorted(root.glob('chunk-*.json')), 'mel recovery: checkpoint chunks'):
+    for path in track(checkpoint_chunks(root), 'mel recovery: checkpoint chunks'):
         if path.is_symlink():
             raise ValueError('checkpoint chunks must not be symlinks')
         document = json.loads(path.read_text(encoding='utf-8'))

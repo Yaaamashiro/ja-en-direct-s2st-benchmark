@@ -100,9 +100,20 @@ def main():
         if args.limit is not None and action in ('import', 'extract-units'):
             command += ['--limit', str(args.limit)]
         identity = dict(revision=revision, configuration=configuration, corpus=str(corpus), command=command)
+        def execute():
+            if os.environ.get('S2ST_DRIVE_SAFE') == '1' and action in ('extract-units', 'prepare'):
+                from .drive_staging import stage_audio, active_map, ensure_local
+                import tempfile
+                local = ensure_local(Path(tempfile.gettempdir()) / 's2st-prep-inputs' / digest(str(data))[:16])
+                languages = ('en',) if action == 'extract-units' else (('ja',) if system == 's2ut' else ('ja', 'en'))
+                rows = stage_audio(common, data / '.drive-audio-packs', local, languages=languages)
+                with active_map(rows, local):
+                    subprocess.run(command, check=True)
+            else:
+                subprocess.run(command, check=True)
         run_stage(data/'.prep-checkpoints/stages'/f'{system}-{action}.json',
                   identity, inputs, outputs,
-                  lambda: subprocess.run(command, check=True),
+                  execute,
                   force=os.environ.get('S2ST_PREP_RECHECK') == '1')
 
 

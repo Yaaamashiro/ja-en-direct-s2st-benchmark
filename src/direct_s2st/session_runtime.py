@@ -37,6 +37,9 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
                    S2ST_TRAIN_READERS=str(settings['readers']),
                    S2ST_TRAIN_PRECISION=settings['precision'],
                    S2ST_TRAIN_ADAPTIVE_BATCH='1' if settings['adaptive_batch'] else '0')
+        if os.environ.get('S2ST_DRIVE_SAFE') == '1':
+            env.update(S2ST_TRAIN_STRICT_LOCAL='1',
+                       S2ST_BACKUP_MIN_SECONDS=os.environ.get('S2ST_BACKUP_MIN_SECONDS', '600'))
         process = popen(args, env=env)
         future, current = None, None
         forced = False

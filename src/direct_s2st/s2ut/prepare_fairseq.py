@@ -15,11 +15,14 @@ from ..preparation import Checkpoints, checkpoint_map, file_stamp
 from ..journal import digest
 from ..io import atomic_write_json, atomic_write_text, read_jsonl
 from .extract_units import load_unit_file
+from .unit_storage import manifest_paths, sequence, stamp
 from .multitask import prepare_labels, validate_prepared
 from ..manifests.reader import read_common_manifest
 
 
 def _ten_ms_frames(path: Path) -> int:
+    from ..drive_staging import local_path
+    path = local_path(path)
     with wave.open(str(path), "rb") as handle:
         if handle.getframerate() != 16000:
             raise ValueError(f"expected 16 kHz source audio: {path}")
@@ -38,7 +41,7 @@ def prepare_fairseq(
     overwrite: bool = False,
 ) -> dict[str, Any]:
     unit_records: dict[str, dict[str, Any]] = {}
-    manifests = sorted(units_root.glob("manifest.shard-*-of-*.jsonl"))
+    manifests = manifest_paths(units_root)
     if not manifests:
         raise FileNotFoundError(f"no unit shard manifests found below {units_root}")
     for manifest in manifests:
@@ -71,11 +74,9 @@ def prepare_fairseq(
                 raise ValueError(f"missing units for {pair_id}")
             if unit_record.get("split") != split:
                 raise ValueError(f"unit split mismatch for {pair_id}")
-            units = load_unit_file(
-                Path(unit_record["units_reduced_path"]), clusters=clusters
-            )
+            units = sequence(unit_record, 'reduced', clusters)
             line = (
-                f"{pair_id}\t{Path(row['ja_audio']).resolve()}\t"
+                f"{pair_id}\t{Path(os.path.abspath(row['ja_audio']))}\t"
                 f"{_ten_ms_frames(Path(row['ja_audio']))}\t"
                 f"{' '.join(map(str, units))}\t{len(units)}\n"
             )
@@ -85,7 +86,7 @@ def prepare_fairseq(
             if record is None:
                 raise ValueError(f"missing units for {row['pair_id']}")
             return digest([row, record, file_stamp(row['ja_audio']),
-                           file_stamp(record['units_reduced_path'])])
+                           stamp(record, 'reduced')])
         with Checkpoints(output_root.parent / '.prep-checkpoints' / f'prepare-{split}',
                          dict(stage='s2ut-rows-v1', clusters=clusters),
                          resume=resume and not overwrite and os.environ.get('S2ST_PREP_RECHECK') != '1',
@@ -139,8 +140,21 @@ def prepare_fairseq(
         "linguistic": linguistic,
         "splits": split_counts,
     }
-    atomic_write_json(
-        output_root / "data-lock.json", lock, resume=resume, overwrite=overwrite
-    )
+    lock_path = output_root / 'data-lock.json'
+    if resume and not overwrite and lock_path.is_file():
+        prior = json.loads(lock_path.read_text(encoding='utf-8'))
+        old_manifests = prior.get('unit_manifest_sha256', {})
+        # An inline sibling is a storage-only migration. The prepared TSVs and
+        # all semantic lock fields must still be byte-identical (writes above
+        # enforce that). Preserve the original training identity and evidence.
+        if (old_manifests != lock['unit_manifest_sha256']
+                and any(p.name.startswith('manifest.inline.') for p in manifests)
+                and {k: v for k, v in prior.items() if k != 'unit_manifest_sha256'}
+                    == {k: v for k, v in lock.items() if k != 'unit_manifest_sha256'}
+                and all(sha256_file(Path(p)) == h for p, h in old_manifests.items())):
+            atomic_write_json(output_root / 'unit-storage-migration.json',
+                              dict(original=old_manifests, inline=lock['unit_manifest_sha256']), resume=True)
+            lock = prior
+    atomic_write_json(lock_path, lock, resume=resume, overwrite=overwrite)
     validate_prepared(output_root, clusters=clusters)
     return lock

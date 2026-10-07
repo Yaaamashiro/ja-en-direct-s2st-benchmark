@@ -19,9 +19,18 @@ from .progress import track
 
 
 def file_stamp(path):
+    from .drive_staging import source_stamp
+    saved = source_stamp(path)
+    if saved is not None:
+        return saved
     path = Path(path)
     stat = path.stat()
     return dict(path=str(path.resolve()), size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+
+
+def checkpoint_chunks(root):
+    root = Path(root)
+    return sorted([*root.glob('chunk-*.json'), *root.glob('??/chunk-*.json')])
 
 
 class Checkpoints:
@@ -49,7 +58,7 @@ class Checkpoints:
         self.flushed = time.monotonic()
         self.reused = 0
         if resume:
-            for path in track(sorted(self.root.glob('chunk-*.json')), 'preparation: load checkpoints'):
+            for path in track(checkpoint_chunks(self.root), 'preparation: load checkpoints'):
                 document = json.loads(path.read_text(encoding='utf-8'))
                 values = document['rows']
                 if document['identity'] != identity or document['sha256'] != digest(values):
@@ -80,7 +89,9 @@ class Checkpoints:
         if not self.pending:
             return
         values = dict(self.pending)
-        atomic_write_json(self.root / f'chunk-{uuid.uuid4().hex}.json',
+        name = uuid.uuid4().hex
+        folder = self.root / name[:2] if os.environ.get('S2ST_DRIVE_SAFE') == '1' else self.root
+        atomic_write_json(folder / f'chunk-{name}.json',
                           dict(identity=self.identity, rows=values, sha256=digest(values)))
         self.pending.clear()
         self.flushed = time.monotonic()

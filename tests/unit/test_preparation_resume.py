@@ -129,7 +129,8 @@ def test_units_resume_reconstruct_missing_files_and_reject_wrong_identity(tmp_pa
             raise RuntimeError('interrupted')
         return [1, 1, 2]
     options = dict(extractor=extractor, split=None, clusters=100, hubert_model='fixture',
-                   hubert_revision='a' * 40, hubert_layer=6, kmeans_sha256='b' * 64, resume=True)
+                   hubert_revision='a' * 40, hubert_layer=6, kmeans_sha256='b' * 64, resume=True,
+                   storage='files')
     with pytest.raises(RuntimeError, match='interrupted'):
         extract_units(common, output, **options)
     (output / 'train/original/pair-train.units').unlink()
