@@ -6,6 +6,8 @@ from .progress import activity
 
 
 def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    from .drive_staging import local_path
+    path = local_path(path)
     digest = hashlib.sha256()
     with activity(f'SHA256: {path.name}') as progress, path.open("rb") as handle:
         read_bytes = 0

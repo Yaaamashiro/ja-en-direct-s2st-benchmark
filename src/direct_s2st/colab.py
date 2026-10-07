@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
+import zipfile
 
 from .hashing import sha256_file
 from .io import atomic_write_json
@@ -94,8 +95,9 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
     if kind in ('unit', 'mel'):
         identity_files.append(str(generator))
     if kind == 'unit':
-        identity_files += [str(p) for p in sorted((data/'s2ut/units').rglob('*'))
-                           if p.is_file() and '.checkpoints' not in p.parts]
+        from .s2ut.unit_storage import manifest_paths
+        identity_files += [str(data / 's2ut/units/unit-lock.json')]
+        identity_files += [str(p) for p in manifest_paths(data / 's2ut/units')]
     result = dict(kind='vocoder' if kind in ('unit', 'mel') else kind, command=command,
         checkpoint=checkpoint, identity_files=identity_files,
         resume_args=['--resume'] if kind in ('unit', 'mel') else ['--restore-file', '{checkpoint}'])
@@ -103,6 +105,54 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
         result['runtime'] = dict(cache_gb=cache_gb, readers=max(1, num_workers) if kind == 's2ut' else 1,
                                  adaptive_batch=adaptive_batch, precision=precision)
     return result
+
+
+@operation('training: stage all inputs before starting GPU work')
+def stage_training(config, work):
+    from .drive_staging import (stage_audio, ensure_local, copy_verified, register, raw_sha)
+    from .preparation import file_stamp
+    from .journal import digest
+    files = [Path(p) for p in config['identity_files']]
+    roots = [p.parent for p in files if p.name == 'dataset-lock.json']
+    if not roots:
+        roots = [p.parent.parent.parent / 'common' for p in files if p.name == 'data-lock.json']
+    if not roots or len({str(p) for p in roots}) != 1:
+        raise ValueError('cannot locate common data for local training staging')
+    common = roots[0]
+    local = ensure_local(Path(work).parent / '.inputs' / digest([str(common), config['kind']])[:16])
+    vocoder = config['kind'] == 'vocoder'
+    command = config['command']
+    if '--units-root' in command:
+        from .s2ut.unit_storage import records
+        unit_root = Path(command[command.index('--units-root') + 1])
+        unit_rows = records(unit_root)
+        if unit_rows:
+            files += [Path(row['units_original_path']) for row in unit_rows.values()
+                      if row['split'] == 'train' and row.get('units_storage') != 'inline-v1']
+        else:
+            from .io import read_jsonl
+            files += [unit_root / 'train/original' / (row['pair_id'] + '.units')
+                      for row in read_jsonl(common / 'train.jsonl')]
+    rows = stage_audio(common, common.parent / '.drive-audio-packs', local / 'audio',
+                       splits=('train',) if vocoder else ('train', 'dev', 'test'),
+                       languages=('en',) if vocoder else ('ja',))
+    for source in track(files, 'training: stage metadata and whole Mel ZIPs'):
+        if source.is_symlink():
+            raise ValueError('training inputs must not be symlinks')
+        stamp = file_stamp(source)
+        target = local / 'prepared' / digest(str(source))[:24] / source.name
+        receipt = target.with_suffix(target.suffix + '.receipt.json')
+        reuse = False
+        if receipt.is_file() and target.is_file():
+            saved = json.loads(receipt.read_text(encoding='utf-8'))
+            reuse = saved.get('stamp') == stamp and raw_sha(target) == saved['sha256']
+        if not reuse:
+            checksum = copy_verified(source, target)
+            if file_stamp(source) != stamp:
+                raise ValueError('training input changed during staging')
+            atomic_write_json(receipt, dict(stamp=stamp, sha256=checksum), overwrite=True)
+        register(rows, source, target, stamp)
+    return rows, local
 
 
 def safe_relative(value):
@@ -116,6 +166,8 @@ def safe_relative(value):
 def publish(work, destination, identity, updates):
     """Never replace an older recovery point; marker is written last."""
     work, destination = Path(work), Path(destination)
+    if os.environ.get('S2ST_DRIVE_SAFE') == '1':
+        return publish_packed(work, destination, identity, updates)
     target = destination / f'{updates:012d}-{uuid.uuid4().hex}'
     target.mkdir(parents=True, exist_ok=False)
     files = {}
@@ -135,6 +187,45 @@ def publish(work, destination, identity, updates):
     return target
 
 
+@operation('backup: one verified ZIP with capacity budget')
+def publish_packed(work, destination, identity, updates):
+    from .drive_staging import raw_sha, capacity
+    maximum = float(os.environ.get('S2ST_BACKUP_MAX_GB', '20')) * 1024**3
+    if not math.isfinite(maximum) or maximum <= 0:
+        raise ValueError('backup budget must be finite and positive')
+    target = destination / f'{updates:012d}-{uuid.uuid4().hex}'
+    destination.mkdir(parents=True, exist_ok=True)
+    used = sum(p.stat().st_size for p in destination.rglob('*') if p.is_file())
+    with tempfile.TemporaryDirectory(prefix='snapshot-pack-', dir=work.parent) as local:
+        local_zip = Path(local) / 'snapshot.zip'
+        files = {}
+        with zipfile.ZipFile(local_zip, 'w', zipfile.ZIP_STORED) as pack:
+            for source in track(sorted(work.rglob('*')), 'backup: pack local files'):
+                if source.is_symlink():
+                    raise ValueError('snapshot cannot contain symlinks')
+                if source.is_file():
+                    name = source.relative_to(work).as_posix()
+                    safe_relative(name)
+                    files[name] = raw_sha(source)
+                    pack.write(source, name)
+        size = local_zip.stat().st_size
+        if used + size > maximum:
+            raise RuntimeError(f'Backup budget exceeded: {used + size} > {int(maximum)} bytes. '
+                               'Existing recovery points are preserved; increase TRAIN_BACKUP_MAX_GB explicitly.')
+        capacity(destination, size)
+        target.mkdir()
+        temporary = target / 'snapshot.zip.tmp'
+        shutil.copyfile(local_zip, temporary)
+        checksum = raw_sha(local_zip)
+        if raw_sha(temporary) != checksum:
+            raise OSError('snapshot ZIP readback checksum mismatch')
+        os.replace(temporary, target / 'snapshot.zip')
+        atomic_write_json(target / 'snapshot.json',
+                          dict(identity=identity, updates=updates, files=files,
+                               storage='zip-v1', zip_sha256=checksum))
+    return target
+
+
 @operation('direct_s2st/colab: latest')
 def latest(destination, identity):
     for marker in sorted(Path(destination).glob('*/snapshot.json'), reverse=True):
@@ -145,6 +236,15 @@ def latest(destination, identity):
         if state['identity'] != identity:
             raise ValueError('session identity changed; use a different backup directory')
         valid = bool(state['files'])
+        if state.get('storage') == 'zip-v1':
+            archive = marker.parent / 'snapshot.zip'
+            if any(not safe_relative(name) for name in state['files']):
+                raise ValueError('unsafe snapshot paths')
+            if archive.is_symlink():
+                raise ValueError('snapshot archive cannot be a symlink')
+            if valid and archive.is_file() and sha256_file(archive) == state['zip_sha256']:
+                return marker.parent, state
+            continue
         for name, expected in track(state['files'].items(), 'backup: verify snapshot'):
             path = marker.parent / 'files' / safe_relative(name)
             if path.is_symlink() or not path.resolve().is_relative_to((marker.parent / 'files').resolve()) or not path.is_file() or sha256_file(path) != expected:
@@ -163,6 +263,22 @@ def restore(snapshot, work):
     if work.exists():
         work.rename(work.with_name(work.name + '.interrupted-' + uuid.uuid4().hex))
     work.mkdir(parents=True)
+    if state.get('storage') == 'zip-v1':
+        from .drive_staging import copy_verified
+        archive = work / '.restore.zip'
+        copy_verified(directory / 'snapshot.zip', archive, state['zip_sha256'])
+        with zipfile.ZipFile(archive) as pack:
+            if set(pack.namelist()) != set(state['files']) or len(pack.namelist()) != len(state['files']):
+                raise ValueError('snapshot ZIP member mismatch')
+            for name in track(state['files'], 'backup: restore local ZIP'):
+                output = work / safe_relative(name)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                with pack.open(name) as source, output.open('wb') as target:
+                    shutil.copyfileobj(source, target)
+                if sha256_file(output) != state['files'][name]:
+                    raise OSError('restored file checksum mismatch')
+        archive.unlink()
+        return
     for name in track(state['files'], 'backup: restore and verify'):
         relative = safe_relative(name)
         output = work / relative
@@ -189,7 +305,7 @@ def checkpoint_updates(path, kind):
 @operation('direct_s2st/colab: run_session')
 def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
                 resume=False, auto_resume=False, confirm_training=False, restore_only=False, runner=subprocess.run, clock=time.monotonic,
-                inspect_checkpoint=checkpoint_updates):
+                inspect_checkpoint=checkpoint_updates, _staged=False):
     work, backup = Path(work).resolve(), Path(backup).resolve()
     if restore_only and not resume:
         raise ValueError('restore-only requires resume')
@@ -204,6 +320,14 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
         raise ValueError('outputs must be outside CORPUS_ROOT')
     if config['kind'] not in ('tt2', 's2ut', 'vocoder'):
         raise ValueError('unknown trainer kind')
+    if os.environ.get('S2ST_DRIVE_SAFE') == '1' and not _staged:
+        from .drive_staging import active_map
+        rows, local = stage_training(config, work)
+        with active_map(rows, local):
+            return run_session(config, work=work, backup=backup, total=total, chunk=chunk,
+                seconds=seconds, resume=resume, auto_resume=auto_resume,
+                confirm_training=confirm_training, restore_only=restore_only,
+                runner=runner, clock=clock, inspect_checkpoint=inspect_checkpoint, _staged=True)
     checkpoint = work / safe_relative(config['checkpoint'])
     command = config['command']
     if not isinstance(command, list) or not all(isinstance(v, str) for v in command) or '{updates}' not in command:
@@ -288,6 +412,7 @@ def _run_chunks(config, work, backup, checkpoint, identity, completed, total, ch
 
 
 def main():
+    os.environ.setdefault('S2ST_DRIVE_SAFE', '1')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--work-root', type=Path, required=True)

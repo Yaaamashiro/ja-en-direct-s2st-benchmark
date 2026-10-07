@@ -102,6 +102,8 @@ def validate_phonemes(common_root, phoneme_root):
 
 
 def _ten_ms_frames(path: Path) -> int:
+    from ..drive_staging import local_path
+    path = local_path(path)
     with wave.open(str(path), "rb") as handle:
         if handle.getframerate() != 16000:
             raise ValueError(f"expected 16 kHz source audio: {path}")
@@ -133,6 +135,8 @@ def _mel_settings(values: dict[str, Any]) -> dict[str, Any]:
 def _extract_logmel_official(
     audio_path: Path, output_path: Path, settings: dict[str, Any]
 ) -> None:
+    from ..drive_staging import local_path
+    audio_path = local_path(audio_path)
     try:
         import torchaudio
         from examples.speech_synthesis.data_utils import extract_logmel_spectrogram
@@ -275,11 +279,11 @@ def prepare_fairseq(
                 raise ValueError(f"missing phonemes for {pair_id}")
             if pair_id in target_audio:
                 raise ValueError(f"duplicate pair_id across splits: {pair_id}")
-            target_audio[pair_id] = Path(row["en_audio"]).resolve()
+            target_audio[pair_id] = Path(os.path.abspath(row["en_audio"]))
             rows_by_split[split].append(
                 {
                     "id": pair_id,
-                    "src_audio": Path(row["ja_audio"]).resolve(),
+                    "src_audio": Path(os.path.abspath(row["ja_audio"])),
                     "phonemes": sequence,
                 }
             )

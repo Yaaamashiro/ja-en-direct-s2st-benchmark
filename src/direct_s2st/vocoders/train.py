@@ -249,6 +249,8 @@ def main():
     from ..prefetch import ordered_samples
     from ..train_runtime import Timings, enabled, stopping, checkpoint_saved
     timing = Timings()
+    from ..s2ut.unit_storage import records, stamp
+    unit_records = records(args.units_root) if args.kind == 'unit' else {}
     def load(index):
         row = rows[index % len(rows)]
         from ..preparation import file_stamp
@@ -256,7 +258,9 @@ def main():
             raise ValueError(f"{row['pair_id']}: audio changed after verification")
         if args.kind == 'unit':
             path = args.units_root / 'train/original' / (row['pair_id'] + '.units')
-            if file_stamp(path) != row['_verified_unit_stamp']:
+            record = unit_records.get(row['pair_id'])
+            current = stamp(record, 'original') if record else file_stamp(path)
+            if current != row['_verified_unit_stamp']:
                 raise ValueError(f"{row['pair_id']}: units changed after verification")
         wave = load_wave(row, spec['sample_rate'], args.kind)
         if file_stamp(row['en_audio']) != row['_verified_audio_stamp']:
@@ -283,7 +287,8 @@ def main():
                            optimizer_d=optim_d.state_dict(), updates=update, identity=identity,
                            rng=torch.get_rng_state(), cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []))
                 with timing.measure('local_freeze'):
-                    checkpoint_saved(args.output_root, checkpoint, update)
+                    checkpoint_saved(args.output_root, checkpoint, update,
+                                     force=stop or update == args.max_updates)
             atomic_write_json(args.output_root / 'losses' / f'{update:08d}.json', losses,
                               overwrite=args.overwrite or args.resume)
             print(json.dumps({'update': update, **losses}), flush=True)

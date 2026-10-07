@@ -167,6 +167,13 @@ _cache_lock = threading.Lock()
 
 @contextmanager
 def cached_file(path, offset=None, length=None):
+    from .drive_staging import local_path
+    staged = local_path(path)
+    if staged != Path(path) and length is None:
+        yield staged
+        return
+    if os.environ.get('S2ST_TRAIN_STRICT_LOCAL') == '1' and str(path).replace('\\', '/').startswith('/content/drive/'):
+        raise RuntimeError(f'Training input was not staged locally: {path}')
     global _cache, _cache_pid
     root = os.environ.get('S2ST_TRAIN_CACHE')
     if not enabled() or not root:
@@ -294,16 +301,25 @@ class Microbatches:
 
 
 _last_frozen = None
+_last_frozen_time = None
 
 
 @operation('training: freeze recovery checkpoint')
-def checkpoint_saved(work, checkpoint, updates):
+def checkpoint_saved(work, checkpoint, updates, *, force=False):
     """Called while the writer is stopped. Publish only immutable local copies."""
     staging = os.environ.get('S2ST_TRAIN_STAGING')
     if not staging:
         return
-    global _last_frozen
+    global _last_frozen, _last_frozen_time
     if _last_frozen == (staging, updates):
+        return
+    interval = float(os.environ.get('S2ST_BACKUP_MIN_SECONDS', '0'))
+    if interval < 0 or not __import__('math').isfinite(interval):
+        raise ValueError('backup interval must be finite and nonnegative')
+    if (not force and _last_frozen is not None and _last_frozen[0] == staging
+            and _last_frozen_time is not None and time.monotonic() - _last_frozen_time < interval):
+        print(f'[recovery] local_update={updates} upload_deferred=true min_seconds={interval}',
+              file=sys.stderr, flush=True)
         return
     from .io import atomic_write_json
     work, checkpoint, root = Path(work).resolve(), Path(checkpoint).resolve(), Path(staging).resolve()
@@ -320,3 +336,4 @@ def checkpoint_saved(work, checkpoint, updates):
             shutil.copyfile(work / name, directory / 'files' / name)
     atomic_write_json(directory / 'ready.json', dict(updates=updates))
     _last_frozen = (staging, updates)
+    _last_frozen_time = time.monotonic()

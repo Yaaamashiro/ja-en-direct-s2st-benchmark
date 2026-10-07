@@ -15,6 +15,7 @@ from ..manifests.reader import read_common_manifest
 from ..preparation import Checkpoints, checkpoint_map, file_stamp
 from ..progress import operation
 from ..s2ut.extract_units import load_unit_file
+from ..s2ut.unit_storage import records, sequence, stamp
 
 
 @operation('vocoder: resumable input verification')
@@ -26,6 +27,7 @@ def verify_inputs(common_root, kind, units_root=None):
     if kind not in ('mel', 'unit') or (kind == 'unit' and units_root is None):
         raise ValueError('unit fitting requires units-root')
     paths = {}
+    unit_records = records(units_root) if kind == 'unit' else {}
     for row in rows:
         pair_id = row['pair_id']
         if not isinstance(pair_id, str) or not pair_id or Path(pair_id).name != pair_id or any(c in pair_id for c in '/\\:'):
@@ -35,11 +37,14 @@ def verify_inputs(common_root, kind, units_root=None):
             raise ValueError(f'{pair_id}: expected en_sha256 in the common manifest')
         if kind == 'unit':
             paths[pair_id] = Path(units_root) / 'train/original' / (pair_id + '.units')
+            if pair_id in unit_records and unit_records[pair_id]['split'] != 'train':
+                raise ValueError('unit split mismatch during fitting')
 
     def key(row):
         stamps = dict(audio=file_stamp(row['en_audio']))
         if kind == 'unit':
-            stamps['units'] = file_stamp(paths[row['pair_id']])
+            record = unit_records.get(row['pair_id'])
+            stamps['units'] = stamp(record, 'original') if record else file_stamp(paths[row['pair_id']])
         return digest([row['pair_id'], row['en_sha256'].lower(), stamps])
 
     def check(row):
@@ -50,8 +55,16 @@ def verify_inputs(common_root, kind, units_root=None):
         value = dict(audio=audio, audio_stamp=file_stamp(row['en_audio']))
         if kind == 'unit':
             path = paths[row['pair_id']]
-            value.update(units=sha256_file(path), sequence=load_unit_file(path, clusters=100),
-                         unit_stamp=file_stamp(path))
+            record = unit_records.get(row['pair_id'])
+            if record and record.get('units_storage') == 'inline-v1':
+                units = sequence(record, 'original', 100)
+                from ..s2ut.extract_units import serialize_units
+                from ..hashing import sha256_text
+                value.update(units=sha256_text(serialize_units(units)), sequence=units,
+                             unit_stamp=stamp(record, 'original'))
+            else:
+                value.update(units=sha256_file(path), sequence=load_unit_file(path, clusters=100),
+                             unit_stamp=file_stamp(path))
         if key(row) != before:
             raise ValueError(f"{row['pair_id']}: training input changed during verification")
         return value

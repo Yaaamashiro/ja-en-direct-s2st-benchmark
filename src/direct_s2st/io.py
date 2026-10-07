@@ -13,6 +13,8 @@ class ExistingOutputError(FileExistsError):
 
 
 def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
+    from .drive_staging import local_path
+    path = local_path(path)
     with path.open("r", encoding="utf-8-sig") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():

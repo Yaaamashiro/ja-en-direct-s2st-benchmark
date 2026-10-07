@@ -12,7 +12,19 @@ from ..train_runtime import (Microbatches, Timings, cached_file, checkpoint_save
 @contextmanager
 def runtime_hooks(audit):
     if not enabled():
-        yield
+        if os.environ.get('S2ST_INPUT_MAP'):
+            from fairseq.data.audio import speech_to_text_dataset as audio
+            from ..drive_staging import local_path
+            original = audio.get_features_or_waveform
+            def staged_audio(path, *args, **kwargs):
+                return original(str(local_path(path)), *args, **kwargs)
+            audio.get_features_or_waveform = staged_audio
+            try:
+                yield
+            finally:
+                audio.get_features_or_waveform = original
+        else:
+            yield
         return
     if os.environ.get('S2ST_TRAIN_PRECISION') == 'bf16':
         import torch
@@ -34,7 +46,8 @@ def runtime_hooks(audit):
 
     def load_audio(path, *args, **kwargs):
         # This benchmark uses WAV source paths. Preserve upstream ZIP handling.
-        if Path(path).is_file():
+        from ..drive_staging import local_path
+        if local_path(path).is_file():
             with cached_file(path) as local:
                 return original_audio(str(local or path), *args, **kwargs)
         return original_audio(path, *args, **kwargs)
@@ -92,7 +105,8 @@ def runtime_hooks(audit):
         checkpoint = Path(cfg.save_dir) / 'checkpoint_last.pt'
         if trainer.should_save_checkpoint_on_current_rank and checkpoint.is_file():
             atomic_write_json(checkpoint.parent.parent / 'gradient-audit-rank-0.json', audit.result(), overwrite=True)
-            checkpoint_saved(checkpoint.parent.parent, checkpoint, trainer.get_num_updates())
+            checkpoint_saved(checkpoint.parent.parent, checkpoint, trainer.get_num_updates(),
+                             force=stopping() or trainer.get_num_updates() >= trainer.cfg.optimization.max_update)
         return result
 
     def iterator(self, *args, **kwargs):

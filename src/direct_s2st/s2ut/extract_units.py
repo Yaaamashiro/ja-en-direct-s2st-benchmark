@@ -70,6 +70,8 @@ class HubertKMeansExtractor:
     @staticmethod
     def _read_audio(audio_path):
         import soundfile as sf
+        from ..drive_staging import local_path
+        audio_path = local_path(audio_path)
         waveform, sample_rate = sf.read(audio_path, dtype="float32", always_2d=False)
         if sample_rate != 16000 or waveform.ndim != 1:
             raise ValueError(f"HuBERT input must be 16 kHz mono: {audio_path}")
@@ -205,7 +207,10 @@ def extract_units(
     limit: int | None = None,
     resume: bool = False,
     overwrite: bool = False,
+    storage: str = 'inline',
 ) -> dict[str, Any]:
+    if storage not in ('inline', 'files'):
+        raise ValueError('unit storage must be inline or files')
     splits = (split,) if split else ("train", "dev", "test")
     records: list[dict[str, Any]] = []
     processed = 0
@@ -227,16 +232,15 @@ def extract_units(
                 original_path = output_root / current_split / "original" / f"{pair_id}.units"
                 reduced_path = output_root / current_split / "reduced" / f"{pair_id}.units"
                 reduced = reduce_consecutive_units(original)
-                atomic_write_text(original_path, serialize_units(original), resume=resume, overwrite=overwrite)
-                atomic_write_text(reduced_path, serialize_units(reduced), resume=resume, overwrite=overwrite)
+                if storage == 'files':
+                    atomic_write_text(original_path, serialize_units(original), resume=resume, overwrite=overwrite)
+                    atomic_write_text(reduced_path, serialize_units(reduced), resume=resume, overwrite=overwrite)
                 records.append(
                     {
                         "pair_id": pair_id,
                         "split": current_split,
                         "unit_count_original": len(original),
                         "unit_count_reduced": len(reduced),
-                        "units_original_path": str(original_path.resolve()),
-                        "units_reduced_path": str(reduced_path.resolve()),
                         "hubert_model": hubert_model,
                         "hubert_revision": hubert_revision,
                         "hubert_layer": hubert_layer,
@@ -245,8 +249,20 @@ def extract_units(
                         "kmeans_artifact": kmeans_artifact,
                     }
                 )
+                if storage == 'inline':
+                    record = records[-1]
+                    record.update(units_storage='inline-v1', units_original=original,
+                                  units_reduced=reduced,
+                                  units_sha256=digest(dict(original=original, reduced=reduced)))
+                else:
+                    records[-1].update(units_original_path=str(original_path.resolve()),
+                                       units_reduced_path=str(reduced_path.resolve()))
                 processed += 1
     manifest = output_root / f"manifest.shard-{shard_index:05d}-of-{num_shards:05d}.jsonl"
+    if storage == 'inline' and manifest.is_file():
+        from ..io import read_jsonl
+        if any(row.get('units_storage') != 'inline-v1' for row in read_jsonl(manifest)):
+            manifest = output_root / manifest.name.replace('manifest.', 'manifest.inline.')
     atomic_write_jsonl(manifest, records, resume=resume, overwrite=overwrite)
     return {"processed": processed, "manifest": str(manifest), **lock}
 

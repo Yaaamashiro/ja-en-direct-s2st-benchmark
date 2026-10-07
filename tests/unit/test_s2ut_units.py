@@ -92,7 +92,9 @@ def test_extract_and_prepare_fairseq_fixture(tmp_path: Path) -> None:
     manifest = (fairseq / "train.tsv").read_text(encoding="utf-8").splitlines()
     assert manifest[0] == "id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames"
     assert manifest[1].split("\t")[2:] == ["10", "1 2 3", "3"]
-    assert (units / "train" / "reduced" / "pair-train.units").read_text() == "1 2 3\n"
+    from direct_s2st.s2ut.unit_storage import records, sequence
+    assert sequence(records(units)['pair-train'], 'reduced', 100) == [1, 2, 3]
+    assert not list(units.rglob('*.units'))
 
 
 def test_vocoder_training_rejects_non_train_split(tmp_path: Path) -> None:

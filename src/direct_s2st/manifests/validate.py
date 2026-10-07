@@ -19,6 +19,8 @@ class ManifestValidationError(ValueError):
 
 
 def inspect_wav(path: Path) -> dict[str, int | float]:
+    from ..drive_staging import local_path
+    path = local_path(path)
     if not path.is_file():
         raise ManifestValidationError(f"audio file does not exist: {path}")
     try:
