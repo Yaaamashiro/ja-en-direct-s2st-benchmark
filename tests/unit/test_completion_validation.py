@@ -20,7 +20,11 @@ from test_s2ut_units import _common
 
 @pytest.mark.parametrize("old", ["/content/drive/MyDrive/dataset/production/audio/16k/en/a.wav",
                                   "D:\\old\\production\\audio\\16k\\en\\a.wav"])
-def test_rebase_foreign_absolute_paths(tmp_path, old):
+def test_rebase_foreign_absolute_paths(tmp_path, old, monkeypatch):
+    # The old path is intentionally absent. Do not probe the host's real D:
+    # drive (it may be mounted, unreadable, or contain unrelated user files).
+    is_file = Path.is_file
+    monkeypatch.setattr(Path, 'is_file', lambda path, **kw: False if path == Path(old) else is_file(path, **kw))
     audio = tmp_path / "production/audio/16k/en/a.wav"
     audio.parent.mkdir(parents=True)
     audio.write_bytes(b"path fixture")

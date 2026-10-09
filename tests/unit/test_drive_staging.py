@@ -109,6 +109,67 @@ def test_stage_rejects_drive_or_corpus_destination(tmp_path, monkeypatch):
         stage.stage_audio(tmp_path/'common', tmp_path/'packs', tmp_path/'local')
 
 
+def test_cpu_publish_does_not_download_or_materialize_and_gpu_uses_old_layout(tmp_path, monkeypatch, capsys):
+    common, rows = audio_fixture(tmp_path)
+    persistent = tmp_path / 'packs'
+    options = dict(splits=('train',), languages=('en',), pack_files=2)
+    copy = stage.copy_verified
+    monkeypatch.setattr(stage, 'copy_verified', lambda *a, **k: pytest.fail('CPU downloaded its own ZIP'))
+    assert stage.stage_audio(common, persistent, tmp_path/'cpu', materialize=False, **options) == {}
+    assert not list((tmp_path/'cpu').rglob('*.wav'))
+    assert not list((tmp_path/'cpu').rglob('complete.json'))
+    assert 'zip=2/2 audio=3/3 built=2 reused=0' in capsys.readouterr().err
+    from direct_s2st.journal import digest
+    namespace = digest([stage.raw_sha(common/'train.jsonl'), 'train', 'en', 2])[:24]
+    assert stage.audio_archive_path(persistent, stage.raw_sha(common/'train.jsonl'), 'train', 'en', 0, 2) == (
+        persistent / namespace[:2] / namespace / digest(0)[:2] / '00000000.zip')
+    monkeypatch.setattr(stage, 'copy_verified', copy)
+    for row in rows:
+        Path(row['en_audio']).unlink()  # VM switch: corpus originals inaccessible.
+    assert stage.require_audio_packs(common, persistent, **options) == 2
+    assert len(stage.stage_audio(common, persistent, tmp_path/'gpu-vm', create=False, **options)) == 3
+
+
+def test_interrupted_cpu_zip_publish_resumes_without_rereading_published_sources(tmp_path, monkeypatch):
+    common, rows = audio_fixture(tmp_path)
+    persistent = tmp_path/'packs'
+    real = stage.atomic_write_json
+    calls = []
+    def interrupt(path, *args, **kwargs):
+        if Path(path).parent.is_relative_to(persistent) and str(path).endswith('.json') and not str(path).endswith('.plan.json'):
+            calls.append(path)
+            if len(calls) == 2:
+                raise KeyboardInterrupt()  # second ZIP published, receipt not yet.
+        return real(path, *args, **kwargs)
+    monkeypatch.setattr(stage, 'atomic_write_json', interrupt)
+    options = dict(splits=('train',), languages=('en',), pack_files=1, materialize=False)
+    with pytest.raises(KeyboardInterrupt):
+        stage.stage_audio(common, persistent, tmp_path/'cpu-1', **options)
+    before = {p: p.read_bytes() for p in persistent.rglob('*.zip')}
+    assert len(before) == 2
+    for row in rows[:2]:
+        Path(row['en_audio']).unlink()
+    monkeypatch.setattr(stage, 'atomic_write_json', real)
+    stage.stage_audio(common, persistent, tmp_path/'cpu-2', **options)
+    assert len(list(persistent.rglob('*.zip'))) == 3
+    assert all(p.read_bytes() == content for p, content in before.items())
+    assert stage.require_audio_packs(common, persistent, splits=('train',), languages=('en',), pack_files=1) == 3
+
+
+def test_gpu_missing_packs_fail_before_any_copy_or_original_read(tmp_path, monkeypatch):
+    common, rows = audio_fixture(tmp_path)
+    persistent = tmp_path/'packs'
+    options = dict(splits=('train',), languages=('en',), pack_files=2)
+    stage.stage_audio(common, persistent, tmp_path/'cpu', materialize=False, **options)
+    last = stage.audio_archive_path(persistent, stage.raw_sha(common/'train.jsonl'), 'train', 'en', 2, 2)
+    last.with_suffix('.json').unlink()
+    monkeypatch.setattr(stage, 'copy_verified', lambda *a, **k: pytest.fail('download before preflight'))
+    monkeypatch.setattr(stage, 'read_common_manifest_row', lambda *a: pytest.fail('read originals on GPU'))
+    with pytest.raises(RuntimeError, match='CPU audio packing incomplete'):
+        stage.stage_audio(common, persistent, tmp_path/'gpu', create=False, **options)
+    assert not list((tmp_path/'gpu').rglob('*.wav'))
+
+
 def test_inline_units_resume_and_migrate_without_reextracting(tmp_path):
     from test_s2ut_units import _common
     from direct_s2st.s2ut.extract_units import extract_units

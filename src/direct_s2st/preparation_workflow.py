@@ -62,10 +62,24 @@ def run_stage(marker, identity, inputs, outputs, run, *, force=False):
     print(f'[preparation-stage] {marker.stem} status=completed', file=sys.stderr, flush=True)
 
 
+@operation('preparation: CPU audio ZIP publishing')
+def prepare_audio_packs(data):
+    """No HuBERT/GPU or all-audio local materialization; resume per ZIP."""
+    from .drive_staging import stage_audio, ensure_local
+    import tempfile
+    data = Path(data)
+    if not (data / 'common/dataset-lock.json').is_file():
+        raise ValueError('先に4Aのコーパス取込を完了してください')
+    local = ensure_local(Path(tempfile.gettempdir()) / 's2st-prep-inputs' / digest(str(data))[:16])
+    stage_audio(data / 'common', data / '.drive-audio-packs', local,
+                languages=('en', 'ja'), materialize=False)
+    print('音声ZIP準備完了。GPUへ切り替え、同じ設定でセル1 → 4Bを実行してください。', flush=True)
+
+
 @operation('preparation: resumable workflow')
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--stage', choices=['4a', '4b'], required=True)
+    parser.add_argument('--stage', choices=['4a', 'audio-packs', '4b'], required=True)
     parser.add_argument('--profile', default='smoke')
     parser.add_argument('--limit', type=int)
     args = parser.parse_args()
@@ -73,6 +87,9 @@ def main():
     corpus = Path(os.environ['CORPUS_ROOT']).resolve()
     if data.is_relative_to(corpus) or corpus.is_relative_to(data):
         raise ValueError('preparation outputs must be outside CORPUS_ROOT')
+    if args.stage == 'audio-packs':
+        prepare_audio_packs(data)
+        return
     repository = Path(__file__).resolve().parents[2]
     revision = subprocess.check_output(['git', '-C', str(repository), 'rev-parse', 'HEAD'], text=True).strip()
     common, phones = data/'common', data/'translatotron2/phonemes'
@@ -88,6 +105,11 @@ def main():
                  ('translatotron2', 'prepare', [common, phones], [tt2]),
                  ('translatotron2', 'validate', [tt2], [tt2])]
     else:
+        if os.environ.get('S2ST_DRIVE_SAFE') == '1':
+            from .drive_staging import require_audio_packs
+            # Check BOTH en (HuBERT) and ja (S2UT prepare) before loading models
+            # or transferring any WAV ZIPs on this GPU runtime.
+            require_audio_packs(common, data / '.drive-audio-packs')
         # Downloads have their own checksum verification; keep this check on each VM.
         subprocess.run([sys.executable, '-m', 'direct_s2st.cli', 's2ut', 'fetch-artifacts',
                         '--profile', args.profile, '--resume'], check=True)
@@ -106,7 +128,8 @@ def main():
                 import tempfile
                 local = ensure_local(Path(tempfile.gettempdir()) / 's2st-prep-inputs' / digest(str(data))[:16])
                 languages = ('en',) if action == 'extract-units' else (('ja',) if system == 's2ut' else ('ja', 'en'))
-                rows = stage_audio(common, data / '.drive-audio-packs', local, languages=languages)
+                rows = stage_audio(common, data / '.drive-audio-packs', local, languages=languages,
+                                   create=args.stage != '4b')
                 with active_map(rows, local):
                     subprocess.run(command, check=True)
             else:
