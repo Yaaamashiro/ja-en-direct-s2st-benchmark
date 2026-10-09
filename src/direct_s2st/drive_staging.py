@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import time
 import zipfile
 
 from .io import atomic_write_json, read_jsonl
@@ -116,8 +117,48 @@ def register(rows, source, target, stamp):
                                  local_stamp=[stat.st_size, stat.st_mtime_ns])
 
 
+def audio_archive_path(persistent, manifest_sha, split, language, start, pack_files):
+    # Keep the 55a5a90 namespace/layout: interrupted 4B packs remain reusable.
+    namespace = digest([manifest_sha, split, language, pack_files])[:24]
+    return Path(persistent) / namespace[:2] / namespace / digest(start)[:2] / f'{start:08d}.zip'
+
+
+def missing_audio_pack(archive):
+    return RuntimeError(
+        f'CPU audio packing incomplete: {archive}. '
+        '先にCPUランタイムでセル4A.5（音声ZIP準備）を実行してください。'
+        '完成したZIPは再利用します。4Bでは原本からZIPを作成しません。')
+
+
+@operation('Drive inputs: require completed CPU audio packs')
+def require_audio_packs(common, persistent, *, splits=('train', 'dev', 'test'),
+                        languages=('en', 'ja'), pack_files=128):
+    """Cheap preflight before downloads/models: no original WAV reads or writes.
+
+    This checks publication, not payload integrity; staging checks receipt
+    identity and archive/member SHA256 before passing inputs to HuBERT.
+    """
+    from .translatotron2.mel_storage import guarded_root
+    persistent = guarded_root(persistent)
+    if not 1 <= pack_files <= 512:
+        raise ValueError('audio pack_files must be between 1 and 512')
+    checked = 0
+    for split in splits:
+        manifest = Path(common) / f'{split}.jsonl'
+        count = sum(1 for _ in read_jsonl(manifest))
+        manifest_sha = raw_sha(manifest)
+        for language in languages:
+            for start in track(range(0, count, pack_files), f'require WAV ZIPs: {split}/{language}'):
+                archive = audio_archive_path(persistent, manifest_sha, split, language, start, pack_files)
+                if not archive.is_file() or not archive.with_suffix('.json').is_file():
+                    raise missing_audio_pack(archive)
+                checked += 1
+    return checked
+
+
 @operation('Drive inputs: resumable WAV archive staging')
-def stage_audio(common, persistent, local, *, splits=('train', 'dev', 'test'), languages=('ja', 'en'), pack_files=128):
+def stage_audio(common, persistent, local, *, splits=('train', 'dev', 'test'), languages=('ja', 'en'),
+                pack_files=128, create=True, materialize=True):
     from .preparation import file_stamp
     from .translatotron2.mel_storage import guarded_root, verify_feature
     common, persistent, local = Path(common), guarded_root(persistent), ensure_local(local)
@@ -125,7 +166,11 @@ def stage_audio(common, persistent, local, *, splits=('train', 'dev', 'test'), l
         raise ValueError('audio pack_files must be between 1 and 512')
     if local.is_relative_to(persistent) or persistent.is_relative_to(local):
         raise ValueError('local inputs and persistent packs must be separate')
+    if not create:
+        require_audio_packs(common, persistent, splits=splits, languages=languages, pack_files=pack_files)
     output = {}
+    built = reused = 0
+    last_report = float('-inf')
     for split in splits:
         # Resolve paths only when BUILDING a new shard. Completed shards need no
         # stat/open of their original WAVs, including after a runtime reset.
@@ -145,9 +190,11 @@ def stage_audio(common, persistent, local, *, splits=('train', 'dev', 'test'), l
                 expected = {str(row['pair_id']): row[f'{language}_sha256'].lower() for row in selected}
                 if len(expected) != len(selected) or any(len(h) != 64 or any(c not in '0123456789abcdef' for c in h) for h in expected.values()):
                     raise ValueError('audio staging requires unique IDs and manifest SHA256')
-                archive = directory / f'{start:08d}.zip'
+                archive = audio_archive_path(persistent, input_hash, split, language, start, pack_files)
                 receipt = archive.with_suffix('.json')
                 plan = archive.with_suffix('.plan.json')
+                if not create and not receipt.is_file():
+                    raise missing_audio_pack(archive)
                 if not receipt.exists() and archive.exists() and plan.is_file():
                     saved = json.loads(plan.read_text(encoding='utf-8'))
                     if saved['sha256'] != digest(saved['body']) or saved['body']['expected'] != expected:
@@ -160,7 +207,10 @@ def stage_audio(common, persistent, local, *, splits=('train', 'dev', 'test'), l
                     if document['sha256'] != digest(body) or body['expected'] != expected:
                         raise ValueError('corrupt/stale audio pack receipt')
                     verify_feature(archive, body['archive_sha256'])
+                    reused += 1
                 else:
+                    if not create:
+                        raise missing_audio_pack(archive)
                     # An unpublished archive is not trusted and is not replaced.
                     if archive.exists():
                         raise RuntimeError(f'Uncommitted audio pack retained: {archive}; inspect before retrying')
@@ -201,11 +251,24 @@ def stage_audio(common, persistent, local, *, splits=('train', 'dev', 'test'), l
                         finally:
                             pending.unlink(missing_ok=True)
                     atomic_write_json(receipt, dict(body=body, sha256=digest(body)))
+                    built += 1
                 names = {digest([raw['pair_id'], language])[:32] + '.wav': expected[str(raw['pair_id'])]
                          for raw in selected}
                 if (set(body['entries']) != set(names)
                         or any(e['sha256'] != names[name] for name, e in body['entries'].items())):
                     raise ValueError('audio pack entries differ from common manifest')
+                now = time.monotonic()
+                if now - last_report >= 10 or start + pack_files >= len(items):
+                    print(f'[audio-packs] mode={"CPU publish" if not materialize else "local staging"} '
+                          f'split={split}/{language} zip={start // pack_files + 1}/{(len(items) + pack_files - 1) // pack_files} '
+                          f'audio={min(start + pack_files, len(items))}/{len(items)} '
+                          f'built={built} reused={reused} zip_size_max={pack_files} originals_preserved=true',
+                          file=sys.stderr, flush=True)
+                    last_report = now
+                if not materialize:
+                    # CPU stage keeps only immutable Drive ZIPs, not all WAVs on
+                    # this disposable VM. Switching runtimes cannot lose them.
+                    continue
                 pack_local = local / namespace / f'{start:08d}'
                 pack_local.mkdir(parents=True, exist_ok=True)
                 committed = pack_local / 'complete.json'
@@ -250,7 +313,8 @@ def stage_audio(common, persistent, local, *, splits=('train', 'dev', 'test'), l
                         if alias.is_absolute():
                             stamp = dict(entry['stamp'], path=str(alias))
                             register(output, alias, pack_local / name, stamp)
-    print(f'[drive-staging] local_audio={len(output)} originals_preserved=true', file=sys.stderr, flush=True)
+    print(f'[drive-staging] built_zip={built} reused_zip={reused} local_audio={len(output)} '
+          'originals_preserved=true', file=sys.stderr, flush=True)
     return output
 
 

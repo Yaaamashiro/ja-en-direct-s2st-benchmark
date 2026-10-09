@@ -184,3 +184,80 @@ def test_acceptance_wav_checks_resume_and_detect_changed_content(tmp_path, monke
     audio.write_bytes(audio.read_bytes() + b'changed')
     with pytest.raises(ValueError, match='content has changed'):
         acceptance._verify_audio(rows, lock, tmp_path, resume=True)
+
+
+def test_cpu_audio_stage_never_fetches_models_and_gpu_requires_both_languages(tmp_path, monkeypatch):
+    import sys
+    from direct_s2st import preparation_workflow as workflow
+    from direct_s2st import drive_staging as stage
+    from test_drive_staging import audio_fixture
+    data = tmp_path/'data'
+    data.mkdir()
+    common, rows = audio_fixture(data)
+    rows = [row | dict(ja_audio=row['en_audio'], ja_sha256=row['en_sha256']) for row in rows]
+    for split in ('train', 'dev', 'test'):
+        (common/f'{split}.jsonl').write_text(''.join(json.dumps(row | dict(split=split)) + '\n' for row in rows))
+    (common/'dataset-lock.json').write_text('{}')
+    corpus = tmp_path/'corpus'
+    corpus.mkdir()
+    monkeypatch.setenv('CORPUS_ROOT', str(corpus))
+    monkeypatch.setenv('EXPERIMENT_DATA_ROOT', str(data))
+    monkeypatch.setenv('S2ST_DRIVE_SAFE', '1')
+    monkeypatch.setattr(workflow.subprocess, 'check_output', lambda *a, **k: 'a'*40)
+    monkeypatch.setattr(workflow.subprocess, 'run', lambda *a, **k: pytest.fail('unexpected model/Unit/Mel command'))
+    import tempfile
+    monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(tmp_path/'cpu'))
+    monkeypatch.setattr(sys, 'argv', ['preparation', '--stage', 'audio-packs'])
+    workflow.main()
+    assert len(list((data/'.drive-audio-packs').rglob('*.zip'))) == 6
+    # All English packs exist, but a Japanese publication is missing. Stop
+    # before fetch-artifacts, HuBERT or any English ZIP transfer on the GPU.
+    archive = stage.audio_archive_path(data/'.drive-audio-packs', stage.raw_sha(common/'test.jsonl'), 'test', 'ja', 0, 128)
+    archive.with_suffix('.json').unlink()
+    monkeypatch.setattr(sys, 'argv', ['preparation', '--stage', '4b'])
+    with pytest.raises(RuntimeError, match='CPU audio packing incomplete'):
+        workflow.main()
+
+
+def test_cpu_audio_migration_updates_only_revision_and_rejects_training(tmp_path, monkeypatch):
+    import importlib.util
+    import sys
+    import runpy
+    repo = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location('audio_pack_recovery', repo/'scripts/colab/prepare_audio_packs.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    update_revision = runpy.run_path(str(repo/'scripts/colab/resume_preparation.py'))['update_revision']
+    persistent = tmp_path/'experiment'
+    common = persistent/'data/common'
+    common.mkdir(parents=True)
+    (common/'dataset-lock.json').write_text('{}')
+    for split in ('train', 'dev', 'test'):
+        (common/f'{split}.jsonl').write_text('{}\n')
+    old, new = 'a'*40, 'b'*40
+    pin = persistent/'repository-revision.txt'
+    pin.write_text(old + '\n')
+    artifact = persistent/'data/translatotron2/mel.zip'
+    artifact.parent.mkdir()
+    artifact.write_bytes(b'unchanged Mel')
+    monkeypatch.setenv('CORPUS_ROOT', str(tmp_path/'corpus'))
+    monkeypatch.setattr(module.subprocess, 'check_output',
+                        lambda command, **kw: new if command[-1] == 'HEAD' else '')
+    monkeypatch.setattr(sys, 'argv', ['recovery', '--persistent', str(persistent), '--revision', new, '--overwrite'])
+    calls = []
+    def ensure_runtime(repo, persistent, run, **kwargs):
+        assert kwargs == {'require_gpu': False}
+        return 'fixture-python'
+    monkeypatch.setattr(module.runpy, 'run_path', lambda path: (
+        {'update_revision': update_revision} if str(path).endswith('resume_preparation.py')
+        else {'ensure_runtime': ensure_runtime}))
+    monkeypatch.setattr(module.subprocess, 'run', lambda args, **kwargs: calls.append(args))
+    module.main()
+    assert pin.read_text().strip() == new
+    assert (persistent/f'repository-revision.before-{new[:12]}.txt').read_text().strip() == old
+    assert calls == [['fixture-python', '-m', 'direct_s2st.preparation_workflow', '--stage', 'audio-packs', '--profile', 'smoke']]
+    assert artifact.read_bytes() == b'unchanged Mel'
+    (persistent/'runs/model').mkdir(parents=True)
+    (persistent/'runs/model/checkpoint.pt').write_bytes(b'preserve')
+    with pytest.raises(ValueError, match='training configuration/checkpoints'):
+        module.main()

@@ -101,6 +101,15 @@ def test_notebooks_split_gpu_stage_and_restore_before_training(tmp_path, monkeyp
         assert calls[0] == ('runtime', {'require_gpu': True})
         assert len(calls) == 2
         assert calls[1][:5] == ('python', '-m', 'direct_s2st.preparation_workflow', '--stage', '4b')
+        if name == 'training':
+            calls.clear()
+            cpu = next(s for s in codes if s.startswith('#@title 4A.5.'))
+            exec(cpu, cfg | {'CONFIRM_FULL_DATA': True,
+                 'run': lambda *args: calls.append(args), 'PYTHON': 'python',
+                 'ensure_runtime': lambda **kw: calls.append(('runtime', kw))})
+            assert calls[0] == ('runtime', {'require_gpu': False})
+            assert calls[1][:5] == ('python', '-m', 'direct_s2st.preparation_workflow', '--stage', 'audio-packs')
+            assert len(calls) == 2
         train = next(s for s in codes if s.startswith('#@title 5.'))
         assert train.index('ensure_runtime(require_gpu=True)') < train.index('CONFIG =')
         exec(train, cfg | {'RUN_TRAINING': False,

@@ -14,6 +14,7 @@
 | 4A・音素化 | サンプル単位の音素列 | 未保存サンプル。最終TSV/inventoryは保存結果から再構成 |
 | 4A・Mel準備 | 入力WAVヘッダ、生成済み分散NPY、分割ZIP | 未保存NPYと作成途中のZIP。NPYは256フォルダへ分散、新規ZIPは原則512件または256MiBで分割（単一の巨大NPYは例外） |
 | 4A・最終検証 | サンプル単位の検証成功記録 | 未保存サンプル。最終fingerprintのファイルハッシュ処理は再実行 |
+| 4A.5・CPU音声ZIP準備（通常用） | 128本単位の不変ZIPと完了記録（英語・日本語、全split） | 未公開ZIP。切断後も同じCPUセルで再開。原本WAV・完了ZIPを上書きせず、全音声のローカル展開はしない |
 | 4B・HuBERT | 抽出済みUnitとサンプル単位の記録 | 未保存サンプル/バッチ。モデル読込みは再実行 |
 | 4B・学習データ準備 | サンプル単位のUnit読込み・WAVヘッダ結果、最終TSV/辞書 | 未保存サンプル。テキストラベル作成・TSV整合性確認は再走査 |
 | 5・学習（TT2/S2UT/vocoder） | 確認済みの学習checkpoint/snapshot | 最後の永続保存後の更新。初回保存前なら最初から。ローカル読込みキャッシュは新VMで再構築 |
@@ -51,6 +52,39 @@ checkpointや完了記録の破損、設定不一致は黙って無視せず停�
 - 旧版が保存していなかった進捗は、今回の修正でさかのぼって復元できません。
 - 実行中のColabに修正は自動反映されません。セル1は保存済みrevisionを使うため、リモート更新だけでも反映されません。
   既存実験のrevision/lockを手動で上書きせず、旧成果物を保持した上で移行してください。
+
+## 旧4Bが音声ZIP作成で長時間GPUを使わない場合
+
+`stage WAV ZIPs: train/en checked=200/1105`などは、音声200本ではなくZIP200個
+（最大128本/ZIP）の完了数です。ログの`audio=...`は音声数、`built`は今回作成、
+`reused`は既存ZIPを再利用した数です。進捗の`checked`は再開時に0から数え直しますが、
+完了ZIPの原本読込み・作り直しはしません。
+
+実行を停止し、CPUランタイムへ変更して同じ実験名・保存先でセル1→2を実行します。
+修正を含むコードを取得・checkoutした後、次の専用スクリプトで固定revisionを更新し、
+CPUで残りの音声ZIPを完成させます（まだ学習を始めていない実験のみ）。
+音素・Melの復旧セル③をもう一度回す必要はありません。
+
+```python
+import sys
+REVISION = '<この修正を含む公開済みcommitの完全SHA>'
+run('git', '-C', REPO, 'fetch', 'origin', REVISION)
+run('git', '-C', REPO, 'checkout', '--detach', REVISION)
+configure_preparation()
+run(sys.executable, REPO / 'scripts/colab/prepare_audio_packs.py',
+    '--persistent', PERSISTENT, '--revision', REVISION,
+    '--profile', PROFILE, '--overwrite')
+```
+
+`--overwrite`は旧revision固定情報を退避・更新する許可です。原本・音素・Mel・Unit・
+既存音声ZIPを削除しません。保存先`data/.drive-audio-packs/`とZIP識別子は55a5a90の
+ままなので、旧4Bで作成済みのZIPを再利用し、未公開分だけ原本を読みます。
+途中で再び切断した場合も同じコマンド、または更新版セル4A.5をCPUで再実行できます。
+
+「音声ZIP準備完了」を確認後、GPUへ切り替え、更新版ノートブックのセル1→4Bを実行します。
+ローカルコピーは新VMで失われるためZIPの取得・展開は必要ですが、原本の大量個別読込みは
+しません。4B開始前に英語・日本語の公開ZIPが揃っていなければ停止します。
+全14万件・実Drive/GPUでの性能と切断復旧は未検証です。
 
 ## 固定eSpeak音素辞書の不足でMel準備が停止した場合
 
