@@ -33,10 +33,32 @@ OFFにした場合は準備開始前に停止します。
 RUN_TRAININGは初期状態でOFFです。学習する場合だけONにし、
 TOTAL_UPDATES（累計の更新数）とCONFIRM_TRAININGを設定してください。
 通常S2UTは専用のS2UT_TOTAL_UPDATES=400000を使用します。長期学習の自動開始はしません。
-旧4BのCTC文字ラベルはセル5で別のfairseq-unigram-v1へ移行し、recipe-v2の新しい学習runを使用します。
+旧4Bの補助ラベルは別のfairseq-unigram-allchars-v1へ移行し、S2UTはrecipe-v3の新しい学習runを使用します（TT2はrecipe-v2のまま）。
 既存のMel・Unit・旧checkpointを削除する必要はありません。
 データの全件使用と長期学習の許可は別々に確認します。勝手にfull学習を開始しません。
 SESSION_MINUTESは一回の学習subprocess予算です。準備・保存・評価時間は含まれません。
+
+### 4Bが未知文字エラーで停止した場合
+
+`unknown source_letter tokens ... ['汎']` 等は、trainにないdev/test文字を旧辞書が拒否したエラーです。
+新コードでは日本語・英語の文字辞書にtrain/dev/testの文字を登録し、最適化はtrainのみで行います。
+CTCのUnigramモデルは引き続きtrain英語文だけで学習し、未知pieceは正しく`<unk>`へ符号化します。
+この語彙登録方針は実験lockに明記します。原論文が全split登録を指定しているという意味ではありません。
+
+保存済みrevisionを明示更新した後、同じ出力先・実験名で次の追加セルを実行できます。
+CPUで実行可能です。Unit抽出・モデルダウンロード・4A/Mel生成・学習は実行しません。
+保存済みUnitと日本語音声ZIPが必要で、欠けていれば自動で再抽出せず停止します。
+未完了の準備・検証には時間がかかります。正常終了後の同じセル再実行は完了receiptを再利用します。
+
+```python
+ensure_runtime(require_gpu=False)
+configure_preparation()
+run(PYTHON, '-m', 'direct_s2st.preparation_workflow',
+    '--stage', '4b-finish', '--profile', PROFILE)
+```
+
+更新前のS2UT学習checkpointは、変更した語彙のモデルへ継続学習しません。
+学習へ進む前に最新ノートブックのセル1を同じ設定で実行し、S2UT recipe-v3のrun名を使用してください。
 
 smoke用は5件・2更新に固定され、通常用は件数制限を設けません。
 通常用のPROFILE=pilotはCLI設定選択用であり、コーパスを10時間に切り詰めるものではありません。

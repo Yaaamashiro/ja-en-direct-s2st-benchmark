@@ -17,7 +17,8 @@ from direct_s2st.progress import operation
 
 
 @operation('migration: legacy experiment to separate paper runs')
-def migrate(persistent, revision, *, overwrite=False, separate_recipe_v2_runs=False):
+def migrate(persistent, revision, *, overwrite=False, separate_recipe_v2_runs=False,
+            separate_recipe_v3_runs=False):
     persistent = Path(persistent).resolve()
     corpus = Path(os.environ['CORPUS_ROOT']).resolve()
     if persistent.is_relative_to(corpus) or corpus.is_relative_to(persistent):
@@ -36,9 +37,11 @@ def migrate(persistent, revision, *, overwrite=False, separate_recipe_v2_runs=Fa
     for path in persistent.glob('*.json'):
         config = json.loads(path.read_text(encoding='utf-8'))
         if config.get('research_metadata', {}).get('reproduction_mode') in ('paper_exact', 'paper_practical'):
-            if not separate_recipe_v2_runs:
+            if not separate_recipe_v2_runs and not separate_recipe_v3_runs:
                 raise ValueError('paper training configuration already exists; explicitly pass --separate-recipe-v2-runs to preserve it and use new recipe-v2 run names')
-            if '-recipe-v2' in path.stem:
+            if '-recipe-v3' in path.stem:
+                raise ValueError('recipe-v3 configuration already exists; use a separate code/run migration')
+            if '-recipe-v2' in path.stem and not separate_recipe_v3_runs:
                 raise ValueError('recipe-v2 configuration already exists; use a separate code/run migration')
     result = dict(status='PLAN_ONLY', previous=old, revision=revision,
                   prepared_data_preserved=True, old_snapshots_preserved=True,
@@ -56,9 +59,12 @@ def main():
     parser.add_argument('--revision', required=True)
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--separate-recipe-v2-runs', action='store_true')
+    parser.add_argument('--separate-recipe-v3-runs', action='store_true',
+                        help='Preserve older runs; use a new S2UT recipe-v3 run for the character vocabulary change')
     args = parser.parse_args()
     print(json.dumps(migrate(args.persistent, args.revision, overwrite=args.overwrite,
-                             separate_recipe_v2_runs=args.separate_recipe_v2_runs)))
+                             separate_recipe_v2_runs=args.separate_recipe_v2_runs,
+                             separate_recipe_v3_runs=args.separate_recipe_v3_runs)))
 
 
 if __name__ == '__main__':

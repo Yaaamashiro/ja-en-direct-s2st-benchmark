@@ -16,6 +16,12 @@ def canonical_text(text):
     return ''.join(' ' if token == '<space>' else token for token in tokenize(text))
 
 
+def encode_labels(processor, text):
+    # String encoding returns the original spelling of unknown spans, not
+    # the model's <unk> piece. IDs make held-out OOV handling unambiguous.
+    return [processor.id_to_piece(i) for i in processor.encode(canonical_text(text), out_type=int)]
+
+
 def text_fingerprint(sentences):
     return hashlib.sha256(json.dumps(sentences, ensure_ascii=False).encode('utf-8')).hexdigest()
 

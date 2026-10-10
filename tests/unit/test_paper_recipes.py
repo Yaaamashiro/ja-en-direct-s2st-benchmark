@@ -225,6 +225,13 @@ def test_revision_migration_preserves_legacy_data_and_requires_overwrite(tmp_pat
     (persistent/'s2ut-recipe-v2.json').write_bytes(preserved)
     with pytest.raises(ValueError, match='recipe-v2 configuration already exists'):
         module.migrate(persistent, revision, overwrite=True, separate_recipe_v2_runs=True)
+    assert module.migrate(persistent, revision, overwrite=True,
+                          separate_recipe_v3_runs=True)['status'] == 'APPLIED'
+    assert (persistent/'s2ut-recipe-v2.json').read_bytes() == preserved
+    (persistent/'repository-revision.txt').write_text(old+'\n')
+    (persistent/'s2ut-recipe-v3.json').write_bytes(preserved)
+    with pytest.raises(ValueError, match='recipe-v3 configuration already exists'):
+        module.migrate(persistent, revision, overwrite=True, separate_recipe_v3_runs=True)
 
 
 def test_streaming_accumulation_matches_list_and_resumes(tmp_path):
