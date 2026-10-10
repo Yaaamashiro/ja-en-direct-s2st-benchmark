@@ -36,13 +36,12 @@ def finite_step(loss, optimizer, parameters):
     if not torch.isfinite(loss):
         raise ValueError('nonfinite vocoder loss')
     loss.backward()
-    if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in parameters):
-        raise ValueError('nonfinite vocoder gradient')
-    if not any(p.grad is not None and torch.count_nonzero(p.grad) for p in parameters):
+    gradients = [p.grad for p in parameters if p.grad is not None]
+    if not gradients or not torch.stack([torch.count_nonzero(g) for g in gradients]).sum():
         raise ValueError('missing vocoder gradients')
     torch.nn.utils.clip_grad_norm_(parameters, 1000., error_if_nonfinite=True)
     optimizer.step()
-    if any(not torch.isfinite(p).all() for p in parameters):
+    if not torch.stack([torch.isfinite(p).all() for p in parameters]).all():
         raise ValueError('nonfinite vocoder parameters')
 
 
@@ -248,11 +247,13 @@ def main():
     atomic_write_json(args.output_root / 'config.json', config, resume=args.resume, overwrite=args.overwrite)
     from ..prefetch import ordered_samples
     from ..train_runtime import Timings, enabled, stopping, checkpoint_saved
+    from ..batch_probe import Probe
+    probe = Probe()
     timing = Timings()
     from ..s2ut.unit_storage import records, stamp
     unit_records = records(args.units_root) if args.kind == 'unit' else {}
     def load(index):
-        row = rows[index % len(rows)]
+        row = rows[probe_longest if probe.path else index % len(rows)]
         from ..preparation import file_stamp
         if file_stamp(row['en_audio']) != row['_verified_audio_stamp']:
             raise ValueError(f"{row['pair_id']}: audio changed after verification")
@@ -268,11 +269,13 @@ def main():
         if enabled() and args.device.startswith('cuda'):
             wave = wave.pin_memory()
         return wave, all_units.get(row['pair_id'])
+    probe_longest = max(range(len(rows)), key=lambda i: float(rows[i]['en_duration'])) if probe.path else None
     indices = range(start * args.batch_size, args.max_updates * args.batch_size)
     with ordered_samples(load, indices, args.num_workers, args.prefetch_factor) as loaded:
         for update in track(range(start + 1, args.max_updates + 1), 'vocoder: train updates'):
             with timing.measure('data_wait'):
                 samples = [next(loaded) for _ in range(args.batch_size)]
+            probe.begin()
             with timing.measure('transfer_and_conditioning', args.device if enabled() else None):
                 conditioning, real = segment_batch(samples, spec=spec,
                     hop=math.prod(config['upsample_rates']), segment_frames=args.segment_frames,
@@ -280,6 +283,7 @@ def main():
             units = [sample[1] for sample in samples] if args.kind == 'unit' else None
             with timing.measure('optimization', args.device if enabled() else None):
                 losses = gan_step(generator, discriminators, optim_g, optim_d, conditioning, real, mel, units=units)
+            probe.finish(args.batch_size)
             stop = stopping()
             if update % args.save_interval_updates == 0 or update == args.max_updates or stop:
                 save_state(checkpoint, dict(format='direct-s2st-vocoder-v1', generator=generator.state_dict(),

@@ -1,12 +1,19 @@
-architecture: s2ut_transformer
+architecture: s2ut_transformer_fisher
 target: reduced_units
 seed: 1
+recommended_total_updates: 400000
 training:
+  max_updates: 2  # Safe CLI default; never launch 400k without confirmation.
+  save_interval_updates: 1
   command:
     - python
     - -m
     - direct_s2st.s2ut.fairseq_train
     - "{data_root}"
+    - --reproduction-mode
+    - paper_exact
+    - --vocoder-mode
+    - trained
     - --task
     - speech_to_speech
     - --target-is-code
@@ -17,7 +24,7 @@ training:
     - --label-smoothing
     - "0.2"
     - --arch
-    - s2ut_transformer
+    - s2ut_transformer_fisher
     - --share-decoder-input-output-embed
     - --dropout
     - "0.1"
@@ -54,7 +61,7 @@ training:
     - --max-target-positions
     - "3000"
     - --update-freq
-    - "1"
+    - "4"
     - --num-workers
     - "8"
     - --seed

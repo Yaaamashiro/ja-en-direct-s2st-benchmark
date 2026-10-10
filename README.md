@@ -139,6 +139,7 @@ HuBERT unit列のfairseq経路との一致確認を含む手順は[再現手順]
 - [4方式の実行・再開・完了判定](docs/PIPELINE_COMPLETION.md)
 - [Translatotron 2のモデル構成](docs/TRANSLATOTRON2.md)
 - [reference preset・分散学習・原論文との対応](docs/REFERENCE_PARITY.md)
+- [通常Colabのpaper_exact / paper_practical・Griffin-Lim評価](docs/PAPER_RECIPES.md)
 - [実装状況と検証記録](docs/IMPLEMENTATION_STATUS.md)
 
 S2T→TTSの実行・resume・固定revisionは[実行ガイド](docs/S2T_TTS.md)を参照してください。

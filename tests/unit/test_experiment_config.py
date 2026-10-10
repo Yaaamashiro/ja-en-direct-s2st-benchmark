@@ -53,9 +53,11 @@ def test_training_profiles_control_update_counts() -> None:
     pilot = load_config(config, profile="pilot")
     full = load_config(config, profile="full")
 
-    assert smoke["training"]["max_updates"] == 100
-    assert pilot["training"]["max_updates"] == 10_000
-    assert full["training"]["max_updates"] == 100_000
+    # A paper recommendation must never start a long training run implicitly.
+    assert smoke["training"]["max_updates"] == 2
+    assert pilot["training"]["max_updates"] == 2
+    assert full["training"]["max_updates"] == 2
+    assert full['recommended_total_updates'] == 400_000
     assert full["confirm_full"] is True
 
 

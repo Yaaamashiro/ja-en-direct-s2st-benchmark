@@ -64,6 +64,26 @@ def atomic_write_json(
     return atomic_write_text(path, content, overwrite=overwrite, resume=resume)
 
 
+def atomic_write_bytes(path: Path, content: bytes, *, overwrite=False, resume=False) -> bool:
+    if path.exists():
+        if resume and path.read_bytes() == content:
+            return False
+        if not overwrite:
+            raise ExistingOutputError(f'output already exists: {path}')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp')
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
+
+
 def atomic_write_jsonl(
     path: Path,
     rows: Iterable[dict[str, Any]],

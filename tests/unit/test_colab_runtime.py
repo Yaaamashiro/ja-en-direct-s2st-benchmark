@@ -76,7 +76,12 @@ def test_notebooks_separate_data_models_and_training_guards(monkeypatch):
     assert settings['smoke']['TOTAL_UPDATES'] == 2
     assert settings['smoke']['MODEL_SIZE'] == 'smoke'
     assert settings['training']['DATA_LIMIT'] is None
-    assert settings['training']['MODEL_SIZE'] == 'reference'
+    assert settings['training']['MODEL_SIZE'] == 'fisher'
+    assert settings['training']['REPRODUCTION_MODE'] == 'paper_exact'
+    assert settings['training']['TT2_VOCODER_MODE'] == 'griffin_lim'
+    assert settings['training']['S2UT_VOCODER_MODE'] == 'trained'
+    assert settings['training']['S2UT_TOTAL_UPDATES'] == 400000
+    assert settings['training']['TRAIN_CALIBRATION_OBJECTIVE'] == 'throughput'
     assert not settings['training']['RUN_TRAINING']
     assert not settings['training']['CONFIRM_TRAINING']
 

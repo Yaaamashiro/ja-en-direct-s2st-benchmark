@@ -5,11 +5,12 @@
 | 用途 | ノートブック | データ・学習 | Drive保存先 |
 | --- | --- | --- | --- |
 | 最初の動作確認 | [colab_smoke.ipynb](../notebooks/colab_smoke.ipynb) | 各split 5件・2更新・小型TT2 | OUTPUT_BASE/smoke/実験名 |
-| 通常の学習・比較 | [colab_training.ipynb](../notebooks/colab_training.ipynb) | 全件・更新数を明示指定・reference TT2 | OUTPUT_BASE/training/実験名 |
+| 通常の学習・比較 | [colab_training.ipynb](../notebooks/colab_training.ipynb) | 全件・更新数を明示指定・Fisher paper_exact | OUTPUT_BASE/training/実験名 |
 
 コーパス側のノートブックと同様、最初の設定フォームを編集して番号順に実行します。
 コーパスのコード・データは変更しません。smokeの数値を品質評価として使わないでください。
-通常用のreferenceモデルも原論文の完全な学習レシピや収束を保証するものではありません。
+通常用はFisher形状・optimizer・実効batchを論文に寄せますが、16kHz target Mel・eSpeak・日英コーパスを維持するため完全再現ではありません。
+新しい設定と移行上の注意は[論文レシピ](PAPER_RECIPES.md)を参照してください。
 
 ## 手順
 
@@ -22,13 +23,18 @@
 3. セル4AでCPUデータ準備を実行します。Drive接続・コード取得・環境構築（セル2・3相当）は自動実行されます。
    通常用は続けてCPUのままセル4A.5で音声ZIPを準備します。完了・Driveへの保存を確認後、GPUに切り替えて同じ設定でセル1→4Bを実行し、HuBERT Unit抽出とS2UT準備を行います。
 4. セル1のTRAIN_TARGETをtt2 / s2ut / unit / melから選び、セル5で学習します。
-   4方式比較には4つの学習済みrunが必要なので、各対象について繰り返します。
+   通常設定ではtt2・s2ut・unitの3runが必要です。unitはこのコーパスの英語train音声で学習します。S2UT_VOCODER_MODE=paperは公式LJSpeech重みの代替であり、原論文のFisher学習条件とは異なります。TT2をHiFi-GANで復元する場合はmelも学習します。smokeは従来の4runです。
+   通常用は各targetの初回にVRAM事前測定を行い、結果を保存してから初期重みで本学習を開始します。
+   `TRAIN_CALIBRATE_BATCH=True`、安全余裕10%が既定です。TT2実効1024は維持し、再開時は選択値を固定します。
 5. 学習が終わったらRUN_BENCHMARKをONにし、セル6〜8で復元・4方式推論・共通評価・比較を実行します。
 
 通常用はCONFIRM_FULL_DATAが既定でONであり、セル4A・4Bでは全コーパスを前処理します。
 OFFにした場合は準備開始前に停止します。
 RUN_TRAININGは初期状態でOFFです。学習する場合だけONにし、
 TOTAL_UPDATES（累計の更新数）とCONFIRM_TRAININGを設定してください。
+通常S2UTは専用のS2UT_TOTAL_UPDATES=400000を使用します。長期学習の自動開始はしません。
+旧4BのCTC文字ラベルはセル5で別のfairseq-unigram-v1へ移行し、recipe-v2の新しい学習runを使用します。
+既存のMel・Unit・旧checkpointを削除する必要はありません。
 データの全件使用と長期学習の許可は別々に確認します。勝手にfull学習を開始しません。
 SESSION_MINUTESは一回の学習subprocess予算です。準備・保存・評価時間は含まれません。
 
@@ -94,6 +100,7 @@ Cascade・S2T→TTS・共通評価の依存も導入します。
 
 通常用はPERFORMANCE=gpu80（TT2 batch8、vocoder batch16、workers4、
 S2UT max-tokens20000）を使います。VRAM使用量の保証ではありません。
+paper_exactのTT2はupdate_freq128で実効1024、S2UTはupdate_freq4を保持します。
 smoke用は小さいbatchとworkers0です。
 詳細設定が必要な場合はdirect_s2st.colab.make_configの引数を変更しますが、
 既存runの条件は途中変更しないでください。
@@ -180,15 +187,30 @@ HuBERTの実バッチ数・次の上限・空きVRAM、終了時のcheckpoint保
 CLIでは対応する環境変数`S2ST_PREP_WORKERS`、`S2ST_HUBERT_BATCH_MAX`、
 `S2ST_PREP_RECHECK=1`を指定できます。`S2ST_PREP_ADAPTIVE=0`はCPUワーカーを上限に固定します。
 
-### セル5の常駐・適応学習（任意）
+### セル5の常駐学習・開始前VRAM測定
 
 通常ノートブックの `TRAIN_OPTIMIZE=True` は、1 GPU・1学習プロセスをセッション中
 常駐させます。従来の100更新ごとの再起動は行わず、`CHUNK_UPDATES` は旧方式だけに適用します。
 APIの `make_config` は互換性のため `optimize=False` が既定です。
 
+通常用は `TRAIN_CALIBRATE_BATCH=True` で、TT2/S2UT/Mel・Unit vocoderごとに開始前の
+別プロセス試運転を行います。選択値・ピークVRAM・時間・GPU条件をDriveに記録し、
+試運転weightsを捨ててから本学習をupdate 0から開始します。TT2は実効1024を維持して
+物理batchを選び、GANは実batch数を選びます。S2UTのpaper_exactは公式の
+max_tokens20000/update_freq4のVRAM収容確認だけを行い、追加分割・拡大はしません。
+不足時は停止し、より大きいGPUまたは別runのpaper_practicalを明示選択します。
+S2UTの分割上限の選定はpaper_practical限定です。再開時は保存した設定を固定します。
+`TRAIN_CALIBRATION_MAX_BATCH=1024`、`TRAIN_VRAM_RESERVE_RATIO=0.10`、
+`TRAIN_CALIBRATION_STEPS=3`が既定です。MAX_BATCHはS2UT paper_exactには影響しません。
+最大容量と最大速度は同じとは限りません。
+TRAIN_CALIBRATION_OBJECTIVE=throughput（既定）は安全な候補から試運転の処理数/秒で選びます。
+capacityは収まる最大数を選ぶ旧方針です。いずれもS2UT paper_exactのbatchは変更しません。
+GPU使用率サンプル、VRAM、処理数/秒、TT2のstream読み込み待ちをログで確認できます。
+GPU変更時の扱いと安全余裕は[論文レシピ](PAPER_RECIPES.md)を参照してください。
+
 - `TRAIN_MAX_WORKERS=8`: 読込み並列数の上限。TT2/vocoderはCPU負荷・空きRAM・測定速度で約10秒ごとに調整。S2UTはfairseqのepoch境界でのみ調整します。0は逐次読込みです。
 - `TRAIN_CACHE_GB=8`: 旧方式のローカルLRUキャッシュ上限。新しいDrive安全モードでは必要な音声とMel ZIPを先に全てローカルへ取り込むため、全データを8GiBに制限する設定ではありません。ローカル容量不足時は学習開始前に停止し、Driveへの読込みに黙って戻りません。
-- `TRAIN_SAVE_INTERVAL=50`: optimizer更新単位の保存間隔。最終更新・時間予算到達時にも保存します。ローカル固定コピーは同期、その後のDriveコピー・SHA-256検証は別スレッドで1件ずつ実行。未確認コピーは最大2件で、遅いDriveには待ち合わせます。
+- `TRAIN_SAVE_INTERVAL=1`: 通常用のoptimizer更新単位の保存間隔。最終更新・時間予算到達時にも保存します。ローカル固定コピーは同期、その後のDriveコピー・SHA-256検証は別スレッドで1件ずつ実行。未確認コピーは最大2件で、遅いDriveには待ち合わせます。
 - `TRAIN_BACKUP_MIN_SECONDS=600`: 常駐学習でDriveへ転送する最短間隔。ローカルの50更新ごとの保存は維持し、最初・最終・時間予算到達時の保存は間隔によらず転送します。強制切断では前の`durable_updates`から再開し、未確認更新を再実行します。
 - `TRAIN_BACKUP_MAX_GB=20`: そのrunのDriveバックアップ総容量上限。旧snapshot・未完コピーも数えます。上限到達時は既存復旧点を削除せず停止します。必要なDrive空き容量を確認したうえで明示的に増やしてください。
 - `TRAIN_ADAPTIVE_BATCH=False`: ONはTT2/S2UT限定。論理バッチ・サンプル順・更新回数を維持して分割を調整します。ただしTT2のBatchNorm統計やdropoutは変わるため、同一学習結果は保証しません。別の実験条件です。vocoderは2 optimizerを一組として扱い、分割・OOM再試行はしません。
@@ -196,7 +218,8 @@ APIの `make_config` は互換性のため `optimize=False` が既定です。
 
 自動分割ON時だけ、optimizer更新前のCUDA OOMを捕捉して勾配・RNG・モデルbufferを戻し、
 同じサンプルを小さい分割で再試行します。1件でもOOM、optimizer中のOOM、device assertは停止します。
-校正は短い試行後に固定し、以後のOOMでは縮小します。GPUが変わると分割校正をやり直します。
+この旧オンライン適応は`paper_practical`でのみ選択でき、開始前測定とは併用しません。
+開始前測定をOFFにして明示的に選択した場合、校正は短い試行後に固定し、以後のOOMでは縮小します。GPUが変わると分割校正をやり直します。
 これは最大速度を保証する探索ではありません。GANのOOMは保存済みcheckpointから復旧してください。
 
 `[training-performance]` は処理時間の累計、frames/units等の速度、CPU・RAM・VRAMを表示します。

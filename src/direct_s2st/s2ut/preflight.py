@@ -23,7 +23,21 @@ def validate_training(root: Path, command: list[str]) -> dict:
         if value is not None:
             setattr(args, key, int(value))
     ARCH_CONFIG_REGISTRY[architecture](args)
+    if architecture == 's2ut_transformer_fisher':
+        fields = ('encoder_layers', 'encoder_embed_dim', 'encoder_ffn_embed_dim', 'encoder_attention_heads',
+                  'decoder_layers', 'decoder_embed_dim', 'decoder_ffn_embed_dim', 'decoder_attention_heads')
+        expected = (12, 256, 2048, 4, 6, 256, 2048, 8)
+        for key, value in zip(fields, expected):
+            override = option('--' + key.replace('_', '-'))
+            if getattr(args, key) != value or (override is not None and int(override) != value):
+                raise ValueError('Fisher architecture dimension mismatch: ' + key)
+        result['model_dimensions'] = dict(zip(fields, expected))
     config = yaml.safe_load((root / "config_multitask.yaml").read_text(encoding="utf-8"))
+    if architecture == 's2ut_transformer_fisher':
+        from .multitask import load_settings
+        for task, expected_task in load_settings().items():
+            if any(config[task].get(key) != value for key, value in expected_task.items()):
+                raise ValueError('Fisher auxiliary task/loss configuration mismatch: ' + task)
     for task, cfg in config.items():
         side = "decoder" if "decoder_layer" in cfg else "encoder"
         if not 1 <= cfg[f"{side}_layer"] <= getattr(args, f"{side}_layers"):

@@ -31,6 +31,15 @@ RNG/buffer/勾配を戻して同一サンプルを縮小再試行できる。opt
 device-side assertは再試行しない。分割はBatchNorm等の統計を変えるため既定OFFであり、
 混合精度と同様に実験設定へ記録する。GANの2 optimizer更新は分割しない。
 
+通常Colabの全学習targetは、別プロセスの開始前VRAM測定を共通に使用する。
+測定はtrainのみ、試行weights/optimizerを本学習へ持ち込まず、update 0から新規開始する。
+TT2は実効batch1024を維持して物理batchを選び、GANは実batchを選ぶ。
+S2UT paper_exactは論文Table 4のGPUごとの20k予算と公式1GPU蓄積4回を固定し、
+VRAM収容確認だけ行う。追加分割・拡大はせず、不足時は停止する。
+S2UTの物理分割選定はpaper_practicalだけに限定し、公式バッチとの差異を記録する。
+試行記録は候補ごとに保存し、選定後の本学習・再開では固定する。GPU変更時は同じ
+選定値の安全性だけ検査し、勝手に再選定しない。数値的同一性は保証しない。
+
 標準の前処理、学習、推論、評価はDocker Compose経由で実行する。`common`、
 `fairseq`、`cascade`、`evaluation`を分離し、GPU処理には明示的なdevice reservationを
 設定する。`full`学習はDocker実行マーカーと実際のimage digestがない場合は拒否する。
@@ -74,14 +83,17 @@ decoder_target_ctc (decoder_layer=3, weight=1.6)を必須にする。
 layer番号はfairseq SingleTaskConfigの1-based設定規約をそのまま使用する。
 decoder CTCの内部state indexingも固定fairseqの挙動に従う。
 
-`unicode-codepoint-v1` は日本語・英語とも1 codepoint/labelで、subword化しない。
+source/target letter CEの`unicode-codepoint-v1` は日本語・英語とも1 codepoint/label。
+decoder CTCはtrain英語文だけで学習したSentencePiece Unigram要求語彙1000とし、
+モデルSHA・版・train文hash・実語彙数を保存する。letterとCTCのbyte一致を要求せず、
+同じ文から再符号化したCTC piece列の一致を検証する。旧CTC文字ラベルを黙って使用しない。
 ASCII whitespaceのみ畳み、NFKC・case foldingを行わない。受理文字判定は固定コードポイント
 集合を使用する。辞書頻度はtrainからだけ数え、dev/test未知文字をerrorとする。
 TTS投入textと正解textのtoken列が異なる場合はレビューを要求し、音声の再生成は行わない。
 これはtext同士の一致検証であり、実音声の発話内容を保証する強制alignmentではない。
 
-Fisherとの相違は日英文字ラベル・大小文字/句読点保持、既存base architectureの512次元を
-維持していること。Fisherの256次元設定そのものの再現とは称さない。
+通常S2UTは公式Fisherの256次元を使用し、実registryのencoder12層/4heads、decoder6層/8headsを検証する。
+Fisherとの相違は日英letter補助ラベル・大小文字/句読点保持とコーパスである。
 CTCのzero_infinityはfalseとし、不可能alignmentで補助lossが黙って0になることを避ける。
 train直前にID、辞書、unit範囲、CTC最小長、runtime architectureと接続層を確認する。
 
@@ -99,6 +111,12 @@ TTSTransformerDecoderを接続した別構造である。duration predictor/obje
 既存fairseqのduration-freeモデルは使用しない。差分はdocs/TRANSLATOTRON2.mdに記録する。
 voice preservationはdisabled。speaker similarityはtarget referenceとの話者類似度であり、
 voice preservation性能とは解釈しない。
+通常Colabはpaper_exact（TT2実効batch1024、S2UT max_tokens20000/update_freq4）を既定とし、
+paper_practicalは明示選択した別runとする。既存target16kHz/80-bin Melは再利用し、
+sourceのみruntimeで16kHz/80-bin/125–7600Hzへ適応する。旧checkpointへ新条件を上書きしない。
+BLEU用TT2はGriffin-Lim、代替HiFi-GANは別比較ID。WaveRNN/MOSは未実装。
+公式S2UT Code HiFi-GANはSHA固定で取得しduration predictionを必須とする。
+論文との差異・unknown値・実特徴設定・optimizer・Unit artifactはresearch metadataに記録する。
 2026-09-13にユーザーが「本体の実装を先に進める」と明示したため、
 実装順序のみ変更し、S2UT実E2Eに先行してTT2 coreを実装・CPU検証する。
 実データE2Eの完了条件自体は免除しない。

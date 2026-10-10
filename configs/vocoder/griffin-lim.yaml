@@ -1,0 +1,19 @@
+backend: griffin_lim
+run_id: translatotron2-paper
+# Algorithm matches the paper's BLEU vocoder family; phase/iterations were not
+# published. These explicit choices are not claimed to be Google's exact code.
+infer:
+  command:
+    - python
+    - -m
+    - direct_s2st.vocoders.griffin_lim
+    - --input
+    - "{run_root}/predictions/mels.jsonl"
+    - --output-root
+    - "{output_root}"
+    - --mel-spec
+    - "{experiment_data_root}/translatotron2/fairseq/mel-spec.json"
+    - --iterations
+    - "32"
+    - --seed
+    - "1"

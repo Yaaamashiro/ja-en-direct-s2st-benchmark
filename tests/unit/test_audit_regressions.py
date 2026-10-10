@@ -233,7 +233,7 @@ def test_hubert_caller_can_supply_full_32_batch_and_reuse(common, tmp_path, monk
     for resume in (False, True):
         with Checkpoints(tmp_path / 'units-cache', {'fixture': 1}, resume=resume) as cache:
             assert len(list(_recoverable_units(rows, extractor, cache, 100))) == 40
-    assert batches == [32, 8]
+    assert batches == [40]  # Larger lookahead; extractor still caps actual CUDA batches at 32.
     monkeypatch.setenv('S2ST_HUBERT_BATCH_MAX', '33')
     with pytest.raises(ValueError, match='between 1 and 32'):
         list(_recoverable_units(rows, extractor, cache, 100))

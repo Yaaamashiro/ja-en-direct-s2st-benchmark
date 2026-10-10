@@ -25,10 +25,24 @@ from .io import atomic_write_json
 @operation('direct_s2st/colab: make_config')
 def make_config(repository, data, environment_lock, kind='tt2', model_size='smoke', *,
                 performance='smoke', batch_size=None, num_workers=None, prefetch_factor=2,
-                max_tokens=None, update_freq=1, save_interval=None, optimize=False,
-                cache_gb=8, adaptive_batch=False, precision='default'):
+                max_tokens=None, update_freq=None, save_interval=None, optimize=False,
+                cache_gb=8, adaptive_batch=False, precision='default',
+                calibrate_batch=False, calibration_max_batch=1024, calibration_steps=3,
+                calibration_reserve_ratio=.1, calibration_trial_seconds=1800, calibration_objective='throughput',
+                reproduction_mode=None, tt2_vocoder_mode='griffin_lim', s2ut_vocoder_mode='trained'):
     """Explicit throughput knobs; gpu80 is a starting point, not a VRAM guarantee."""
     from .config import load_config
+    from .recipes import (MODES, TT2_VOCODERS, S2UT_VOCODERS, replace_option,
+                          tt2_batch, training_metadata, prepared_metadata, tt2_source_spec,
+                          validate_s2ut_paper)
+    reproduction_mode = reproduction_mode or ('smoke' if model_size == 'smoke' else 'paper_exact')
+    if reproduction_mode not in MODES or tt2_vocoder_mode not in TT2_VOCODERS or s2ut_vocoder_mode not in S2UT_VOCODERS:
+        raise ValueError('invalid reproduction/vocoder mode')
+    paper = reproduction_mode != 'smoke' and kind in ('tt2', 's2ut')
+    if paper and reproduction_mode == 'paper_exact' and (adaptive_batch or precision != 'default'):
+        raise ValueError('paper_exact does not silently change batch statistics/precision; use paper_practical')
+    if paper and kind == 'tt2':
+        model_size = 'fisher'
     if performance not in ('smoke', 'gpu80'):
         raise ValueError('unknown performance preset')
     large = performance == 'gpu80'
@@ -38,10 +52,24 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
         raise ValueError('batch/precision tuning requires optimize=True')
     if kind in ('unit', 'mel') and adaptive_batch:
         raise ValueError('GAN batch adaptation is unsupported; keep its two-optimizer update fixed')
+    if calibrate_batch:
+        if calibration_objective not in ('throughput', 'capacity'):
+            raise ValueError('invalid calibration objective')
+        if not optimize or adaptive_batch:
+            raise ValueError('startup calibration requires optimize=True and online adaptive_batch=False')
+        if (not isinstance(calibration_max_batch, int) or not 1 <= calibration_max_batch <= 1024
+                or not isinstance(calibration_steps, int) or calibration_steps < 3
+                or not math.isfinite(calibration_reserve_ratio) or not .05 <= calibration_reserve_ratio < .5
+                or not math.isfinite(calibration_trial_seconds) or calibration_trial_seconds <= 0):
+            raise ValueError('invalid startup VRAM calibration settings')
     batch_size = batch_size if batch_size is not None else ((16 if kind in ('unit', 'mel') else 8) if large else 1)
     num_workers = num_workers if num_workers is not None else (4 if large else 0)
-    max_tokens = max_tokens if max_tokens is not None else (20000 if large else 2000)
-    save_interval = save_interval if save_interval is not None else (50 if large else 1)
+    max_tokens = max_tokens if max_tokens is not None else (20000 if large or (paper and kind == 's2ut') else 2000)
+    if kind == 'tt2':
+        update_freq = tt2_batch(reproduction_mode, batch_size, update_freq)
+    elif update_freq is None:
+        update_freq = 4 if paper and kind == 's2ut' else 1
+    save_interval = save_interval if save_interval is not None else (1 if paper and kind == 'tt2' else 50 if large else 1)
     if min(batch_size, prefetch_factor, max_tokens, update_freq, save_interval) < 1 or num_workers < 0:
         raise ValueError('invalid throughput options')
     if kind in ('unit', 'mel') and update_freq != 1:
@@ -54,15 +82,28 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
             '--model-size', model_size, '--batch-size', str(batch_size), '--max-updates', '{updates}',
             '--save-interval-updates', str(save_interval), '--num-workers', str(num_workers),
             '--prefetch-factor', str(prefetch_factor), '--update-freq', str(update_freq)]
+        if paper:
+            cfg = load_config(repository / 'configs/translatotron2/train-fisher.yaml')
+            command = [part.format(data_root=str(root), run_root='{run_root}', max_updates='{updates}',
+                                   save_interval_updates=str(save_interval), seed='1')
+                       for part in cfg['training']['command']]
+            command[0] = '{python}'
+            for name, value in [('--batch-size', batch_size), ('--update-freq', update_freq),
+                                ('--num-workers', num_workers), ('--prefetch-factor', prefetch_factor),
+                                ('--reproduction-mode', reproduction_mode), ('--vocoder-mode', tt2_vocoder_mode)]:
+                replace_option(command, name, value)
         checkpoint = 'checkpoints/checkpoint_last.pt'
     elif kind == 's2ut':
-        root = data / 's2ut/fairseq'
+        from .s2ut.migrate_labels import paper_data_root
+        root = paper_data_root(data)
         cfg = load_config(repository / 'configs/s2ut/train.yaml')
         command = cfg['training']['command'][:]
         values = dict(data_root=str(root), run_root='{run_root}', max_updates='{updates}',
                       save_interval_updates=str(save_interval), seed='1')
         command = [part.format(**values) for part in command]
         command[0] = '{python}'
+        replace_option(command, '--reproduction-mode', reproduction_mode)
+        replace_option(command, '--vocoder-mode', s2ut_vocoder_mode)
         command[command.index('--max-tokens')+1] = str(max_tokens)
         command[command.index('--num-workers')+1] = str(num_workers)
         command[command.index('--update-freq')+1] = str(update_freq)
@@ -70,6 +111,8 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
             command.remove('--fp16')
             if precision == 'bf16':
                 command.append('--bf16')
+        if paper:
+            validate_s2ut_paper(command, exact=reproduction_mode == 'paper_exact')
         from .s2ut.preflight import validate_training
         validate_training(root, command)
         checkpoint = 'checkpoints/checkpoint_last.pt'
@@ -101,9 +144,37 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
     result = dict(kind='vocoder' if kind in ('unit', 'mel') else kind, command=command,
         checkpoint=checkpoint, identity_files=identity_files,
         resume_args=['--resume'] if kind in ('unit', 'mel') else ['--restore-file', '{checkpoint}'])
+    if paper:
+        metadata = training_metadata(command, kind, reproduction_mode,
+                                     tt2_vocoder_mode if kind == 'tt2' else s2ut_vocoder_mode)
+        metadata.update(prepared_metadata(root))
+        if precision != 'default':
+            metadata['precision'] = precision
+        metadata['repository_revision'] = json.loads(Path(environment_lock).read_text(encoding='utf-8')).get('repository', 'unknown')
+        if kind == 'tt2':
+            metadata['source_feature_config'] = tt2_source_spec(repository)
+            target = metadata['target_feature_config']
+            if target['sample_rate'] != 16000 or target['n_mels'] != 80:
+                raise ValueError('this selected corpus adaptation requires the retained 16-kHz/80-bin target Mel')
+            metadata['phonemizer'] = load_config(repository / 'configs/translatotron2/prepare.yaml')['phonemizer']
+        else:
+            units = load_config(repository / 'configs/s2ut/prepare.yaml')
+            unit_path = data / 's2ut/units/unit-lock.json'
+            actual = json.loads(unit_path.read_text(encoding='utf-8'))
+            expected = dict(hubert_revision=units['hubert']['revision'], kmeans_sha256=units['kmeans']['sha256'],
+                            hubert_layer=units['hubert_layer'], kmeans_clusters=units['kmeans_clusters'])
+            if any(actual.get(k) != v for k, v in expected.items()) or metadata['dataset_fingerprint']['unit_configuration'] != actual:
+                raise ValueError('prepared S2UT units differ from the pinned paper artifacts')
+            metadata.update(**expected, reduce_consecutive_units=True, unit_artifacts=actual)
+            identity_files.append(str(unit_path))
+        result['research_metadata'] = metadata
     if optimize:
         result['runtime'] = dict(cache_gb=cache_gb, readers=max(1, num_workers) if kind == 's2ut' else 1,
                                  adaptive_batch=adaptive_batch, precision=precision)
+    if calibrate_batch:
+        result['batch_calibration'] = dict(max_batch=calibration_max_batch, steps=calibration_steps,
+            reserve_ratio=calibration_reserve_ratio, trial_seconds=calibration_trial_seconds,
+            objective=calibration_objective)
     return result
 
 
@@ -320,6 +391,9 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
         raise ValueError('outputs must be outside CORPUS_ROOT')
     if config['kind'] not in ('tt2', 's2ut', 'vocoder'):
         raise ValueError('unknown trainer kind')
+    if config['kind'] == 's2ut':
+        from .batch_calibration import s2ut_exact
+        s2ut_exact(config)  # Reject hand-edited exact configs before staging/restore.
     if os.environ.get('S2ST_DRIVE_SAFE') == '1' and not _staged:
         from .drive_staging import active_map
         rows, local = stage_training(config, work)
@@ -334,7 +408,19 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
         raise ValueError('command must be an argument list with {updates}')
     if not config.get('identity_files'):
         raise ValueError('identity_files must include data lock and environment lock')
-    identity = dict(config=config, work=str(work), inputs={p: sha256_file(Path(p)) for p in config['identity_files']})
+    inputs = {p: sha256_file(Path(p)) for p in config['identity_files']}
+    if config.get('batch_calibration'):
+        from .batch_calibration import calibrate
+        record_path = backup / 'batch-calibration.json'
+        # Refuse to introduce tuning into already trained/legacy runs. A saved
+        # selection is required to bind optimizer snapshots to the same batch.
+        if not record_path.is_file() and (checkpoint.exists() or any(backup.glob('*/snapshot.json'))):
+            raise ValueError('existing training lacks calibration; use a new run name')
+        saved_selection = (json.loads(record_path.read_text(encoding='utf-8')).get('selected')
+                           if record_path.is_file() else None)
+        config = calibrate(config, inputs, record_path, work.parent,
+                           inspect_only=restore_only or saved_selection is not None)
+    identity = dict(config=config, work=str(work), inputs=inputs)
     previous = latest(backup, identity)
     if auto_resume:
         if resume or restore_only:
@@ -362,10 +448,30 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
         completed = inspect_checkpoint(checkpoint, config['kind'])
         if completed != previous[1]['updates']:
             raise ValueError('snapshot update count mismatch')
+    if config.get('research_metadata') and not restore_only and completed < total:
+        work.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(work / 'session-research-metadata.json',
+                          dict(config['research_metadata'], max_updates=total, completed_updates=completed),
+                          resume=True, overwrite=bool(previous))
     if restore_only:
         return dict(status='RESTORED', durable_updates=completed)
     if completed >= total:
         return dict(status='COMPLETE', durable_updates=completed)
+    if config.get('batch_calibration'):
+        # Validate a changed GPU only when actual training will continue.
+        # The request is the original config, not its selected derivative.
+        record = json.loads((backup / 'batch-calibration.json').read_text(encoding='utf-8'))
+        from .batch_calibration import hardware, safe, trial
+        hw = hardware()
+        if hw not in record['verified_hardware']:
+            result = trial(config, record['selected'], work.parent)
+            if not safe(result, config['batch_calibration']['reserve_ratio']):
+                raise ValueError('saved batch is unsafe on this GPU; use previous GPU or a new run name')
+            record['verified_hardware'].append(hw)
+            record['hardware_checks'].append(dict(hardware=hw, batch=record['selected'], result=result))
+            atomic_write_json(backup / 'batch-calibration.json', record, overwrite=True)
+        work.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(work / 'batch-calibration.json', record, overwrite=True)
     if config.get('runtime'):
         from .session_runtime import run_continuous
         return run_continuous(config, work=work, backup=backup, identity=identity,

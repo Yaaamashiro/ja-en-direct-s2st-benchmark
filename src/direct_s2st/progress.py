@@ -56,6 +56,8 @@ class Progress:
         self.thread.join()
         _active.reset(self.token)
         status = 'completed' if kind is None else 'interrupted' if issubclass(kind, (KeyboardInterrupt, GeneratorExit)) else 'failed'
+        if error is not None and getattr(error, 'progress_status', None) == 'completed':
+            status = 'completed'  # Disposable calibration reached its step limit.
         self.emit(status)
         return False
 

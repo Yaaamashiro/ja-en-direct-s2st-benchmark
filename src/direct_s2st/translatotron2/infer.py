@@ -50,6 +50,9 @@ def main():
         if state['data_fingerprint'].get('source-mel-spec.json') != sha256_file(source_spec_path):
             raise ValueError('checkpoint source mel specification mismatch')
         source_spec = json.loads(source_spec_path.read_text(encoding='utf-8'))
+    # Paper-aligned source frontend is bound to training, while legacy target
+    # ZIPs/spec remain untouched. Never switch back to the legacy source filter.
+    source_spec = state['data_fingerprint'].get('training', {}).get('source_feature_config', source_spec)
     prepared = read_table(args.data_root / f'{args.split}.tsv')
     common = list(read_common_manifest(args.common_root / f'{args.split}.jsonl'))
     if {r['id'] for r in prepared} != {r['pair_id'] for r in common} or len(common) != len(prepared):
@@ -62,7 +65,7 @@ def main():
                     common=sha256_file(args.common_root / f'{args.split}.jsonl'),
                     source={r['pair_id']: sha256_file(Path(r['ja_audio'])) for r in common},
                     max_phones=args.max_phones, max_frames=args.max_frames, split=args.split,
-                    beam_size=args.beam_size, length_penalty=args.length_penalty)
+                    beam_size=args.beam_size, length_penalty=args.length_penalty, source_feature_config=source_spec)
     journal = Journal(args.predictions, identity, resume=args.resume, overwrite=args.overwrite)
     feature_root.mkdir(parents=True, exist_ok=True)
     for index, row in enumerate(track(common, 'tt2: inference (generate/reuse)')):

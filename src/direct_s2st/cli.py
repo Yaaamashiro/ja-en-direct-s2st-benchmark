@@ -143,7 +143,8 @@ def _run_s2ut(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
     units = roots.experiment_data / "s2ut" / "units"
     if args.action == "validate":
         from .s2ut.multitask import validate_prepared
-        return validate_prepared(roots.experiment_data / "s2ut" / "fairseq", clusters=int(config.get("kmeans_clusters", 100)))
+        from .s2ut.migrate_labels import paper_data_root
+        return validate_prepared(paper_data_root(roots.experiment_data), clusters=int(config.get("kmeans_clusters", 100)))
     if args.action == "fetch-artifacts":
         values = config["kmeans"]
         destination = roots.cache / str(values["path"])
@@ -196,6 +197,13 @@ def _run_s2ut(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
         output = roots.experiment_data / "s2ut" / "fairseq"
         if args.dry_run:
             return {"common_root": str(common), "units_root": str(units), "output_root": str(output)}
+        if args.resume and not args.overwrite and (output/'data-lock.json').is_file():
+            from .s2ut.ctc_tokenizer import VERSION
+            prior = json.loads((output/'data-lock.json').read_text(encoding='utf-8'))
+            if prior.get('linguistic', {}).get('ctc_version') != VERSION:
+                from .s2ut.migrate_labels import migrate
+                migrated = migrate(common, output)
+                return json.loads((migrated/'data-lock.json').read_text(encoding='utf-8'))
         return prepare_fairseq(
             common,
             units,
@@ -278,6 +286,9 @@ def _run_direct_model(
 
     repository = Path(os.environ.get("S2ST_CONFIG_ROOT", str(Path(__file__).resolve().parents[2] / "configs"))).resolve().parent
     data_root = roots.experiment_data / system / "fairseq"
+    if system == 's2ut':
+        from .s2ut.migrate_labels import paper_data_root
+        data_root = paper_data_root(roots.experiment_data)
     variant = str(config.get("variant", "default"))
     seed = int(config.get("seed", 1))
     run_id = str(config.get("run_id", make_run_id(system, variant, seed)))

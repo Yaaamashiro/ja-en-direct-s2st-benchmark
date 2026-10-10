@@ -3,8 +3,9 @@ implementation_status: independent_reference_recipe
 voice_preservation: disabled
 seed: 1
 # Shape/optimizer reference, not a claim of dataset or numerical reproduction.
-# Smoke remains bounded; choose update-freq explicitly for the paper global batch.
+# Exact refers to the effective batch, not dataset/G2P/frontend equivalence.
 reference_global_batch: 1024
+recommended_total_updates: null  # Not specified in Appendix A; researcher must choose.
 training:
   max_updates: 2
   save_interval_updates: 1
@@ -26,6 +27,10 @@ training:
     - cuda
     - --model-size
     - fisher
+    - --reproduction-mode
+    - paper_exact
+    - --vocoder-mode
+    - griffin_lim
     - --learning-rate
     - "0.0042"
     - --warmup-updates
@@ -35,6 +40,6 @@ training:
     - --batch-size
     - "1"
     - --update-freq
-    - "1"
+    - "1024"
     - --validate-interval
     - "1"
