@@ -60,6 +60,36 @@ run(PYTHON, '-m', 'direct_s2st.preparation_workflow',
 更新前のS2UT学習checkpointは、変更した語彙のモデルへ継続学習しません。
 学習へ進む前に最新ノートブックのセル1を同じ設定で実行し、S2UT recipe-v3のrun名を使用してください。
 
+### 4Bの検証でsample ID alignment failureが出た場合
+
+旧検証コードには、補助ラベル先頭の引用符`"`をCSVの囲み文字として解釈し、
+後続サンプルを同じ行に取り込む不具合がありました。fairseqと同じQUOTE_NONEへ修正しています。
+生成済みTSVを書き換える修正ではなく、読み取り側の修正です。
+実際のID不一致は引き続き拒否し、全splitのID確認を音声の存在確認より先に行います。
+エラーには欠落・余分なIDの件数、例、読み取りファイルを表示します。
+
+今回のように生成後の検証で停止し、preparedのdata-lock.jsonが保存されている場合は、
+明示的にコードrevisionを更新した後、保存済みTSVだけを検証して読み取り不具合の解消を確認できます。
+次は読み取り専用です。音声の存在確認は省略し、ID・辞書・Unit列・CTC整合性を確認します。
+学習前のpreflightでは通常の音声確認も実行します。未知文字エラーで生成前に止まった場合の代替ではありません。
+
+```python
+ensure_runtime(require_gpu=False)
+run(PYTHON, '-c', '''
+import json, sys
+from pathlib import Path
+from direct_s2st.s2ut.migrate_labels import paper_data_root
+from direct_s2st.s2ut.multitask import validate_prepared
+root = paper_data_root(Path(sys.argv[1]))
+assert (root / 'data-lock.json').is_file(), 'prepared data-lockがありません。4b-finishを再開してください'
+print(json.dumps(validate_prepared(root, check_audio=False), ensure_ascii=False))
+''', DATA)
+```
+
+検証成功後はセル5へ進めます（4A・HuBERT抽出・補助ラベルを再生成しません）。
+4B工程の完了receiptも残す場合は、通常の4b-finishを再実行してください。
+新コードでもID不一致が出る場合は、表示されたmissing/extra/pathを確認し、検証を無効化して学習しないでください。
+
 smoke用は5件・2更新に固定され、通常用は件数制限を設けません。
 通常用のPROFILE=pilotはCLI設定選択用であり、コーパスを10時間に切り詰めるものではありません。
 前処理ではS2UTの補助ラベルやTT2の音素・melも生成します。
