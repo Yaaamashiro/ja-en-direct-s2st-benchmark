@@ -9,7 +9,7 @@ from direct_s2st.cli import main
 from direct_s2st.config import RootPaths
 from direct_s2st.manifests.paths import resolve_audio_path
 from direct_s2st.manifests.reader import read_common_manifest
-from direct_s2st.s2ut.multitask import prepare_labels, tokenize, validate_prepared
+from direct_s2st.s2ut.multitask import prepare_labels, read_tsv, tokenize, validate_prepared
 from direct_s2st.s2ut.fairseq_infer import parse_generated
 from direct_s2st.s2ut.prepare_fairseq import prepare_fairseq
 from direct_s2st.s2ut.extract_units import extract_units
@@ -101,6 +101,48 @@ def test_all_multitask_ids_align_and_reference_weights_are_explicit(tmp_path):
     assert cfg["target_letter"]["encoder_layer"] == 8
     assert cfg["decoder_target_ctc"]["decoder_layer"] == 3
     assert [cfg[name]["loss_weight"] for name in ("source_letter", "target_letter", "decoder_target_ctc")] == [8.0, 8.0, 1.6]
+
+
+def test_literal_tsv_quotes_never_swallow_rows_or_change_labels(tmp_path):
+    path = tmp_path/'labels.tsv'
+    path.write_text('id\ttgt_text\nfirst\t" 日\nsecond\t本 " 語\nthird\t" "\n', encoding='utf-8')
+    rows = read_tsv(path, ('id', 'tgt_text'))
+    assert list(rows) == ['first', 'second', 'third']
+    assert rows['first']['tgt_text'] == '" 日'
+    assert rows['second']['tgt_text'] == '本 " 語'
+    assert rows['third']['tgt_text'] == '" "'
+
+
+def test_real_prepare_preserves_quoted_transcripts_and_reuses_outputs(tmp_path):
+    common, units, target = tmp_path/'common', tmp_path/'units', tmp_path/'prepared'
+    _common(common)
+    for split in ('train', 'dev', 'test'):
+        row = json.loads((common/f'{split}.jsonl').read_text(encoding='utf-8'))
+        row.update(ja_text='"日本語', ja_tts_text='"日本語',
+                   en_text='"English', en_tts_text='"English')
+        second = dict(row, pair_id=row['pair_id']+'-second', ja_text='日本語"', ja_tts_text='日本語"',
+                      en_text='English"', en_tts_text='English"')
+        (common/f'{split}.jsonl').write_text(json.dumps(row)+'\n'+json.dumps(second)+'\n', encoding='utf-8')
+    extract_units(common, units, extractor=lambda _: [1, 2, 3], split=None, clusters=100,
+                  hubert_model='fixture', hubert_revision='a'*40, hubert_layer=6, kmeans_sha256='b'*64)
+    prepare_fairseq(common, units, target)
+    before = {p: p.read_bytes() for folder in (target, units) for p in folder.rglob('*') if p.is_file()}
+    assert validate_prepared(target)['splits'] == dict(train=2, dev=2, test=2)
+    prepare_fairseq(common, units, target, resume=True)
+    assert all(p.read_bytes() == contents for p, contents in before.items())
+
+
+def test_alignment_failure_in_test_is_reported_before_any_audio_probe(tmp_path, monkeypatch):
+    target = prepared(tmp_path)
+    (target/'source_letter/test.tsv').write_text('id\ttgt_text\nwrong-id\t日\n', encoding='utf-8')
+    original = Path.is_file
+    def is_file(path):
+        if path.suffix == '.wav':
+            pytest.fail('must detect alignment before any audio check')
+        return original(path)
+    monkeypatch.setattr(Path, 'is_file', is_file)
+    with pytest.raises(ValueError, match=r'main=1 auxiliary=1 missing=1.*extra=1'):
+        validate_prepared(target)
 
 
 @pytest.mark.parametrize("task", ["source_letter", "target_letter", "decoder_target_ctc"])

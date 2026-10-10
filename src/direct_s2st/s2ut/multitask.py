@@ -123,11 +123,14 @@ def prepare_labels(rows_by_split: dict, output_root: Path, *, settings: dict | N
 
 def read_tsv(path: Path, columns: tuple[str, ...]) -> dict[str, dict]:
     with path.open(encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
+        # These are literal fairseq TSVs, not CSV-quoted fields. A transcript
+        # starting with an unmatched quote must not swallow subsequent rows.
+        reader = csv.DictReader(handle, delimiter="\t", quotechar=None,
+                                doublequote=False, quoting=csv.QUOTE_NONE)
         if tuple(reader.fieldnames or ()) != columns:
             raise ValueError(f"invalid TSV header: {path}")
         rows = {}
-        for row in reader:
+        for row in track(reader, f's2ut: read {path.parent.name}/{path.name}'):
             pair_id = row["id"]
             if not pair_id or pair_id in rows or None in row or any(v is None for v in row.values()):
                 raise ValueError(f"invalid or duplicate sample ID: {path}: {pair_id}")
@@ -145,22 +148,37 @@ def validate_prepared(root: Path, *, clusters: int = 100, check_audio: bool = Tr
         validate_task_config(name, settings)
     from .ctc_tokenizer import load, encode_labels
     processor, tokenizer_lock = load(root)
+    from ..drive_staging import local_path
     seen, counts = set(), {}
+    aligned = {}
+    # Validate all IDs before doing expensive per-WAV Drive metadata access.
     for split in ("train", "dev", "test"):
         main = read_tsv(root / f"{split}.tsv", ("id", "src_audio", "src_n_frames", "tgt_audio", "tgt_n_frames"))
         if not main or seen.intersection(main):
             raise ValueError(f"empty split or duplicate pair IDs across splits: {split}")
         seen.update(main)
+        targets = {}
+        for task in TASKS:
+            task_path = Path(cfg[task]['data']) / f'{split}.tsv'
+            aux = read_tsv(task_path, ('id', 'tgt_text'))
+            if main.keys() != aux.keys():
+                missing, extra = main.keys() - aux.keys(), aux.keys() - main.keys()
+                raise ValueError(f'sample ID alignment failure: {split}/{task}; '
+                                 f'main={len(main)} auxiliary={len(aux)} '
+                                 f'missing={len(missing)} examples={sorted(missing)[:3]} '
+                                 f'extra={len(extra)} examples={sorted(extra)[:3]} path={task_path}')
+            targets[task] = aux
+        aligned[split] = main, targets
+    for split, (main, targets) in aligned.items():
         for row in track(main.values(), f's2ut: validate {split}'):
             units = [int(x) for x in row["tgt_audio"].split()]
             validate_units(units, clusters=clusters)
             if len(units) != int(row["tgt_n_frames"]) or int(row["src_n_frames"]) <= 0:
                 raise ValueError(f"invalid frame counts: {row['id']}")
-            if check_audio and not Path(row["src_audio"]).is_file():
+            if check_audio and not local_path(row["src_audio"]).is_file():
                 raise FileNotFoundError(row["src_audio"])
-        targets = {}
         for task in TASKS:
-            task_root, dictionary = Path(cfg[task]["data"]), Path(cfg[task]["dict"])
+            dictionary = Path(cfg[task]["dict"])
             vocabulary = set()
             for line in dictionary.read_text(encoding="utf-8").splitlines():
                 token, count = line.rsplit(" ", 1)
@@ -170,12 +188,9 @@ def validate_prepared(root: Path, *, clusters: int = 100, check_audio: bool = Tr
             if task == 'decoder_target_ctc' and vocabulary != {
                     processor.id_to_piece(i) for i in range(1, processor.get_piece_size())}:
                 raise ValueError('CTC dictionary differs from the trained Unigram model')
-            aux = read_tsv(task_root / f"{split}.tsv", ("id", "tgt_text"))
+            aux = targets[task]
             if task == 'decoder_target_ctc':
                 vocabulary.add('<unk>')
-            targets[task] = aux
-            if main.keys() != aux.keys():
-                raise ValueError(f"sample ID alignment failure: {split}/{task}")
             for pair_id, row in aux.items():
                 tokens = row["tgt_text"].split()
                 if not tokens or set(tokens) - vocabulary:
