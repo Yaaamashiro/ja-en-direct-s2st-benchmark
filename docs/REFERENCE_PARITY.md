@@ -22,7 +22,9 @@ Fisher, CoVoST2 and conversational presets are available. Their peak learning
 rates are 0.0042, 0.0022 and 0.0033; warmups are 10000, 20000 and 10000 updates.
 Recipe Adam uses coupled L2 regularization of 1e-6. The reference global batch
 sizes are 1024, 768 and 768. Checked-in commands deliberately remain bounded at
-two updates with small batches; they do not implicitly launch paper-scale work.
+two updates; they do not implicitly launch long training. Fisher uses effective
+batch 1024 by gradient accumulation in paper_exact; paper_practical is explicitly
+separate. Colab's selected 16-kHz adaptation is described in [PAPER_RECIPES.md](PAPER_RECIPES.md).
 
 Effective batch size = world size × per-rank batch size × update frequency.
 Loss accumulation uses global valid frame/phone/utterance counts. Batch
@@ -52,7 +54,7 @@ python scripts/smoke/suite.py --env-file .env --name paper-smoke --tt2-recipe fi
 torchrun --standalone --nproc-per-node=2 -m direct_s2st.translatotron2.train \
   --data-root /benchmark/translatotron2/fairseq --run-root /runs/tt2-distributed \
   --model-size fisher --device cuda --max-updates 2 --batch-size 1 \
-  --update-freq 2 --learning-rate 0.0042 --warmup-updates 10000 \
+  --reproduction-mode paper_practical --update-freq 2 --learning-rate 0.0042 --warmup-updates 10000 \
   --l2-regularization 0.000001 --validate-interval 1
 ```
 

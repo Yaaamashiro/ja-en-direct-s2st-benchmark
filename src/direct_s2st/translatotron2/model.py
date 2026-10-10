@@ -189,8 +189,10 @@ class Translatotron2(nn.Module):
                 for axis, size, maximum, count in ((0, length, max(1, length//20), self.config.specaugment_time_masks),
                                                     (1, x.size(2), max(1, int(x.size(2)*0.33)), self.config.specaugment_masks)):
                     for _ in range(count):
-                        width = int(torch.randint(maximum + 1, (1,), device=x.device))
-                        start = int(torch.randint(size - width + 1, (1,), device=x.device))
+                        # Uniform integer masks, sampled using the checkpointed
+                        # CPU RNG; no device->host synchronization per mask.
+                        width = int(torch.randint(maximum + 1, (1,)))
+                        start = int(torch.randint(size - width + 1, (1,)))
                         if axis == 0:
                             x[batch_index, start:start+width] = 0
                         else:
@@ -224,9 +226,14 @@ class Translatotron2(nn.Module):
                 raise ValueError("predicted duration exceeds max_frames; not silently truncating")
         expanded, weights = gaussian_upsample(conditioning, durations, ranges, phone_lengths, frame_lengths)
         previous = conditioning.new_zeros(conditioning.size(0), self.config.mel_dim)
+        # Teacher forcing makes all previous frames known. Run the two prenet
+        # projections/dropouts together, retaining the autoregressive LSTMs.
+        teacher_inputs = (self.prenet(torch.cat([previous[:, None], target[:, :expanded.size(1)-1]], 1))
+                          if target is not None else None)
         state, frames = None, []
         for t in range(expanded.size(1)):
-            hidden, state = self.acoustic(torch.cat([expanded[:, t], self.prenet(previous)], -1), state)
+            prenet = teacher_inputs[:, t] if teacher_inputs is not None else self.prenet(previous)
+            hidden, state = self.acoustic(torch.cat([expanded[:, t], prenet], -1), state)
             frame = self.mel_projection(hidden)
             frames.append(frame)
             previous = target[:, t] if target is not None else frame

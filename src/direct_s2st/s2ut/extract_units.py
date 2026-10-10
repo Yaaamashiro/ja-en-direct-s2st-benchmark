@@ -4,7 +4,6 @@ from pathlib import Path
 import os
 import sys
 import time
-from itertools import islice
 from ..progress import operation, track
 from ..manifests.reader import read_common_manifest
 from typing import Any, Protocol
@@ -18,6 +17,14 @@ from .reduce_units import reduce_consecutive_units, validate_units
 
 class UnitExtractor(Protocol):
     def __call__(self, audio_path: Path) -> list[int]: ...
+
+
+def retain_hubert_layers(model, layer):
+    """Later encoder layers cannot affect the requested earlier hidden state."""
+    if not 1 <= layer <= len(model.encoder.layers):
+        raise ValueError('HuBERT extraction layer outside the pretrained encoder')
+    model.encoder.layers = model.encoder.layers[:layer]
+    return model
 
 
 def stable_shard(pair_id: str, num_shards: int) -> int:
@@ -57,7 +64,7 @@ class HubertKMeansExtractor:
         self.torch = torch
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.processor = AutoFeatureExtractor.from_pretrained(model_id, revision=revision)
-        self.model = HubertModel.from_pretrained(model_id, revision=revision).to(self.device)
+        self.model = retain_hubert_layers(HubertModel.from_pretrained(model_id, revision=revision), layer).to(self.device)
         self.model.eval()
         self.layer = layer
         self.centers = load_fairseq_kmeans_centers(
@@ -128,7 +135,9 @@ class HubertKMeansExtractor:
                     now = time.monotonic()
                     if now - getattr(self, '_last_report', float('-inf')) >= 10:
                         print(f'[adaptive] HuBERT actual_batch={len(chosen)} next_batch={batch_size} '
-                              f'items_per_s={rate:.3f} free_vram={free}/{total}', file=sys.stderr, flush=True)
+                              f'items_per_s={rate:.3f} free_vram={free}/{total} '
+                              f'lookahead={len(waves)} unique_lengths={len(groups)} '
+                              'padding=false', file=sys.stderr, flush=True)
                         self._last_report = now
         self._batch_size = batch_size
         return results
@@ -139,9 +148,27 @@ def _recoverable_units(rows, extractor, cache, clusters):
     maximum = int(os.environ.get('S2ST_HUBERT_BATCH_MAX', '8'))
     if not 1 <= maximum <= 32:
         raise ValueError('S2ST_HUBERT_BATCH_MAX must be between 1 and 32')
-    # Supply at least a full configured batch. Exact-length grouping and VRAM
-    # backoff remain the extractor's responsibility; never pad different WAVs.
-    while window := list(islice(rows, max(16, maximum))):
+    # Larger lookahead groups identical lengths without changing output order or
+    # introducing padding. Bound estimated float32 audio storage and row count.
+    def windows():
+        pending = None
+        while True:
+            window, estimate = [], 0
+            while len(window) < 256:
+                row = pending if pending is not None else next(rows, None)
+                pending = None
+                if row is None:
+                    break
+                size = max(1., float(row.get('en_duration', 1.))) * 16000 * 4
+                if window and estimate + size > 128 * 1024**2:
+                    pending = row
+                    break
+                window.append(row)
+                estimate += size
+            if not window:
+                return
+            yield window
+    for window in windows():
         keys = [digest([row, file_stamp(row['en_audio'])]) for row in window]
         values = [cache.get(key) for key in keys]
         missing = [index for index, value in enumerate(values) if value is None]

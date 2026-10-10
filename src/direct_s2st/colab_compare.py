@@ -40,7 +40,9 @@ def stage_file(source, target):
         Path(name).unlink(missing_ok=True)
 
 
-def stage_direct_artifacts(runs_root, experiment, trained_runs, vocoder_roots):
+def stage_direct_artifacts(runs_root, experiment, trained_runs, vocoder_roots,
+                           tt2_vocoder_mode='hifigan', s2ut_vocoder_mode='trained'):
+    _validate_modes(tt2_vocoder_mode, s2ut_vocoder_mode)
     validate_run_id(experiment)
     for system, kind in [('s2ut', 'unit'), ('translatotron2', 'mel')]:
         output = Path(runs_root) / f'{experiment}-{system}'
@@ -48,11 +50,22 @@ def stage_direct_artifacts(runs_root, experiment, trained_runs, vocoder_roots):
         stage_file(source/'checkpoints/checkpoint_last.pt', output/'checkpoints/checkpoint_last.pt')
         if system == 's2ut':
             stage_file(source/'gradient-audit-rank-0.json', output/'gradient-audit-rank-0.json')
+        if (source/'research-metadata.json').is_file():
+            stage_file(source/'research-metadata.json', output/'research-metadata.json')
+        if (system == 's2ut' and s2ut_vocoder_mode == 'paper') or (system == 'translatotron2' and tt2_vocoder_mode == 'griffin_lim'):
+            continue
         for name in ('generator.pt', 'config.json'):
             stage_file(Path(vocoder_roots[kind])/name, output/f'vocoder-{kind}'/name)
 
 
-def build_configs(repository, runs_root, experiment):
+def _validate_modes(tt2, s2ut):
+    from .recipes import TT2_VOCODERS, S2UT_VOCODERS
+    if tt2 not in TT2_VOCODERS or s2ut not in S2UT_VOCODERS:
+        raise ValueError('invalid comparison vocoder mode')
+
+
+def build_configs(repository, runs_root, experiment, tt2_vocoder_mode='hifigan', s2ut_vocoder_mode='trained'):
+    _validate_modes(tt2_vocoder_mode, s2ut_vocoder_mode)
     validate_run_id(experiment)
     repository, runs_root = Path(repository), Path(runs_root)
     configs = {}
@@ -70,10 +83,17 @@ def build_configs(repository, runs_root, experiment):
         evaluation['run_id'] = run_id
         configs[system+'-eval'] = evaluation
     for system, kind in [('s2ut', 'unit'), ('translatotron2', 'mel')]:
-        cfg = load_config(repository/f'configs/vocoder/{kind}.yaml')
+        filename = 'griffin-lim' if kind == 'mel' and tt2_vocoder_mode == 'griffin_lim' else kind
+        cfg = load_config(repository/f'configs/vocoder/{filename}.yaml')
         cfg['run_id'] = f'{experiment}-{system}'
         command = cfg['infer']['command']
         command[0] = sys.executable
+        cfg['vocoder_mode'] = tt2_vocoder_mode if kind == 'mel' else s2ut_vocoder_mode
+        if filename == 'griffin-lim' or (kind == 'unit' and s2ut_vocoder_mode == 'paper'):
+            configs[kind] = cfg
+            continue
+        if '--official-fisher' in command:
+            command.remove('--official-fisher')
         command[command.index('--checkpoint')+1] = '{run_root}/vocoder-'+kind+'/generator.pt'
         command[command.index('--config')+1] = '{run_root}/vocoder-'+kind+'/config.json'
         spec = runs_root/cfg['run_id']/f'vocoder-{kind}/config.json'

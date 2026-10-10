@@ -68,6 +68,10 @@ def runtime_hooks(audit):
             raise ValueError('optimized Colab S2UT runtime supports one GPU/process only')
         if not samples or any(not sample for sample in samples):
             raise ValueError('optimized S2UT requires real nonempty logical batches')
+        from ..batch_probe import Probe
+        if not hasattr(self, '_s2st_probe'):
+            self._s2st_probe = Probe()
+        self._s2st_probe.begin()
         now = time.monotonic()
         if hasattr(self, '_s2st_last_step'):
             self._s2st_timing.seconds['between_updates_including_io_validation_save'] += now-self._s2st_last_step
@@ -76,6 +80,9 @@ def runtime_hooks(audit):
                                          lambda pieces: original_step(self, pieces, raise_oom=True))
         if self.get_num_updates() != before + 1:
             raise RuntimeError('fairseq did not complete an optimizer update (e.g. overflow); refusing to skip samples')
+        cap = self._s2st_tuning.fixed
+        physical = max(min(int(s['nsentences']), cap) if cap else int(s['nsentences']) for s in samples)
+        self._s2st_probe.finish(physical)
         self._s2st_timing.report(self.get_num_updates(), sum(int(s['ntokens']) for s in samples),
                                  units='target_units', microbatch=self._s2st_tuning.size)
         self._s2st_last_step = time.monotonic()
@@ -110,7 +117,7 @@ def runtime_hooks(audit):
         return result
 
     def iterator(self, *args, **kwargs):
-        if self.cfg.dataset.num_workers == 0:
+        if self.cfg.dataset.num_workers == 0 and not os.environ.get('S2ST_BATCH_PROBE'):
             return original_iterator(self, *args, **kwargs)
         if not hasattr(self, '_s2st_workers'):
             cap = min(max(1, self.cfg.dataset.num_workers), os.cpu_count() or 1)
@@ -126,7 +133,14 @@ def runtime_hooks(audit):
         kwargs['disable_iterator_cache'] = True
         print(f'[training-loader] fairseq epoch-boundary workers={self.cfg.dataset.num_workers}',
               file=sys.stderr, flush=True)
-        return original_iterator(self, *args, **kwargs)
+        result = original_iterator(self, *args, **kwargs)
+        if os.environ.get('S2ST_BATCH_PROBE'):
+            # Probe only: run the heaviest legitimate token-budget groups
+            # instead of a few randomly shuffled, unusually short examples.
+            from ..batch_calibration import stress_fairseq_iterator
+            stress_fairseq_iterator(result, int(os.environ['S2ST_BATCH_PROBE_STEPS']),
+                                    int(self.cfg.optimization.update_freq[0]))
+        return result
 
     Trainer.train_step, SpeechToSpeechTask.train_step = step, task_step
     Trainer.save_checkpoint, Trainer.load_checkpoint = save, load

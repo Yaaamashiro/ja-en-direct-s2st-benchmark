@@ -56,6 +56,9 @@ def build_suite(name, env_file, *, limit=5, updates=2, docker_context=None, devi
         vocoder = configuration(kind, 'vocoder/'+kind+'.yaml', run_id)
         evaluation = configuration(system+'-eval', 'evaluation/default.yaml', run_id)
         if system == 's2ut':
+            # This suite verifies wiring in two updates, not paper-scale learning.
+            cmd = train['training']['command']
+            cmd[cmd.index('--reproduction-mode')+1] = 'smoke'
             stage('unit_artifact', 'fairseq', ['s2ut', 'fetch-artifacts', '--resume'])
             stage('unit_extraction', 'fairseq', ['s2ut', 'extract-units', '--limit', str(limit), '--resume'])
         else:
@@ -82,6 +85,8 @@ def build_suite(name, env_file, *, limit=5, updates=2, docker_context=None, devi
             command = vocoder['train']['command']
             command[command.index('--max-updates')+1] = str(updates)
             command = vocoder['infer']['command']
+            if '--official-fisher' in command:
+                command.remove('--official-fisher')
             command[command.index('--checkpoint')+1] = '{run_root}/vocoder-'+kind+'/generator.pt'
             command[command.index('--config')+1] = '{run_root}/vocoder-'+kind+'/config.json'
             stage(kind+'-fit', 'fairseq', ['vocoder', kind, 'train'] + reference(kind))

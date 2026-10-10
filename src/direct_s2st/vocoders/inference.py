@@ -157,10 +157,16 @@ def main(kind: str) -> None:
     parser.add_argument("--sample-rate", type=int, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--duration-prediction", action="store_true")
+    parser.add_argument("--official-fisher", action="store_true")
     parser.add_argument("--mel-spec", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
+    if args.official_fisher:
+        if kind != 'unit' or not args.duration_prediction or args.sample_rate != 16000:
+            parser.error('official Fisher vocoder requires unit / duration prediction / 16000 Hz')
+        from .reference import ensure_reference
+        ensure_reference(args.checkpoint, args.config)
     mel = json.loads(args.mel_spec.read_text(encoding="utf-8")) if args.mel_spec else None
     print(json.dumps(vocode(kind, args.input, args.output_root, args.checkpoint, args.config,
                             sample_rate=args.sample_rate, device=args.device, mel=mel,

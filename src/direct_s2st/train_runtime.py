@@ -23,6 +23,28 @@ def stopping():
     return deadline is not None and time.monotonic() >= float(deadline)
 
 
+def gpu_telemetry():
+    """Best-effort hardware sample; null means unavailable, never idle/zero."""
+    import subprocess
+    import torch
+    if not torch.cuda.is_available():
+        return None
+    try:
+        device = torch.cuda.current_device()
+        selector = getattr(torch.cuda.get_device_properties(device), 'uuid', None)
+        if not selector:
+            visible = os.environ.get('CUDA_VISIBLE_DEVICES')
+            selector = visible.split(',')[device] if visible else str(device)
+        output = subprocess.check_output(['nvidia-smi', '-i', str(selector),
+            '--query-gpu=utilization.gpu,utilization.memory', '--format=csv,noheader,nounits'],
+            text=True, timeout=1, stderr=subprocess.DEVNULL)
+        compute, memory = map(float, output.strip().split(','))
+        return dict(sm_util_pct_sample=compute, memory_util_pct_sample=memory,
+                    source='nvidia-smi hardware sample, not an update average')
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
 class Timings:
     def __init__(self):
         self.seconds = defaultdict(float)
@@ -61,7 +83,11 @@ class Timings:
             gpu = dict(vram_free=free, vram_total=total,
                        vram_peak=torch.cuda.max_memory_allocated())
         value = dict(update=update, units_per_s=self.units / max(now-self.started, .001),
-                     seconds=dict(self.seconds), cpu_pct=cpu, free_ram_ratio=ram, **gpu, **extra)
+                     seconds=dict(self.seconds), cpu_pct=cpu, free_ram_ratio=ram,
+                     gpu_telemetry=gpu_telemetry(), **gpu, **extra)
+        if 'stream_data_wait_and_collate' in self.seconds:
+            value['optimization_wall_excluding_stream_loading'] = max(0.,
+                self.seconds['optimization'] - self.seconds['stream_data_wait_and_collate'])
         print('[training-performance] ' + json.dumps(value), file=sys.stderr, flush=True)
         self.reported = now
 
@@ -245,19 +271,33 @@ class Microbatches:
     def __init__(self, state=None):
         import torch
         self.active = os.environ.get('S2ST_TRAIN_ADAPTIVE_BATCH') == '1'
+        self.fixed = int(os.environ.get('S2ST_TRAIN_FIXED_MICROBATCH', '0'))
+        if self.fixed < 0 or (self.fixed and self.active):
+            raise ValueError('fixed microbatch is nonnegative and cannot combine with online adaptation')
+        if state and state.get('fixed', 0) != self.fixed:
+            raise ValueError('saved fixed microbatch differs from the runtime recipe; use a new run, not a silent batch change')
         self.hardware = (torch.cuda.get_device_name(), torch.cuda.get_device_properties(0).total_memory) if torch.cuda.is_available() else ('cpu', 0)
         if state and tuple(state.get('hardware', ())) != self.hardware:
             state = None
-        self.size = int((state or {}).get('microbatch', 1))
+        self.size = self.fixed or int((state or {}).get('microbatch', 1))
         self.trials = int((state or {}).get('trials', 0))
         self.previous = None
 
     def state(self):
-        return dict(microbatch=self.size, trials=self.trials, hardware=self.hardware)
+        return dict(microbatch=self.size, trials=self.trials, hardware=self.hardware, fixed=self.fixed)
 
     def run(self, model, optimizer, batches, step):
         import torch
         from .translatotron2.engine import capture_rank_state, restore_rank_state
+        if self.fixed:
+            if torch.distributed.is_initialized():
+                raise ValueError('fixed microbatches require a single training process')
+            chunks = []
+            for batch in batches:
+                count = int(batch['nsentences']) if 'nsentences' in batch else batch['source'].size(0)
+                chunks.extend(slice_batch(batch, start, min(start+self.fixed, count), count)
+                              for start in range(0, count, self.fixed))
+            return step(chunks)  # Fixed from startup: no OOM retries/sample skips.
         if not self.active:
             return step(batches)
         if torch.distributed.is_initialized():
@@ -331,7 +371,8 @@ def checkpoint_saved(work, checkpoint, updates, *, force=False):
     target = directory / 'files' / relative
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(checkpoint, target)
-    for name in ('config.json', 'gradient-audit-rank-0.json'):
+    for name in ('config.json', 'gradient-audit-rank-0.json', 'batch-calibration.json',
+                 'research-metadata.json', 'session-research-metadata.json', 's2ut-recipe-lock.json'):
         if (work / name).is_file():
             shutil.copyfile(work / name, directory / 'files' / name)
     atomic_write_json(directory / 'ready.json', dict(updates=updates))

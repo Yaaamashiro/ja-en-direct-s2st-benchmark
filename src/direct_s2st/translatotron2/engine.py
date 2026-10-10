@@ -12,52 +12,52 @@ from .model import ModelConfig, Translatotron2
 def optimization_step(model, optimizer, batch):
     from contextlib import nullcontext
     from ..train_runtime import forward_backward_guard, precision_context
-    batches = batch if isinstance(batch, list) else [batch]
+    batches = batch if isinstance(batch, list) or hasattr(batch, 'counts') else [batch]
     if not batches:
         raise ValueError('empty optimizer update')
     core = model.module if hasattr(model, 'module') else model
     model.train()
     optimizer.zero_grad(set_to_none=True)
     device = next(model.parameters()).device
-    counts = torch.tensor([sum(int(b['target_lengths'].sum()) for b in batches),
+    counts = torch.tensor(batch.counts if hasattr(batch, 'counts') else [sum(int(b['target_lengths'].sum()) for b in batches),
                            sum(int(b['phone_lengths'].sum()) for b in batches),
                            sum(b['source'].size(0) for b in batches)], device=device, dtype=torch.float64)
     distributed = torch.distributed.is_initialized()
     world_size = torch.distributed.get_world_size() if distributed else 1
     if distributed:
         torch.distributed.all_reduce(counts)
-    values = dict(loss=0., mel_loss=0., phone_loss=0., duration_loss=0.)
+    denominators = counts.tolist()  # One transfer per logical update, not per microbatch.
+    totals = torch.zeros(4, device=device, dtype=torch.float64)
+    names = ('loss', 'mel_loss', 'phone_loss', 'duration_loss')
     guard = forward_backward_guard() if os.environ.get('S2ST_TRAIN_ADAPTIVE_BATCH') == '1' else nullcontext()
     with guard:
         for index, sample in enumerate(batches):
+            weights = [float(sample['target_lengths'].sum()) / denominators[0],
+                       float(sample['phone_lengths'].sum()) / denominators[1],
+                       sample['source'].size(0) / denominators[2]]
             sample = {key: value.to(device, non_blocking=True) for key, value in sample.items()}
             synchronize = index == len(batches)-1 or not hasattr(model, 'no_sync')
             with (nullcontext() if synchronize else model.no_sync()), precision_context(device):
                 output = model(**sample)
-                if any(not torch.isfinite(output[name]) for name in values):
+                if not torch.isfinite(torch.stack([output[name] for name in names])).all():
                     raise ValueError('nonfinite TT2 objective')
-                weights = [float(sample['target_lengths'].sum()) / float(counts[0]),
-                           float(sample['phone_lengths'].sum()) / float(counts[1]),
-                           sample['source'].size(0) / float(counts[2])]
                 weighted = [output[name]*weight for name, weight in zip(
                     ('mel_loss', 'phone_loss', 'duration_loss'), weights)]
                 loss = weighted[0] + core.config.phone_weight*weighted[1] + core.config.duration_weight*weighted[2]
                 (loss*world_size).backward()
-                values['loss'] += float(loss.detach())
-                for name, value in zip(('mel_loss', 'phone_loss', 'duration_loss'), weighted):
-                    values[name] += float(value.detach())
+                totals += torch.stack([loss.detach(), *(v.detach() for v in weighted)]).double()
     for name, parameter in model.named_parameters():
-        if parameter.requires_grad and (parameter.grad is None or not torch.isfinite(parameter.grad).all()):
-            raise ValueError(f'missing/nonfinite gradient: {name}')
+        if parameter.requires_grad and parameter.grad is None:
+            raise ValueError(f'missing gradient: {name}')
+    # clip_grad_norm_ checks the aggregate norm for NaN/Inf before Adam.
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
     optimizer.step()
-    if any(not torch.isfinite(p).all() for p in model.parameters()):
+    if not torch.stack([torch.isfinite(p).all() for p in model.parameters()]).all():
         raise ValueError('nonfinite parameter after optimizer update')
     if distributed:
-        tensor = torch.tensor(list(values.values()), device=device, dtype=torch.float64)
-        torch.distributed.all_reduce(tensor)
-        values = dict(zip(values, tensor.tolist()))
-    return {**values, 'gradient_norm': float(norm)}
+        torch.distributed.all_reduce(totals)
+    values = torch.cat([totals, norm.detach().reshape(1).double()]).tolist()
+    return dict(zip((*names, 'gradient_norm'), values))
 
 
 def capture_rank_state(model):

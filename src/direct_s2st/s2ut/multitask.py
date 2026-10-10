@@ -1,4 +1,4 @@
-"""Versioned character supervision and strict pinned-fairseq TSV validation."""
+"""Character auxiliary tasks and independent train-only Unigram CTC labels."""
 from collections import Counter
 from ..progress import operation, track
 import csv
@@ -62,14 +62,23 @@ def prepare_labels(rows_by_split: dict, output_root: Path, *, settings: dict | N
     for task, field in TASKS.items():
         cfg = dict(settings[task])
         validate_task_config(task, cfg)
-        counts = Counter(token for row in rows_by_split["train"] for token in tokenize(row[field]))
+        if task == 'decoder_target_ctc':
+            from .ctc_tokenizer import build, canonical_text
+            processor, model_bytes, tokenizer_lock = build(rows_by_split['train'], output_root, overwrite=overwrite)
+            encoder = lambda text: processor.encode(canonical_text(text), out_type=str)
+            # Include all trained pieces, even those unused in the final Viterbi segmentation.
+            # Fairseq owns its <unk> special token; don't duplicate it in dict.txt.
+            counts = Counter({processor.id_to_piece(i): 1 for i in range(1, processor.get_piece_size())})
+        else:
+            encoder = tokenize
+            counts = Counter(token for row in rows_by_split["train"] for token in encoder(row[field]))
         if not counts:
             raise ValueError(f"empty train dictionary for {task}")
         for split, rows in rows_by_split.items():
             lines = ["id\ttgt_text\n"]
             for row in rows:
-                tokens = tokenize(row[field])
-                unknown = set(tokens) - counts.keys()
+                tokens = encoder(row[field])
+                unknown = set(tokens) - counts.keys() - ({'<unk>'} if task == 'decoder_target_ctc' else set())
                 if unknown:
                     raise ValueError(f"unknown {task} tokens in {split}/{row['pair_id']}: {sorted(unknown)}; provide a reviewed training vocabulary")
                 lines.append(f"{row['pair_id']}\t{' '.join(tokens)}\n")
@@ -78,10 +87,13 @@ def prepare_labels(rows_by_split: dict, output_root: Path, *, settings: dict | N
         config[task] = {**cfg, "data": (output_root / task).resolve().as_posix(),
                         "dict": (output_root / task / "dict.txt").resolve().as_posix()}
     # Validate every task before emitting any labels.
+    from .ctc_tokenizer import publish, VERSION
+    publish(output_root, model_bytes, tokenizer_lock, resume=resume, overwrite=overwrite)
     for path, text in artifacts.items():
         atomic_write_text(path, text, resume=resume, overwrite=overwrite)
     atomic_write_text(output_root / "config_multitask.yaml", yaml.safe_dump(config), resume=resume, overwrite=overwrite)
-    return {"tokenizer": TOKENIZER_VERSION, "vocabulary_source": "train_only", "tasks": settings,
+    return {"tokenizer": TOKENIZER_VERSION, "ctc_tokenizer": tokenizer_lock, "ctc_version": VERSION,
+            "vocabulary_source": "train_only", "tasks": settings,
             "text_fields": TASKS, "text_tts_differences": differences}
 
 
@@ -100,13 +112,15 @@ def read_tsv(path: Path, columns: tuple[str, ...]) -> dict[str, dict]:
 
 
 @operation('s2ut/multitask: validate_prepared')
-def validate_prepared(root: Path, *, clusters: int = 100) -> dict:
+def validate_prepared(root: Path, *, clusters: int = 100, check_audio: bool = True) -> dict:
     from .reduce_units import validate_units
     cfg = yaml.safe_load((root / "config_multitask.yaml").read_text(encoding="utf-8"))
     if set(cfg) != set(TASKS):
         raise ValueError("all three S2UT auxiliary tasks are required")
     for name, settings in cfg.items():
         validate_task_config(name, settings)
+    from .ctc_tokenizer import load
+    processor, tokenizer_lock = load(root)
     seen, counts = set(), {}
     for split in ("train", "dev", "test"):
         main = read_tsv(root / f"{split}.tsv", ("id", "src_audio", "src_n_frames", "tgt_audio", "tgt_n_frames"))
@@ -118,7 +132,7 @@ def validate_prepared(root: Path, *, clusters: int = 100) -> dict:
             validate_units(units, clusters=clusters)
             if len(units) != int(row["tgt_n_frames"]) or int(row["src_n_frames"]) <= 0:
                 raise ValueError(f"invalid frame counts: {row['id']}")
-            if not Path(row["src_audio"]).is_file():
+            if check_audio and not Path(row["src_audio"]).is_file():
                 raise FileNotFoundError(row["src_audio"])
         targets = {}
         for task in TASKS:
@@ -129,7 +143,12 @@ def validate_prepared(root: Path, *, clusters: int = 100) -> dict:
                 if not token or token in vocabulary or int(count) < 1:
                     raise ValueError(f"invalid dictionary: {dictionary}")
                 vocabulary.add(token)
+            if task == 'decoder_target_ctc' and vocabulary != {
+                    processor.id_to_piece(i) for i in range(1, processor.get_piece_size())}:
+                raise ValueError('CTC dictionary differs from the trained Unigram model')
             aux = read_tsv(task_root / f"{split}.tsv", ("id", "tgt_text"))
+            if task == 'decoder_target_ctc':
+                vocabulary.add('<unk>')
             targets[task] = aux
             if main.keys() != aux.keys():
                 raise ValueError(f"sample ID alignment failure: {split}/{task}")
@@ -137,7 +156,16 @@ def validate_prepared(root: Path, *, clusters: int = 100) -> dict:
                 tokens = row["tgt_text"].split()
                 if not tokens or set(tokens) - vocabulary:
                     raise ValueError(f"empty sequence or dictionary coverage failure: {task}/{pair_id}")
-        if targets["target_letter"] != targets["decoder_target_ctc"]:
-            raise ValueError(f"target linguistic / decoder CTC label mismatch: {split}")
+        for pair_id, row in targets['target_letter'].items():
+            text = ''.join(' ' if t == '<space>' else t for t in row['tgt_text'].split())
+            expected = processor.encode(text, out_type=str)
+            if targets['decoder_target_ctc'][pair_id]['tgt_text'].split() != expected:
+                raise ValueError(f'target linguistic / decoder CTC label mismatch: {split}/{pair_id}')
+        if split == 'train':
+            from .ctc_tokenizer import text_fingerprint
+            train_texts = [''.join(' ' if t == '<space>' else t for t in row['tgt_text'].split())
+                           for row in targets['target_letter'].values()]
+            if text_fingerprint(train_texts) != tokenizer_lock['train_text_sha256']:
+                raise ValueError('CTC tokenizer train text identity mismatch')
         counts[split] = len(main)
-    return {"splits": counts, "multitask": list(TASKS)}
+    return {"splits": counts, "multitask": list(TASKS), "ctc_tokenizer": tokenizer_lock}

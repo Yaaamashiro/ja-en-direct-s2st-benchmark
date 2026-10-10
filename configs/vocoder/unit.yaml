@@ -5,11 +5,13 @@ reference:
   checkpoint_url: https://dl.fbaipublicfiles.com/fairseq/speech_to_speech/vocoder/code_hifigan/hubert_base_100_lj/g_00500000
   config_url: https://dl.fbaipublicfiles.com/fairseq/speech_to_speech/vocoder/code_hifigan/hubert_base_100_lj/config.json
   training_data: LJSpeech
+  checkpoint_sha256: b46cc9778377a3c1b72b44ff815126469511676083d728f1c0677a1be0f6bc36
+  config_sha256: 769cd70effba4278d2d7eef7d5c42177651b9273f0678b418e7d48e2665f6043
   code_license: MIT
   checkpoint_license: verify upstream terms; code license does not establish weight license
 infer:
-  # Select the trained generator.pt/config.json below after fitting, or supply
-  # a verified compatible pretrained checkpoint explicitly.
+  # Paper mode fetches the checksum-pinned official checkpoint/config below.
+  # A trained alternative must remove --official-fisher and use a separate run.
   command:
     - python
     - -m
@@ -23,6 +25,7 @@ infer:
     - --config
     - "{cache_root}/models/vocoder/unit/config.json"
     - --duration-prediction
+    - --official-fisher
     - --sample-rate
     - "16000"
     - --device
