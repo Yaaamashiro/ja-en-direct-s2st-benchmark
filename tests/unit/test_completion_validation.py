@@ -129,12 +129,21 @@ def test_zero_weight_auxiliary_cannot_be_silently_disabled(tmp_path):
         validate_prepared(target)
 
 
-def test_unseen_test_characters_do_not_leak_into_dictionary(tmp_path):
+def test_heldout_characters_registered_without_training_ctc_on_heldout(tmp_path):
     rows = {split: [{"pair_id": split, "ja_text": "日", "en_text": "a"}] for split in ("train", "dev", "test")}
     rows["test"][0]["ja_text"] = "未"
-    with pytest.raises(ValueError, match="unknown source_letter"):
-        prepare_labels(rows, tmp_path / "out")
-    assert not (tmp_path / "out").exists()
+    rows['dev'][0]['ja_text'] = '汎'
+    rows['test'][0]['en_text'] = 'a Ω'
+    target = tmp_path/'out'
+    lock = prepare_labels(rows, target)
+    assert (target/'source_letter/dict.txt').read_text(encoding='utf-8').splitlines() == ['日 1', '未 1', '汎 1']
+    assert 'Ω 1' in (target/'target_letter/dict.txt').read_text(encoding='utf-8')
+    assert lock['heldout_only_characters']['source_letter'] == ['未', '汎']
+    assert lock['unknown_token_counts']['decoder_target_ctc']['test'] == 1
+    assert '<unk>' in (target/'decoder_target_ctc/test.tsv').read_text(encoding='utf-8')
+    assert lock['ctc_tokenizer']['vocabulary_source'] == 'train_only'
+    assert lock['model_training_split'] == 'train'
+    assert prepare_labels(rows, target, resume=True) == lock
 
 
 def test_tts_content_difference_blocks_preparation(tmp_path):

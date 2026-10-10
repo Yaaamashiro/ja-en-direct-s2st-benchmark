@@ -170,6 +170,63 @@ def test_s2ut_preparation_reuses_source_headers_and_units(tmp_path, monkeypatch)
     module.prepare_fairseq(tmp_path / 'common', tmp_path / 'units', target, resume=True)
 
 
+@pytest.mark.parametrize('drive_safe', ['0', '1'])
+def test_4b_finish_runs_only_cpu_prepare_and_validate_and_resumes(tmp_path, monkeypatch, drive_safe):
+    import sys
+    from direct_s2st import preparation_workflow as workflow
+    from test_s2ut_units import _common
+    from direct_s2st.s2ut.extract_units import extract_units
+    from direct_s2st.s2ut.prepare_fairseq import prepare_fairseq
+    from direct_s2st.s2ut.multitask import validate_prepared
+    data, corpus = tmp_path/'data', tmp_path/'corpus'
+    common, units, prepared = data/'common', data/'s2ut/units', data/'s2ut/fairseq'
+    _common(common)
+    for split, ja, en in (('dev', '汎', 'English Ω'), ('test', '未', 'English')):
+        path = common/f'{split}.jsonl'
+        row = json.loads(path.read_text(encoding='utf-8'))
+        row.update(ja_text=ja, ja_tts_text=ja, en_text=en, en_tts_text=en)
+        path.write_text(json.dumps(row)+'\n', encoding='utf-8')
+    monkeypatch.setenv('CORPUS_ROOT', str(corpus))
+    monkeypatch.setenv('EXPERIMENT_DATA_ROOT', str(data))
+    monkeypatch.setenv('S2ST_DRIVE_SAFE', drive_safe)
+    if drive_safe == '1':
+        from contextlib import nullcontext
+        from direct_s2st import drive_staging as staging
+        def require(common, root, **kwargs):
+            assert kwargs['languages'] == ('ja',)
+        def stage(common, root, local, **kwargs):
+            assert kwargs == {'languages': ('ja',), 'create': False}
+            return []
+        monkeypatch.setattr(staging, 'require_audio_packs', require)
+        monkeypatch.setattr(staging, 'stage_audio', stage)
+        monkeypatch.setattr(staging, 'ensure_local', lambda path: path)
+        monkeypatch.setattr(staging, 'active_map', lambda *args: nullcontext())
+    monkeypatch.setenv('S2ST_PREP_RECHECK', '0')
+    monkeypatch.setattr(sys, 'argv', ['workflow', '--stage', '4b-finish'])
+    monkeypatch.setattr(workflow.subprocess, 'check_output', lambda *a, **k: 'a'*40)
+    with pytest.raises(ValueError, match='保存済みUnit'):
+        workflow.main()
+    extract_units(common, units, extractor=lambda _: [1, 2, 3], split=None, clusters=100,
+                  hubert_model='fixture', hubert_revision='a'*40, hubert_layer=6, kmeans_sha256='b'*64)
+    before = {p: p.read_bytes() for p in units.rglob('*') if p.is_file()}
+    calls = []
+    def run(command, **kwargs):
+        action = command[4]
+        calls.append(action)
+        if action == 'prepare':
+            prepare_fairseq(common, units, prepared, resume=True)
+        elif action == 'validate':
+            validate_prepared(prepared)
+        else:
+            pytest.fail('must not fetch models, re-extract Units, or train')
+    monkeypatch.setattr(workflow.subprocess, 'run', run)
+    workflow.main()
+    assert calls == ['prepare', 'validate']
+    assert all(p.read_bytes() == contents for p, contents in before.items())
+    workflow.main()
+    assert calls == ['prepare', 'validate']
+
+
 def test_acceptance_wav_checks_resume_and_detect_changed_content(tmp_path, monkeypatch):
     from test_evaluation import _wav, _prediction
     from direct_s2st.evaluation import acceptance

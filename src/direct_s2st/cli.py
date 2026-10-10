@@ -194,15 +194,16 @@ def _run_s2ut(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
             overwrite=args.overwrite,
         )
     if args.action == "prepare":
-        output = roots.experiment_data / "s2ut" / "fairseq"
+        from .s2ut.migrate_labels import paper_data_root, current_labels, migrate
+        output = paper_data_root(roots.experiment_data)
         if args.dry_run:
             return {"common_root": str(common), "units_root": str(units), "output_root": str(output)}
         if args.resume and not args.overwrite and (output/'data-lock.json').is_file():
-            from .s2ut.ctc_tokenizer import VERSION
             prior = json.loads((output/'data-lock.json').read_text(encoding='utf-8'))
-            if prior.get('linguistic', {}).get('ctc_version') != VERSION:
-                from .s2ut.migrate_labels import migrate
-                migrated = migrate(common, output)
+            if not current_labels(prior):
+                # Use the same original source as the cell-5 migration CLI;
+                # intermediate Unigram-v1 siblings are preserved as well.
+                migrated = migrate(common, roots.experiment_data / 's2ut/fairseq')
                 return json.loads((migrated/'data-lock.json').read_text(encoding='utf-8'))
         return prepare_fairseq(
             common,

@@ -8,22 +8,38 @@ from ..hashing import sha256_file
 from ..io import atomic_write_json, atomic_write_text, read_jsonl
 from ..progress import operation, track
 from .ctc_tokenizer import VERSION
-from .multitask import prepare_labels, read_tsv, validate_prepared
+from .multitask import CHAR_VOCAB_VERSION, prepare_labels, read_tsv, validate_prepared
+
+MIGRATED_DIRECTORY = 'fairseq-unigram-allchars-v1'
 
 
-def paper_data_root(data):
+def current_labels(lock):
+    linguistic = lock.get('linguistic', {})
+    return (linguistic.get('ctc_version') == VERSION
+            and linguistic.get('character_vocab_version') == CHAR_VOCAB_VERSION)
+
+
+def paper_data_root(data, *, planned=False):
     base = Path(data)/'s2ut/fairseq'
-    sibling = base.with_name('fairseq-unigram-v1')
-    return sibling if (sibling/'paper-label-migration.json').is_file() else base
+    for name in (MIGRATED_DIRECTORY, 'fairseq-unigram-v1'):
+        sibling = base.with_name(name)
+        if (sibling/'paper-label-migration.json').is_file():
+            base = sibling
+            break
+    if planned and (base/'data-lock.json').is_file():
+        lock = json.loads((base/'data-lock.json').read_text(encoding='utf-8'))
+        if not current_labels(lock):
+            return base.with_name(MIGRATED_DIRECTORY)
+    return base
 
 
 @operation('s2ut: migrate CTC labels without recomputing Mel or units')
 def migrate(common, source):
     common, source = Path(common), Path(source)
     lock = json.loads((source/'data-lock.json').read_text(encoding='utf-8'))
-    if lock.get('linguistic', {}).get('ctc_version') == VERSION:
+    if current_labels(lock):
         return source
-    target = source.with_name('fairseq-unigram-v1')
+    target = source.with_name(MIGRATED_DIRECTORY)
     if target == source:
         raise ValueError('migration requires the original fairseq directory')
     corpus = os.environ.get('CORPUS_ROOT')

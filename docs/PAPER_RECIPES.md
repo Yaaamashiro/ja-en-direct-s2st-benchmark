@@ -101,14 +101,19 @@ paper_exactでは追加の発話数cap、固定分割、オンライン適応、
 token予算に基づく可変batchなので「発話数1024」とは解釈しない。
 HuBERT layer6、k=100、固定model revisionとk-means SHA、reduced units、
 source/target letter CEとdecoder CTCを維持する。CTCは原論文§4.2どおり、
-train英語文のみで学習したSentencePiece Unigram（要求語彙1000）とする。
+SentencePiece Unigram（要求語彙1000）とする。分割器の学習対象はこの実装ではtrain英語文のみ。
 smokeの小コーパスでは1000 pieceを作れないため、実際の語彙数も記録する。
 モデル・train文hash・SentencePiece版・SHA-256をprepared lockへ保存する。
 target-letterとCTCは別辞書であり、同じ英語文から再符号化して一致を検証する。
+source-letter/target-letterの文字集合にはtrain/dev/testの文字を登録する。
+モデルの最適化はtrainのみ。文字の登録はその文字を予測できる学習例を増やすものではない。
+辞書の頻度はtrain頻度を維持し、held-out専用文字の登録countは1とし、専用文字一覧をlockへ記録する。
+原論文は文字辞書を構築するsplitを明示していないため、この登録方針は実装上の選択として記録する。
+CTC分割器はdev/testから学習せず、未知pieceを`<unk>`へ符号化しsplit別件数を記録する。
 
-旧4B完了データはセル5のS2UT選択時に `fairseq-unigram-v1` へ再開可能に移行する。
+旧4B完了データは `fairseq-unigram-allchars-v1` へ再開可能に移行する。
 Unit TSV・設定を再利用し、文字補助ラベル/CTCラベルだけ生成する。元のfairseq、
-Mel、HuBERT Unit、学習checkpointは変更しない。学習runはrecipe-v2の新名になる。
+Mel、HuBERT Unit、学習checkpoint、旧fairseq-unigram-v1は変更しない。S2UT学習runはrecipe-v3の新名になる。
 CTCモデルを変更した旧S2UT checkpointは継続学習しない。
 
 ## 特徴・音声復元・評価の差異
@@ -161,7 +166,7 @@ performanceログはVRAM・処理数/秒・データ待ち時間と、取得可�
 実際のvocoder重み/config/input SHAは推論後の `vocoder-lock.json` に記録する。
 Griffin-Limの重みSHAはnull（学習済み重み不要）。metadataもsnapshotに含まれる。
 
-通常用の学習run名は `tt2-training-実験名-paper_exact-recipe-v2` 等。
+通常用の学習run名は `tt2-training-実験名-paper_exact-recipe-v2`、`s2ut-training-実験名-paper_exact-recipe-v3` 等。
 古いbatch/LRのcheckpointを新レシピへ自動移植しない。prepared dataは削除しない。
 同じ条件の新レシピrunは、同じ実験名・出力先・設定で再実行して再開する。
 practicalへ切り替えると別runになり、学習は新規に開始する。
@@ -182,13 +187,13 @@ run('git', '-C', REPO, 'fetch', 'origin', NEW_REVISION)
 run('git', '-C', REPO, 'checkout', '--detach', NEW_REVISION)
 run(sys.executable, REPO / 'scripts/colab/use_paper_recipe.py',
     '--persistent', PERSISTENT, '--revision', NEW_REVISION, '--overwrite',
-    '--separate-recipe-v2-runs')
+    '--separate-recipe-v3-runs')
 # 更新版ノートブックのセル1 → 5。初回setupは自動再構築。
 # 4A/4Bが未完了なら、その工程だけ先に再開する。
 ```
 
-旧paper runがある場合も `--separate-recipe-v2-runs` の明示指定で保存したまま移行できる。
-この指定がなければ停止する。すでにrecipe-v2設定がある実験は別のcode/run移行が必要。
+旧paper runがある場合も `--separate-recipe-v3-runs` の明示指定で保存したまま移行できる。
+この指定がなければ停止する。すでにrecipe-v3設定がある実験は別のcode/run移行が必要。
 データ、旧config、旧checkpointは削除しない。旧checkpointからの学習再開はしない。
 
 ## 根拠と検証範囲

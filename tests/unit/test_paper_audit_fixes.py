@@ -42,7 +42,8 @@ def test_unigram_is_train_only_independent_and_resume_immutable(tmp_path):
         load(tmp_path/'prepared')
 
 
-def test_migration_reuses_tsvs_preserves_old_data_and_resumes(tmp_path, monkeypatch):
+@pytest.mark.parametrize('legacy_ctc', [True, False])
+def test_migration_reuses_tsvs_preserves_old_data_and_resumes(tmp_path, monkeypatch, legacy_ctc):
     from test_s2ut_units import _common
     from direct_s2st.s2ut.extract_units import extract_units
     from direct_s2st.s2ut.prepare_fairseq import prepare_fairseq
@@ -54,18 +55,24 @@ def test_migration_reuses_tsvs_preserves_old_data_and_resumes(tmp_path, monkeypa
                   hubert_model='fixture', hubert_revision='a'*40, hubert_layer=6, kmeans_sha256='b'*64)
     prepare_fairseq(common, units, old)
     lock = json.loads((old/'data-lock.json').read_text())
-    for key in ('ctc_version', 'ctc_tokenizer'):
-        del lock['linguistic'][key]
-    # True legacy fixtures have character CTC labels and no SentencePiece model.
-    for name in ('train.tsv', 'dev.tsv', 'test.tsv', 'dict.txt'):
-        (old/'decoder_target_ctc'/name).write_bytes((old/'target_letter'/name).read_bytes())
-    (old/'ctc.model').unlink()
-    (old/'ctc-tokenizer.json').unlink()
+    del lock['linguistic']['character_vocab_version']
+    lock['linguistic']['vocabulary_source'] = 'train_only'
+    if legacy_ctc:
+        for key in ('ctc_version', 'ctc_tokenizer'):
+            del lock['linguistic'][key]
+        # True legacy fixtures have character CTC labels and no SentencePiece model.
+        for name in ('train.tsv', 'dev.tsv', 'test.tsv', 'dict.txt'):
+            (old/'decoder_target_ctc'/name).write_bytes((old/'target_letter'/name).read_bytes())
+        (old/'ctc.model').unlink()
+        (old/'ctc-tokenizer.json').unlink()
     atomic_write_json(old/'data-lock.json', lock, overwrite=True)
     before = {str(p): p.read_bytes() for root in (old, units, common) for p in root.rglob('*') if p.is_file()}
+    assert paper_data_root(tmp_path, planned=True).name == 'fairseq-unigram-allchars-v1'
     target = migrate(common, old)
     assert target != old and paper_data_root(tmp_path) == target
     assert (target/'train.tsv').read_bytes() == (old/'train.tsv').read_bytes()
+    if not legacy_ctc:
+        assert (target/'ctc.model').read_bytes() == (old/'ctc.model').read_bytes()
     assert all(Path(p).read_bytes() == data for p, data in before.items())
     assert migrate(common, old) == target
     (target/'decoder_target_ctc/test.tsv').write_text('corrupted')

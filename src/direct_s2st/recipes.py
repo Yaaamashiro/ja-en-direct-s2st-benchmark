@@ -89,8 +89,9 @@ def training_metadata(command, system, mode, vocoder_mode, *, world_size=1):
                       if system == 's2ut' and mode == 'paper_exact' else 'explicit configured batches'),
         physical_batch_cap=None,
         vocoder_mode=vocoder_mode, vocoder_checkpoint_sha256=None,
-        engine_version='tt2-cpu-mask-rng-vector-prenet-v2' if tt2 else 'pinned-fairseq-unigram-v2',
+        engine_version='tt2-cpu-mask-rng-vector-prenet-v2' if tt2 else 'pinned-fairseq-unigram-allchars-v3',
         ctc_tokenizer=None if tt2 else 'sentencepiece-unigram-1000-v1',
+        character_vocabulary=None if tt2 else 'all-split-characters-v1',
         vocoder_training_condition=(None if tt2 else 'target_corpus_train_only' if vocoder_mode == 'trained'
                                     else 'released_LJSpeech_checkpoint_not_Fisher_train'),
         training_length_source='researcher_TOTAL_UPDATES',
@@ -102,6 +103,7 @@ def training_metadata(command, system, mode, vocoder_mode, *, world_size=1):
                      ('Griffin-Lim iterations/phase initialization are implementation choices' if vocoder_mode == 'griffin_lim' else 'HiFi-GAN replaces paper BLEU Griffin-Lim'),
                      'Whisper ASR-BLEU replaces Google ASR evaluator'] if tt2 else
                     ['Japanese→English synthetic corpus', 'Japanese/English character CE; train-only Unigram-1000 CTC',
+                     'character inventory registers train/dev/test symbols; paper does not specify inventory split coverage; model optimization remains train-only',
                      'official single-GPU accumulation simulates paper four-GPU training',
                      ('independent Code HiFi-GAN training on target train corpus; frontend/crop/batch differ from original Fisher vocoder'
                       if vocoder_mode == 'trained' else 'released LJSpeech vocoder differs from paper Fisher-trained vocoder')]),

@@ -11,6 +11,7 @@ from ..io import atomic_write_text
 
 TASKS = {"source_letter": "ja_text", "target_letter": "en_text", "decoder_target_ctc": "en_text"}
 TOKENIZER_VERSION = "unicode-codepoint-v1"
+CHAR_VOCAB_VERSION = "all-split-characters-v1"
 
 
 def tokenize(text: str) -> list[str]:
@@ -49,10 +50,13 @@ def prepare_labels(rows_by_split: dict, output_root: Path, *, settings: dict | N
     settings = load_settings() if settings is None else settings
     if set(settings) != set(TASKS):
         raise ValueError("all three S2UT auxiliary tasks are required")
+    if set(rows_by_split) != {'train', 'dev', 'test'} or not rows_by_split['train']:
+        raise ValueError('nonempty train and all three manifest splits are required')
     config, artifacts = {}, {}
+    heldout_only, unknown_counts = {}, {}
     differences = []
     for split, rows in rows_by_split.items():
-        for row in rows:
+        for row in track(rows, f's2ut: check lexical alignment {split}'):
             for language in ("ja", "en"):
                 text, spoken = row[f"{language}_text"], row.get(f"{language}_tts_text", row[f"{language}_text"])
                 if tokenize(text) != tokenize(spoken):
@@ -63,26 +67,41 @@ def prepare_labels(rows_by_split: dict, output_root: Path, *, settings: dict | N
         cfg = dict(settings[task])
         validate_task_config(task, cfg)
         if task == 'decoder_target_ctc':
-            from .ctc_tokenizer import build, canonical_text
+            from .ctc_tokenizer import build, encode_labels
             processor, model_bytes, tokenizer_lock = build(rows_by_split['train'], output_root, overwrite=overwrite)
-            encoder = lambda text: processor.encode(canonical_text(text), out_type=str)
+            encoder = lambda text: encode_labels(processor, text)
             # Include all trained pieces, even those unused in the final Viterbi segmentation.
             # Fairseq owns its <unk> special token; don't duplicate it in dict.txt.
             counts = Counter({processor.id_to_piece(i): 1 for i in range(1, processor.get_piece_size())})
         else:
             encoder = tokenize
             counts = Counter(token for row in rows_by_split["train"] for token in encoder(row[field]))
+            if not counts:
+                raise ValueError(f"empty train dictionary for {task}")
+            train_tokens = set(counts)
+            for split in ('dev', 'test'):
+                for row in track(rows_by_split[split], f's2ut: register {task} characters {split}'):
+                    for token in encoder(row[field]):
+                        # Counts retain train frequencies. A held-out-only
+                        # symbol gets a registration count of 1, not training.
+                        counts.setdefault(token, 1)
+            heldout_only[task] = sorted(set(counts) - train_tokens)
+            print(f'[vocabulary] task={task} symbols={len(counts)} heldout_only={len(heldout_only[task])} training_split=train', flush=True)
         if not counts:
             raise ValueError(f"empty train dictionary for {task}")
         for split, rows in rows_by_split.items():
             lines = ["id\ttgt_text\n"]
-            for row in rows:
+            unknown_counts.setdefault(task, {})[split] = 0
+            for row in track(rows, f's2ut: encode {task} {split}'):
                 tokens = encoder(row[field])
+                unknown_counts[task][split] += tokens.count('<unk>')
                 unknown = set(tokens) - counts.keys() - ({'<unk>'} if task == 'decoder_target_ctc' else set())
                 if unknown:
                     raise ValueError(f"unknown {task} tokens in {split}/{row['pair_id']}: {sorted(unknown)}; provide a reviewed training vocabulary")
                 lines.append(f"{row['pair_id']}\t{' '.join(tokens)}\n")
             artifacts[output_root / task / f"{split}.tsv"] = "".join(lines)
+            if unknown_counts[task][split]:
+                print(f'[vocabulary] task={task} split={split} unknown_tokens={unknown_counts[task][split]} policy=trained_tokenizer_unk', flush=True)
         artifacts[output_root / task / "dict.txt"] = "".join(f"{token} {counts[token]}\n" for token in sorted(counts))
         config[task] = {**cfg, "data": (output_root / task).resolve().as_posix(),
                         "dict": (output_root / task / "dict.txt").resolve().as_posix()}
@@ -93,7 +112,12 @@ def prepare_labels(rows_by_split: dict, output_root: Path, *, settings: dict | N
         atomic_write_text(path, text, resume=resume, overwrite=overwrite)
     atomic_write_text(output_root / "config_multitask.yaml", yaml.safe_dump(config), resume=resume, overwrite=overwrite)
     return {"tokenizer": TOKENIZER_VERSION, "ctc_tokenizer": tokenizer_lock, "ctc_version": VERSION,
-            "vocabulary_source": "train_only", "tasks": settings,
+            "character_vocab_version": CHAR_VOCAB_VERSION,
+            "vocabulary_source": {"source_letter": "train_dev_test_characters",
+                                  "target_letter": "train_dev_test_characters", "decoder_target_ctc": "train_only"},
+            "dictionary_count_policy": "train_frequency; heldout_only_registration_count=1",
+            "heldout_only_characters": heldout_only, "unknown_token_counts": unknown_counts,
+            "model_training_split": "train", "tasks": settings,
             "text_fields": TASKS, "text_tts_differences": differences}
 
 
@@ -119,7 +143,7 @@ def validate_prepared(root: Path, *, clusters: int = 100, check_audio: bool = Tr
         raise ValueError("all three S2UT auxiliary tasks are required")
     for name, settings in cfg.items():
         validate_task_config(name, settings)
-    from .ctc_tokenizer import load
+    from .ctc_tokenizer import load, encode_labels
     processor, tokenizer_lock = load(root)
     seen, counts = set(), {}
     for split in ("train", "dev", "test"):
@@ -158,7 +182,7 @@ def validate_prepared(root: Path, *, clusters: int = 100, check_audio: bool = Tr
                     raise ValueError(f"empty sequence or dictionary coverage failure: {task}/{pair_id}")
         for pair_id, row in targets['target_letter'].items():
             text = ''.join(' ' if t == '<space>' else t for t in row['tgt_text'].split())
-            expected = processor.encode(text, out_type=str)
+            expected = encode_labels(processor, text)
             if targets['decoder_target_ctc'][pair_id]['tgt_text'].split() != expected:
                 raise ValueError(f'target linguistic / decoder CTC label mismatch: {split}/{pair_id}')
         if split == 'train':

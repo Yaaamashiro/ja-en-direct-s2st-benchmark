@@ -79,7 +79,7 @@ def prepare_audio_packs(data):
 @operation('preparation: resumable workflow')
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--stage', choices=['4a', 'audio-packs', '4b'], required=True)
+    parser.add_argument('--stage', choices=['4a', 'audio-packs', '4b', '4b-finish'], required=True)
     parser.add_argument('--profile', default='smoke')
     parser.add_argument('--limit', type=int)
     args = parser.parse_args()
@@ -94,6 +94,8 @@ def main():
     revision = subprocess.check_output(['git', '-C', str(repository), 'rev-parse', 'HEAD'], text=True).strip()
     common, phones = data/'common', data/'translatotron2/phonemes'
     tt2, units, s2ut = data/'translatotron2/fairseq', data/'s2ut/units', data/'s2ut/fairseq'
+    from .s2ut.migrate_labels import paper_data_root
+    s2ut = paper_data_root(data, planned=True)
     accepted = corpus/'production/manifests/releases/accepted.jsonl'
     from .hashing import sha256_file
     configuration = {p.relative_to(repository).as_posix(): sha256_file(p)
@@ -105,15 +107,20 @@ def main():
                  ('translatotron2', 'prepare', [common, phones], [tt2]),
                  ('translatotron2', 'validate', [tt2], [tt2])]
     else:
+        from .s2ut.unit_storage import manifest_paths
+        if args.stage == '4b-finish' and not manifest_paths(units):
+            raise ValueError('保存済みUnit manifestがありません。4BのUnit抽出を先に完了してください')
         if os.environ.get('S2ST_DRIVE_SAFE') == '1':
             from .drive_staging import require_audio_packs
             # Check BOTH en (HuBERT) and ja (S2UT prepare) before loading models
             # or transferring any WAV ZIPs on this GPU runtime.
-            require_audio_packs(common, data / '.drive-audio-packs')
+            require_audio_packs(common, data / '.drive-audio-packs',
+                                languages=('ja',) if args.stage == '4b-finish' else ('en', 'ja'))
         # Downloads have their own checksum verification; keep this check on each VM.
-        subprocess.run([sys.executable, '-m', 'direct_s2st.cli', 's2ut', 'fetch-artifacts',
-                        '--profile', args.profile, '--resume'], check=True)
-        steps = [('s2ut', 'extract-units', [common], [units]),
+        if args.stage == '4b':
+            subprocess.run([sys.executable, '-m', 'direct_s2st.cli', 's2ut', 'fetch-artifacts',
+                            '--profile', args.profile, '--resume'], check=True)
+        steps = ([('s2ut', 'extract-units', [common], [units])] if args.stage == '4b' else []) + [
                  ('s2ut', 'prepare', [common, units], [s2ut]),
                  ('s2ut', 'validate', [s2ut], [s2ut])]
     for system, action, inputs, outputs in steps:
@@ -129,7 +136,7 @@ def main():
                 local = ensure_local(Path(tempfile.gettempdir()) / 's2st-prep-inputs' / digest(str(data))[:16])
                 languages = ('en',) if action == 'extract-units' else (('ja',) if system == 's2ut' else ('ja', 'en'))
                 rows = stage_audio(common, data / '.drive-audio-packs', local, languages=languages,
-                                   create=args.stage != '4b')
+                                   create=args.stage not in ('4b', '4b-finish'))
                 with active_map(rows, local):
                     subprocess.run(command, check=True)
             else:
