@@ -6,6 +6,13 @@ from .progress import activity
 
 
 def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    # Streaming identities use the immutable preparation lock. This does not
+    # certify bytes: local_path verifies the complete payload before every
+    # shard's first use. raw_sha remains unconditional for byte verification.
+    from .stream_inputs import declared_hash
+    declared = declared_hash(path)
+    if declared is not None:
+        return declared
     from .drive_staging import local_path
     path = local_path(path)
     digest = hashlib.sha256()

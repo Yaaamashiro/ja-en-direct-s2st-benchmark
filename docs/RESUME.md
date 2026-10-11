@@ -18,6 +18,7 @@
 | 4B・HuBERT | 抽出済みUnitとサンプル単位の記録 | 未保存サンプル/バッチ。モデル読込みは再実行 |
 | 4B・学習データ準備 | サンプル単位のUnit読込み・WAVヘッダ結果、最終TSV/辞書 | 未保存サンプル。テキストラベル作成・TSV整合性確認は再走査 |
 | 5・学習（TT2/S2UT/vocoder） | 確認済みの学習checkpoint/snapshot | 最後の永続保存後の更新。初回保存前なら最初から。ローカル読込みキャッシュは新VMで再構築 |
+| 5・TT2入力の並行取得 | 各WAV/Mel ZIPのローカル検証済み完了記録 | 同じVMでは完了ZIPを再利用。新VMでは復元updateから必要なZIPを取得して学習と先読みを並行。途中コピーは公開しない |
 | 学習成果の復元・モデル取得 | 完成した成果物・ファイルのハッシュ確認 | コピー/ダウンロード途中のファイルは再取得する場合あり。バイト位置からの再開は保証しない |
 | 推論（TT2/Cascade/S2T）・音声合成 | 成功したサンプルと結果journal | 未保存・失敗サンプル。モデル読込み・入力ハッシュ確認は再実行 |
 | S2UT推論 | fairseq生成を約32サンプルずつのシャードに分け、成功シャードを保存 | 実行途中のシャード。各シャードでモデルを読み直すため、その分のオーバーヘッドあり |
@@ -29,6 +30,47 @@
 ZIPとS2UT生成は成功したシャードごとに記録します。
 学習は設定された更新間隔で保存されます。`durable_updates`が復旧基準です。
 Driveマウントでの書込み/読戻し確認は行いますが、Google Driveサーバー側同期の完了は保証できません。
+
+## 学習開始済み48fcdb7からTT2の並行取得・時間制限なしを使う場合
+
+`scripts/colab/resume_streaming_training.py`は、元の固定revisionと依存環境を保持し、
+実行処理だけを別のクリーンGit worktreeから読み込む明示的なoverlay方式です。
+既存runのconfig・snapshot・環境lock・学習条件は書き換えません。
+元revisionと実行コードrevision、環境/config SHA256を
+`PERSISTENT/execution-overlays/<revision>.json`へ記録し、trainerのresearch metadataにも
+実行コードrevisionを記録します。学習対象の選択・optimizer・モデル・論文設定は変更しません。
+
+対象の基底revisionは`48fcdb7eb023cf35860fe63716dd7dacdd277be5`に限定します。
+このrevisionから変更されたsrcが許可済みの実行/入力処理以外を含む場合、
+configs・requirements・fairseq・モデル等が変わった場合は停止します。
+同じ実験名・保存先でセル1→2→3を実行して**元revisionを取得・構築した後**、
+修正commitからこのスクリプトだけを一時取得し、明示的な`--overlay-revision`で実行します。
+通常のセル5でconfigを作り直さず、保存済みconfigを直接使います。新しい実験名への変更は不要です。
+切断後は同じ手順を繰り返します。新VMではoverlayも再取得します。
+
+```python
+# 修正commitの完全SHAを指定。元REPOをcheckoutし直さない。
+REVISION = '<この修正を含む公開済みcommitの完全SHA>'
+run('git', '-C', REPO, 'fetch', 'origin', REVISION)
+helper = Path('/content/resume_streaming_training.py')
+helper.write_text(subprocess.check_output(
+    ['git', '-C', str(REPO), 'show', REVISION + ':scripts/colab/resume_streaming_training.py'],
+    text=True), encoding='utf-8')
+RUN_NAME = training_run_name('tt2')
+assert TOTAL_UPDATES <= 10 or CONFIRM_TRAINING
+options = ['--confirm-training'] if CONFIRM_TRAINING else []
+run(sys.executable, helper, '--repo', REPO, '--persistent', PERSISTENT,
+    '--config', PERSISTENT / (RUN_NAME + '.json'),
+    '--work-root', '/content/s2st-work/' + RUN_NAME,
+    '--backup-root', PERSISTENT / 'checkpoints' / RUN_NAME,
+    '--overlay-revision', REVISION, '--total-updates', str(TOTAL_UPDATES), *options)
+```
+
+実行は`--resume`（0からの自動開始は禁止）、`--session-seconds 0`、並行取得ONです。
+snapshot本体・各入力の既存検証と再開チェックは迂回しません。
+依存環境を構築し直した結果、そのSHA256が既存snapshotと異なる場合も停止します。
+この場合、環境lockを編集して一致させたりcheckpointを消したりせず、ログを確認してください。
+実Colab/GPUのoverlay実行とDrive速度は未検証です。
 
 ## 4A・4Bを完了後に再実行した場合
 

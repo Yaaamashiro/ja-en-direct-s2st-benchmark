@@ -20,6 +20,11 @@ PCM16、duration、必須 text を検証し、入力 manifest の hash を datas
 
 ## Reproducibility and recovery
 
+Colab学習は既定で時間上限なし（SESSION_MINUTES=0 / --session-seconds=0）とし、
+明示確認された目標更新数まで続行する。時間による自動一時停止は行わない。
+Colab側の切断は防げないため、atomic snapshot保存・検証・再開機構は維持する。
+ユーザーが正の時間予算を指定した場合だけ従来の制限を適用する。
+
 長時間処理は sample または shard 単位で atomic write し、`--resume` では成果物を
 検証して再利用する。既存出力は `--overwrite` なしで破壊しない。モデル、fairseq、
 Python、PyTorch、CUDA、Docker、G2P、評価器を immutable revision/version/digest で
@@ -124,6 +129,12 @@ BLEU用TT2はGriffin-Lim、代替HiFi-GANは別比較ID。WaveRNN/MOSは未実�
 実データE2Eの完了条件自体は免除しない。
 
 ## Portable data and predictions
+
+TT2のColab学習は準備済みMel SHA256を識別子として、必要なWAV/Mel ZIPをオンデマンド取得し、
+最大2転送/16待ちで学習順に先読みする。取得済み順の学習・未取得サンプルのスキップは禁止。
+完全なZIPと各WAVのSHA256を照合してからローカルパスを公開する。実効batch・sampler・
+optimizer/RNG復元の条件は変えない。旧単一巨大ZIPは最初の取得待ちを要し、S2UT/vocoderの
+全件事前入力検証は維持する。原本・既存準備成果物を変更せず、取得方式はrunの学習識別子に含めない。
 
 corpus absolute pathが存在すれば保持し、存在しない場合のみaudio/16k/{ja,en}/... suffixを
 corpus_rootおよびcorpus_root/productionへ照合する。一意でなければ停止し、basename検索しない。

@@ -14,6 +14,10 @@ def validate(model, dataset, device, limit=None):
     try:
         model.eval()
         for index in track(range(min(len(dataset), limit) if limit else len(dataset)), 'tt2: dev validation'):
+            if index % 64 == 0:
+                from ..stream_inputs import prefetch_dataset
+                remaining = min(len(dataset), limit) if limit else len(dataset)
+                prefetch_dataset(dataset, index, min(128, remaining-index))
             sample = {key: value.to(device) for key, value in collate([dataset[index]]).items()}
             output = model(**sample)
             sizes = [int(sample['target_lengths'].sum()), int(sample['phone_lengths'].sum()), sample['source'].size(0)]

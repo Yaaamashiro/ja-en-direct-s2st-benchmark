@@ -55,7 +55,7 @@ def test_timeout_keeps_last_committed_chunk(tmp_path):
             raise subprocess.TimeoutExpired(args, 1)
         return runner(args, **kwargs)
     result = run_session(cfg, work=tmp_path/'work', backup=tmp_path/'drive', runner=timeout,
-                         inspect_checkpoint=lambda p, k: int(p.read_text()))
+                         seconds=10, inspect_checkpoint=lambda p, k: int(p.read_text()))
     assert result == dict(status='PAUSED', durable_updates=1)
 
 
@@ -127,6 +127,7 @@ def test_notebook_cells_are_valid_python(name):
                 if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
                 and isinstance(node.value, ast.Constant)}
     assert defaults['OUTPUT_BASE'] == '/content/drive/MyDrive/ja-en-direct-s2st-benchmark-data'
+    assert defaults['SESSION_MINUTES'] == 0
     for cell in state['cells']:
         if cell['cell_type'] == 'code':
             ast.parse(''.join(cell['source']))
@@ -191,6 +192,62 @@ def test_nonresident_budget_starts_after_vocoder_preflight(tmp_path, monkeypatch
         seconds=10, clock=lambda: now[0], runner=run,
         inspect_checkpoint=lambda p, k: int(p.read_text()))
     assert result['durable_updates'] == 1
+
+
+@pytest.mark.parametrize('explicit_zero', [False, True])
+def test_unbounded_chunks_continue_after_an_hour_and_resume(tmp_path, explicit_zero, monkeypatch):
+    cfg, calls, runner = fixture(tmp_path)
+    monkeypatch.setenv('S2ST_TRAIN_DEADLINE', '1')
+    now = [0]
+    def run(args, **kwargs):
+        assert kwargs['timeout'] is None
+        assert 'S2ST_TRAIN_DEADLINE' not in kwargs['env']
+        now[0] += 7200  # Every update lasts longer than the old hour budget.
+        return runner(args, **kwargs)
+    kwargs = dict(work=tmp_path/'work', backup=tmp_path/'drive', runner=run,
+                  clock=lambda: now[0], inspect_checkpoint=lambda p, k: int(p.read_text()))
+    if explicit_zero:
+        kwargs['seconds'] = 0
+    assert run_session(cfg, total=2, **kwargs) == dict(status='COMPLETE', durable_updates=2)
+    assert len(calls) == 2
+    assert run_session(cfg, total=3, auto_resume=True, **kwargs) == dict(status='COMPLETE', durable_updates=3)
+    assert '--restore-file' in calls[-1]
+
+
+@pytest.mark.parametrize('seconds', [-1, float('nan'), float('inf'), -float('inf')])
+def test_session_rejects_invalid_time_limits(tmp_path, seconds):
+    cfg, calls, runner = fixture(tmp_path)
+    with pytest.raises(ValueError, match='finite and nonnegative'):
+        run_session(cfg, seconds=seconds, work=tmp_path/'work', backup=tmp_path/'drive', runner=runner)
+    assert not calls
+
+
+def test_disabling_time_limit_resumes_same_run_without_changing_identity(tmp_path):
+    cfg, calls, runner = fixture(tmp_path)
+    kwargs = dict(work=tmp_path/'work', backup=tmp_path/'drive', runner=runner,
+                  inspect_checkpoint=lambda p, k: int(p.read_text()))
+    assert run_session(cfg, total=1, seconds=60, **kwargs)['durable_updates'] == 1
+    receipt = next((tmp_path/'drive').glob('*/snapshot.json'))
+    original_identity = json.loads(receipt.read_text())['identity']
+    assert run_session(cfg, total=2, seconds=0, auto_resume=True, **kwargs)['durable_updates'] == 2
+    assert latest(tmp_path/'drive', original_identity)[1]['updates'] == 2
+    assert '--restore-file' in calls[-1]
+
+
+def test_cli_default_has_no_time_limit(tmp_path, monkeypatch, capsys):
+    import sys
+    from direct_s2st import colab
+    monkeypatch.setenv('S2ST_DRIVE_SAFE', '0')
+    path = tmp_path/'config.json'
+    path.write_text('{}')
+    monkeypatch.setattr(sys, 'argv', ['colab', '--config', str(path),
+                        '--work-root', str(tmp_path/'work'), '--backup-root', str(tmp_path/'drive')])
+    def run(config, **kwargs):
+        assert kwargs['seconds'] == 0
+        return dict(status='COMPLETE', durable_updates=2)
+    monkeypatch.setattr(colab, 'run_session', run)
+    colab.main()
+    assert json.loads(capsys.readouterr().out)['status'] == 'COMPLETE'
 
 
 def test_colab_comparison_configs_and_artifact_identity(tmp_path):

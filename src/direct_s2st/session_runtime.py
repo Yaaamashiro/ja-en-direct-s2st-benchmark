@@ -29,15 +29,23 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
         from .vocoders.verification import preflight_command
         args = preflight_command(args, temporary)
         # Input verification is resumable preparation, not optimization time.
-        deadline = time.monotonic() + seconds
+        deadline = time.monotonic() + seconds if seconds else None
         env = dict(os.environ, S2ST_TRAIN_OPTIMIZE='1',
-                   S2ST_TRAIN_STAGING=str(staging), S2ST_TRAIN_DEADLINE=str(deadline),
+                   S2ST_TRAIN_STAGING=str(staging),
                    S2ST_TRAIN_CACHE=str(temporary / 'cache'),
                    S2ST_TRAIN_CACHE_GB=str(settings['cache_gb']),
                    S2ST_TRAIN_READERS=str(settings['readers']),
                    S2ST_TRAIN_PRECISION=settings['precision'],
                    S2ST_TRAIN_FIXED_MICROBATCH=str(settings.get('fixed_microbatch', 0)),
                    S2ST_TRAIN_ADAPTIVE_BATCH='1' if settings['adaptive_batch'] else '0')
+        # Do not inherit a deadline from a previous bounded session. This also
+        # disables cooperative stopping in all three trainers when unbounded.
+        env.pop('S2ST_TRAIN_DEADLINE', None)
+        if deadline is not None:
+            env['S2ST_TRAIN_DEADLINE'] = str(deadline)
+        print('[session] ' + ('no time limit; training until requested updates complete'
+              if deadline is None else f'training time limit={seconds}s (includes dev validation)'),
+              file=sys.stderr, flush=True)
         if os.environ.get('S2ST_DRIVE_SAFE') == '1':
             env.update(S2ST_TRAIN_STRICT_LOCAL='1',
                        S2ST_BACKUP_MIN_SECONDS=os.environ.get('S2ST_BACKUP_MIN_SECONDS', '600'))
@@ -77,7 +85,7 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
                         print(f'[recovery] learned_at_least={learned} durable_updates={completed} '
                               f'pending_snapshots={len(ready)}', file=sys.stderr, flush=True)
                         reported = now
-                    if process.poll() is None and now > deadline + 30 and terminated_at is None:
+                    if deadline is not None and process.poll() is None and now > deadline + 30 and terminated_at is None:
                         forced = True
                         terminated_at = now
                         process.terminate()
@@ -96,6 +104,6 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
                     process.wait()
         if process.returncode and not forced:
             raise RuntimeError(f'training failed ({process.returncode}); durable update {completed} retained')
-        if not forced and time.monotonic() < deadline and completed < total:
+        if not forced and completed < total and (deadline is None or time.monotonic() < deadline):
             raise RuntimeError('trainer exited without publishing the requested final checkpoint')
     return dict(status='COMPLETE' if completed >= total else 'PAUSED', durable_updates=completed)

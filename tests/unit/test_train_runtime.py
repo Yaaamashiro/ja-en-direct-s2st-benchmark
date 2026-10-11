@@ -225,6 +225,102 @@ def test_resident_session_deadline_excludes_vocoder_preflight(tmp_path, monkeypa
     assert result['durable_updates'] == 1
 
 
+@pytest.mark.parametrize('kind', ['tt2', 's2ut', 'vocoder'])
+def test_unbounded_resident_keeps_running_and_resumes_with_no_inherited_deadline(tmp_path, monkeypatch, capsys, kind):
+    from direct_s2st import session_runtime
+    from direct_s2st.train_runtime import stopping
+    from direct_s2st.colab import publish, latest
+    now = [0]
+    monkeypatch.setenv('S2ST_TRAIN_DEADLINE', '1')  # Stale parent value must not stop this run.
+    monkeypatch.setattr(session_runtime.time, 'monotonic', lambda: now[0])
+    class Process:
+        returncode = None
+        def __init__(self, args, env):
+            assert args[-1] == '--resume'
+            assert 'S2ST_TRAIN_DEADLINE' not in env
+            with monkeypatch.context() as child:
+                child.delenv('S2ST_TRAIN_DEADLINE', raising=False)
+                assert not stopping()
+            self.polls = 0
+            root = Path(env['S2ST_TRAIN_STAGING'])/'2'
+            (root/'files').mkdir(parents=True)
+            (root/'files/checkpoint.pt').write_text('2')
+            (root/'ready.json').write_text('{"updates": 2}')
+        def poll(self):
+            now[0] += 7200
+            self.polls += 1
+            if self.polls >= 4:
+                self.returncode = 0
+            return self.returncode
+        def terminate(self):
+            pytest.fail('unbounded training must not be terminated by elapsed time')
+        def kill(self):
+            pytest.fail('unbounded training must not be killed by elapsed time')
+    work, backup = tmp_path/'work', tmp_path/'backup'
+    work.mkdir()
+    (work/'checkpoint.pt').write_text('1')
+    identity = {'fixture': kind}
+    publish(work, backup, identity, 1)
+    config = dict(kind=kind, checkpoint='checkpoint.pt', command=['fixture'], resume_args=['--resume'],
+                  runtime=dict(cache_gb=0, readers=1, precision='default', adaptive_batch=False))
+    result = session_runtime.run_continuous(config, work=work, backup=backup, identity=identity,
+        completed=1, total=2, seconds=0, publish=publish, popen=Process,
+        inspect_checkpoint=lambda p, k: int(p.read_text()))
+    assert result == dict(status='COMPLETE', durable_updates=2)
+    assert latest(backup, identity)[1]['updates'] == 2
+    assert 'no time limit' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('returncode', [0, 2])
+def test_unbounded_resident_unexpected_exit_is_not_a_normal_pause(tmp_path, monkeypatch, returncode):
+    from direct_s2st import session_runtime
+    now = [0]
+    monkeypatch.setattr(session_runtime.time, 'monotonic', lambda: now[0])
+    class Process:
+        def __init__(self, args, env):
+            self.returncode = returncode
+            now[0] = 100000
+        def poll(self):
+            return self.returncode
+    config = dict(kind='tt2', checkpoint='checkpoint.pt', command=['fixture'], resume_args=[],
+                  runtime=dict(cache_gb=0, readers=1, precision='default', adaptive_batch=False))
+    with pytest.raises(RuntimeError, match='trainer exited|training failed'):
+        session_runtime.run_continuous(config, work=tmp_path/'work', backup=tmp_path/'backup',
+            identity={'fixture': True}, completed=0, total=2, seconds=0, popen=Process,
+            publish=lambda *args: pytest.fail('no checkpoint to publish'),
+            inspect_checkpoint=lambda p, k: pytest.fail('no checkpoint to inspect'))
+
+
+def test_explicit_resident_time_limit_still_pauses_with_verified_snapshot(tmp_path, monkeypatch):
+    from direct_s2st import session_runtime
+    from direct_s2st.colab import publish, latest
+    now, terminated = [0], []
+    monkeypatch.setattr(session_runtime.time, 'monotonic', lambda: now[0])
+    class Process:
+        returncode = None
+        def __init__(self, args, env):
+            assert float(env['S2ST_TRAIN_DEADLINE']) == 10
+            now[0] = 41
+            root = Path(env['S2ST_TRAIN_STAGING'])/'1'
+            (root/'files').mkdir(parents=True)
+            (root/'files/checkpoint.pt').write_text('1')
+            (root/'ready.json').write_text('{"updates": 1}')
+        def poll(self):
+            return self.returncode
+        def terminate(self):
+            terminated.append(True)
+            self.returncode = -15
+    config = dict(kind='tt2', checkpoint='checkpoint.pt', command=['fixture'], resume_args=[],
+                  runtime=dict(cache_gb=0, readers=1, precision='default', adaptive_batch=False))
+    identity = {'fixture': True}
+    result = session_runtime.run_continuous(config, work=tmp_path/'work', backup=tmp_path/'backup',
+        identity=identity, completed=0, total=2, seconds=10, publish=publish, popen=Process,
+        inspect_checkpoint=lambda p, k: int(p.read_text()))
+    assert result == dict(status='PAUSED', durable_updates=1)
+    assert terminated == [True]
+    assert latest(tmp_path/'backup', identity)[1]['updates'] == 1
+
+
 def test_rank_state_restores_python_numpy_and_torch_rng():
     import random
     import numpy as np

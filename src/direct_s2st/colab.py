@@ -374,14 +374,14 @@ def checkpoint_updates(path, kind):
 
 
 @operation('direct_s2st/colab: run_session')
-def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
+def run_session(config, *, work, backup, total=2, chunk=1, seconds=0,
                 resume=False, auto_resume=False, confirm_training=False, restore_only=False, runner=subprocess.run, clock=time.monotonic,
                 inspect_checkpoint=checkpoint_updates, _staged=False):
     work, backup = Path(work).resolve(), Path(backup).resolve()
     if restore_only and not resume:
         raise ValueError('restore-only requires resume')
-    if min(total, chunk, seconds) <= 0 or not math.isfinite(seconds):
-        raise ValueError('total, chunk and seconds must be positive')
+    if min(total, chunk) <= 0 or seconds < 0 or not math.isfinite(seconds):
+        raise ValueError('total and chunk must be positive; seconds must be finite and nonnegative (0 disables the time limit)')
     if total > 10 and not confirm_training:
         raise ValueError('more than 10 updates requires --confirm-training')
     if work == Path(work.anchor) or work.is_relative_to(backup) or backup.is_relative_to(work):
@@ -395,6 +395,13 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
         from .batch_calibration import s2ut_exact
         s2ut_exact(config)  # Reject hand-edited exact configs before staging/restore.
     if os.environ.get('S2ST_DRIVE_SAFE') == '1' and not _staged:
+        if config['kind'] == 'tt2' and os.environ.get('S2ST_STREAM_INPUTS') == '1':
+            from .stream_inputs import streaming_map
+            with streaming_map(config, work):
+                return run_session(config, work=work, backup=backup, total=total, chunk=chunk,
+                    seconds=seconds, resume=resume, auto_resume=auto_resume,
+                    confirm_training=confirm_training, restore_only=restore_only,
+                    runner=runner, clock=clock, inspect_checkpoint=inspect_checkpoint, _staged=True)
         from .drive_staging import active_map
         rows, local = stage_training(config, work)
         with active_map(rows, local):
@@ -491,9 +498,14 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
 def _run_chunks(config, work, backup, checkpoint, identity, completed, total, chunk,
                 seconds, runner, clock, inspect_checkpoint, preflight_args):
     started = clock()
+    print('[session] ' + ('no time limit; training until requested updates complete'
+          if not seconds else f'training time limit={seconds}s (includes dev validation)'),
+          file=sys.stderr, flush=True)
+    env = dict(os.environ)
+    env.pop('S2ST_TRAIN_DEADLINE', None)
     while completed < total:
-        remaining = seconds - (clock() - started)
-        if remaining <= 0:
+        remaining = seconds - (clock() - started) if seconds else None
+        if remaining is not None and remaining <= 0:
             break
         target = min(total, completed + chunk)
         mapping = dict(python=sys.executable, run_root=str(work), checkpoint=str(checkpoint), updates=str(target))
@@ -503,7 +515,7 @@ def _run_chunks(config, work, backup, checkpoint, identity, completed, total, ch
         work.mkdir(parents=True, exist_ok=True)
         print(f'Training through update {target}; last durable update {completed}', flush=True)
         try:
-            result = runner(args, check=False, timeout=remaining)
+            result = runner(args, check=False, timeout=remaining, env=env)
         except subprocess.TimeoutExpired:
             print('Session budget reached. Incomplete local chunk is not published.', flush=True)
             break
@@ -526,7 +538,8 @@ def main():
     parser.add_argument('--backup-root', type=Path, required=True)
     parser.add_argument('--total-updates', type=int, default=2)
     parser.add_argument('--chunk-updates', type=int, default=1)
-    parser.add_argument('--session-seconds', type=float, default=3600)
+    parser.add_argument('--session-seconds', type=float, default=0,
+                        help='Optional training subprocess time limit; 0 (default) runs until the requested updates finish')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--auto-resume', action='store_true',
                         help='Resume a verified snapshot, or explicitly report starting at zero; retain partial copies')
