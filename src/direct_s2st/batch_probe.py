@@ -8,10 +8,7 @@ import time
 
 from .io import atomic_write_json
 from .progress import operation
-
-
-class ProbeComplete(BaseException):
-    progress_status = 'completed'
+from .batch_probe_protocol import ProbeComplete, validate_measurement
 
 
 class Probe:
@@ -20,6 +17,8 @@ class Probe:
         self.path = Path(value) if value else None
         self.steps = []
         self.limit = int(os.environ.get('S2ST_BATCH_PROBE_STEPS', '3'))
+        if self.limit < 1:
+            raise ValueError('probe step count must be positive')
 
     def begin(self):
         if not self.path:
@@ -57,20 +56,28 @@ def main():
         raise ValueError('probe requires -m trainer and a private result path')
     if not torch.cuda.is_available():
         raise ValueError('VRAM calibration requires CUDA')
-    if any(v in command for v in ('--restore-file', '--resume')):
+    if any(v.split('=', 1)[0] in ('--restore-file', '--resume') for v in command):
         raise ValueError('probe must start from fresh weights')
     if os.environ.get('S2ST_TRAIN_STAGING'):
         raise ValueError('probe must not publish training checkpoints')
     path = Path(os.environ['S2ST_BATCH_PROBE'])
+    previous_argv = sys.argv
     sys.argv = command[1:]
     try:
-        runpy.run_module(command[1], run_name='__main__')
+        try:
+            runpy.run_module(command[1], run_name='__main__')
+        except SystemExit as error:
+            if error.code not in (None, 0):
+                raise
         raise RuntimeError('trainer exited before completing probe measurements')
     except ProbeComplete:
         result = json.loads(path.read_text(encoding='utf-8'))
         result['status'] = 'ok'
+        validate_measurement(result, int(os.environ.get('S2ST_BATCH_PROBE_STEPS', '3')))
     except (torch.cuda.OutOfMemoryError, RecoverableOOM):
         result = dict(status='oom')
+    finally:
+        sys.argv = previous_argv
     atomic_write_json(path, result, overwrite=True)
 
 

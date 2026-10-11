@@ -18,7 +18,7 @@ from direct_s2st.progress import operation
 
 @operation('migration: legacy experiment to separate paper runs')
 def migrate(persistent, revision, *, overwrite=False, separate_recipe_v2_runs=False,
-            separate_recipe_v3_runs=False):
+            separate_recipe_v3_runs=False, separate_code_fix_runs=False):
     persistent = Path(persistent).resolve()
     corpus = Path(os.environ['CORPUS_ROOT']).resolve()
     if persistent.is_relative_to(corpus) or corpus.is_relative_to(persistent):
@@ -37,6 +37,8 @@ def migrate(persistent, revision, *, overwrite=False, separate_recipe_v2_runs=Fa
     for path in persistent.glob('*.json'):
         config = json.loads(path.read_text(encoding='utf-8'))
         if config.get('research_metadata', {}).get('reproduction_mode') in ('paper_exact', 'paper_practical'):
+            if separate_code_fix_runs:
+                continue
             if not separate_recipe_v2_runs and not separate_recipe_v3_runs:
                 raise ValueError('paper training configuration already exists; explicitly pass --separate-recipe-v2-runs to preserve it and use new recipe-v2 run names')
             if '-recipe-v3' in path.stem:
@@ -61,10 +63,13 @@ def main():
     parser.add_argument('--separate-recipe-v2-runs', action='store_true')
     parser.add_argument('--separate-recipe-v3-runs', action='store_true',
                         help='Preserve older runs; use a new S2UT recipe-v3 run for the character vocabulary change')
+    parser.add_argument('--separate-code-fix-runs', action='store_true',
+                        help='Preserve all existing configs/checkpoints; use distinct run names after a code fix (no old optimizer resume)')
     args = parser.parse_args()
     print(json.dumps(migrate(args.persistent, args.revision, overwrite=args.overwrite,
                              separate_recipe_v2_runs=args.separate_recipe_v2_runs,
-                             separate_recipe_v3_runs=args.separate_recipe_v3_runs)))
+                             separate_recipe_v3_runs=args.separate_recipe_v3_runs,
+                             separate_code_fix_runs=args.separate_code_fix_runs)))
 
 
 if __name__ == '__main__':

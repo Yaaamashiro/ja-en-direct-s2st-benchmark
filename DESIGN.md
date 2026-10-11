@@ -88,7 +88,9 @@ decoder CTCはtrain英語文だけで学習したSentencePiece Unigram要求語�
 モデルSHA・版・train文hash・実語彙数を保存する。letterとCTCのbyte一致を要求せず、
 同じ文から再符号化したCTC piece列の一致を検証する。旧CTC文字ラベルを黙って使用しない。
 ASCII whitespaceのみ畳み、NFKC・case foldingを行わない。受理文字判定は固定コードポイント
-集合を使用する。辞書頻度はtrainからだけ数え、dev/test未知文字をerrorとする。
+集合を使用する。letter辞書は全splitの文字を登録し、頻度はtrainからだけ数える。
+dev/test専用文字の頻度は0とし、正解ラベルを`<unk>`へ置換しない。
+辞書の登録と重みの学習を区別し、モデルのoptimizer更新にはtrainだけを使う。
 TTS投入textと正解textのtoken列が異なる場合はレビューを要求し、音声の再生成は行わない。
 これはtext同士の一致検証であり、実音声の発話内容を保証する強制alignmentではない。
 

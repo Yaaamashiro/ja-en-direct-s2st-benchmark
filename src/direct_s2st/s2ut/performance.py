@@ -82,9 +82,12 @@ def runtime_hooks(audit):
             raise RuntimeError('fairseq did not complete an optimizer update (e.g. overflow); refusing to skip samples')
         cap = self._s2st_tuning.fixed
         physical = max(min(int(s['nsentences']), cap) if cap else int(s['nsentences']) for s in samples)
-        self._s2st_probe.finish(physical)
+        # The measured interval is the WHOLE logical optimizer update, not
+        # just its largest physical piece. Count every accumulated sample so
+        # practical-mode speed selection does not reward a larger cap by fiat.
+        self._s2st_probe.finish(sum(int(s['nsentences']) for s in samples))
         self._s2st_timing.report(self.get_num_updates(), sum(int(s['ntokens']) for s in samples),
-                                 units='target_units', microbatch=self._s2st_tuning.size)
+                                 units='target_units', microbatch=physical)
         self._s2st_last_step = time.monotonic()
         if stopping():
             # fairseq validates/saves with its exact iterator position after this step.

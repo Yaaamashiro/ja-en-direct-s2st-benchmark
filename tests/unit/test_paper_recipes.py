@@ -232,6 +232,17 @@ def test_revision_migration_preserves_legacy_data_and_requires_overwrite(tmp_pat
     (persistent/'s2ut-recipe-v3.json').write_bytes(preserved)
     with pytest.raises(ValueError, match='recipe-v3 configuration already exists'):
         module.migrate(persistent, revision, overwrite=True, separate_recipe_v3_runs=True)
+    snapshots = persistent/'checkpoints'
+    snapshots.mkdir()
+    (snapshots/'old.pt').write_bytes(b'old optimizer preserved')
+    originals = {path: path.read_bytes() for path in persistent.glob('*.json')}
+    assert module.migrate(persistent, revision, separate_code_fix_runs=True)['status'] == 'PLAN_ONLY'
+    assert (persistent/'repository-revision.txt').read_text().strip() == old
+    result = module.migrate(persistent, revision, overwrite=True, separate_code_fix_runs=True)
+    assert result['status'] == 'APPLIED' and result['old_checkpoint_resume'] is False
+    assert all(path.read_bytes() == content for path, content in originals.items())
+    assert (snapshots/'old.pt').read_bytes() == b'old optimizer preserved'
+    assert (data/'features.zip').read_bytes() == b'preserved'
 
 
 def test_streaming_accumulation_matches_list_and_resumes(tmp_path):

@@ -437,3 +437,70 @@ def test_frozen_snapshot_contains_batch_selection_and_recipe_resume_locks(tmp_pa
         assert (frozen/name).read_text() == 'immutable ' + name
         (work/name).write_text('subsequent update')
         assert (frozen/name).read_text() == 'immutable ' + name
+
+
+@pytest.mark.parametrize('field,value', [('seconds', float('nan')), ('seconds', float('inf')),
+    ('samples', 0), ('samples', 1.5), ('total', 0), ('used', -1), ('used', True)])
+def test_malformed_measurement_is_not_recorded_as_capacity(tmp_path, field, value):
+    bad = measured(8)
+    bad['steps'][0][field] = value
+    path = tmp_path / 'record'
+    with pytest.raises(ValueError, match='invalid calibration measurement'):
+        calibrate(config(), {}, path, tmp_path / 'local',
+                  measure=lambda *a: bad, get_hardware=lambda: HW)
+    assert json.loads(path.read_text())['trials'] == []
+
+
+def test_reused_and_changed_gpu_measurements_require_all_steps(tmp_path):
+    path = tmp_path / 'record'
+    cfg = config()
+    calibrate(cfg, {}, path, tmp_path / 'local', measure=lambda c,s,p: measured(s),
+              get_hardware=lambda: HW)
+    before = path.read_text()
+    partial = measured(64)
+    partial['steps'] = partial['steps'][:1]
+    with pytest.raises(ValueError, match='incomplete calibration step count'):
+        calibrate(cfg, {}, path, tmp_path / 'local', measure=lambda *a: partial,
+                  get_hardware=lambda: dict(HW, name='new GPU'))
+    assert path.read_text() == before
+    record = json.loads(before)
+    record['trials'][-1]['result'] = partial
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match='incomplete calibration step count'):
+        calibrate(cfg, {}, path, tmp_path / 'local', inspect_only=True)
+
+
+def test_probe_rejects_nonpositive_steps_and_equals_resume(tmp_path, monkeypatch):
+    from direct_s2st import batch_probe
+    import sys
+    monkeypatch.setenv('S2ST_BATCH_PROBE_STEPS', '0')
+    with pytest.raises(ValueError, match='positive'):
+        Probe()
+    monkeypatch.setenv('S2ST_BATCH_PROBE', str(tmp_path / 'measurement.json'))
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
+    monkeypatch.setattr(sys, 'argv', ['probe', '-m', 'trainer', '--restore-file=real.pt'])
+    with pytest.raises(ValueError, match='fresh weights'):
+        batch_probe.main()
+
+
+def test_session_gpu_recheck_does_not_accept_partial_evidence(tmp_path, monkeypatch):
+    from direct_s2st import batch_calibration as calibration
+    from direct_s2st.colab import run_session
+    cfg = config()
+    lock = tmp_path / 'data-lock'
+    lock.write_text('immutable inputs')
+    cfg.update(identity_files=[str(lock)], checkpoint='checkpoint.pt',
+               resume_args=['--restore-file', '{checkpoint}'])
+    from direct_s2st.hashing import sha256_file
+    backup = tmp_path / 'drive'
+    path = backup / 'batch-calibration.json'
+    calibrate(cfg, {str(lock): sha256_file(lock)}, path, tmp_path / 'local',
+              measure=lambda c,s,p: measured(s), get_hardware=lambda: HW)
+    before = path.read_text()
+    partial = measured(64)
+    partial['steps'] = partial['steps'][:1]
+    monkeypatch.setattr(calibration, 'hardware', lambda: dict(HW, name='new GPU'))
+    monkeypatch.setattr(calibration, 'trial', lambda *a: partial)
+    with pytest.raises(ValueError, match='incomplete calibration step count'):
+        run_session(cfg, work=tmp_path / 'work', backup=backup, auto_resume=True)
+    assert path.read_text() == before
