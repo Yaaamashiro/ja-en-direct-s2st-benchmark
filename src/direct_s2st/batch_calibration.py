@@ -1,6 +1,7 @@
 """Shared, resumable startup calibration. Fixed settings after update zero."""
 import copy
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -11,6 +12,7 @@ from .io import atomic_write_json
 from .journal import digest
 from .progress import operation, track
 from .recipes import option, replace_option, validate_s2ut_paper, validate_s2ut_runtime
+from .batch_probe_protocol import validate_measurement
 
 
 def s2ut_exact(config):
@@ -134,18 +136,20 @@ def trial(config, size, parent):
             result = subprocess.run([sys.executable, '-m', 'direct_s2st.batch_probe', *command[1:]],
                                     env=env, check=False, timeout=settings['trial_seconds'])
         except subprocess.TimeoutExpired:
-            raise RuntimeError('VRAM trial timed out; completed measurements retained. Increase trial_seconds explicitly')
+            raise RuntimeError('VRAM trial timed out; earlier completed trials are retained, '
+                               'but this incomplete candidate will be retried. Increase trial_seconds explicitly') from None
         if result.returncode or not result_path.is_file():
             raise RuntimeError('VRAM trial failed for a non-OOM reason; inspect trainer logs')
         return json.loads(result_path.read_text(encoding='utf-8'))
 
 
-def safe(result, reserve):
+def safe(result, reserve, *, steps=None):
+    validate_measurement(result, steps)
+    if not math.isfinite(reserve) or not 0 <= reserve < 1:
+        raise ValueError('invalid calibration VRAM reserve')
     if result.get('status') == 'oom':
         return False
-    if result.get('status') != 'ok' or not result.get('steps'):
-        raise ValueError('invalid calibration measurement')
-    return all(s['seconds'] > 0 and s['samples'] > 0 and 0 < s['used'] <= (1-reserve)*s['total']
+    return all(s['used'] <= (1-reserve)*s['total']
                for s in result['steps'])
 
 
@@ -190,19 +194,31 @@ def calibrate(config, inputs, record_path, parent, *, measure=trial, get_hardwar
     record = json.loads(record_path.read_text(encoding='utf-8')) if record_path.is_file() else None
     if record and record['request'] != request:
         raise ValueError('calibration configuration/data changed; use a new run name')
+    reserve = config['batch_calibration']['reserve_ratio']
+    def is_safe(result):
+        return safe(result, reserve, steps=config['batch_calibration']['steps'])
+    known = {}
+    if record:
+        for saved in record['trials']:
+            if saved['batch'] in known:
+                raise ValueError('duplicate calibration trial')
+            is_safe(saved['result'])
+            known[saved['batch']] = saved['result']
+        if record.get('selected') is not None:
+            if record['selected'] not in known or not is_safe(known[record['selected']]):
+                raise ValueError('saved batch selection lacks complete safe measurements')
     if inspect_only:
         if not record or record.get('selected') is None:
             raise ValueError('no saved batch selection; cannot restore this run')
         return selected_config(config, record['selected'])
     hw = get_hardware()
     parent.mkdir(parents=True, exist_ok=True)
-    reserve = config['batch_calibration']['reserve_ratio']
     if record and record.get('selected') is not None:
         size = record['selected']
         if hw not in record['verified_hardware']:
             # New GPU: validate the SAME batch, do not change checkpoint recipe.
             result = measure(config, size, parent)
-            if not safe(result, reserve):
+            if not is_safe(result):
                 raise ValueError('saved batch is unsafe on this GPU; use the previous GPU or a new run, not a silent batch change')
             record['hardware_checks'].append(dict(hardware=hw, batch=size, result=result))
             record['verified_hardware'].append(hw)
@@ -217,15 +233,14 @@ def calibrate(config, inputs, record_path, parent, *, measure=trial, get_hardwar
                       selected=None, weights_reused=False,
                       policy='official_batch_fit_check' if exact else 'physical_batch_search')
         atomic_write_json(record_path, record)
-    known = {r['batch']:r['result'] for r in record['trials']}
     def ensure(size):
         if size not in known:
-            known[size] = measure(config, size, parent)
-            if known[size].get('status') == 'ok' and len(known[size].get('steps', [])) != config['batch_calibration']['steps']:
-                raise ValueError('incomplete calibration step count')
+            result = measure(config, size, parent)
+            is_safe(result)  # Validate before marking this candidate reusable.
+            known[size] = result
             record['trials'].append(dict(batch=size, result=known[size]))
             atomic_write_json(record_path, record, overwrite=True)
-        return safe(known[size], reserve)
+        return is_safe(known[size])
     accepted = []
     rejected = None
     for size in track(candidates(config), 'training: startup batch candidates'):
@@ -244,7 +259,7 @@ def calibrate(config, inputs, record_path, parent, *, measure=trial, get_hardwar
             while high-low > 1:
                 size = (low+high)//2
                 yield size
-                if safe(known[size], reserve):
+                if is_safe(known[size]):
                     low = size
                     accepted.append(size)
                 else:

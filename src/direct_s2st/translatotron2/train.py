@@ -1,9 +1,10 @@
 """Train the native experimental TT2 core on the prepared train split only."""
 import argparse
-from ..progress import operation, track
+from ..progress import Progress, operation, track
 from dataclasses import asdict
 import json
 import os
+import time
 from pathlib import Path
 import torch
 from ..io import ExistingOutputError, atomic_write_json
@@ -157,13 +158,20 @@ def _main():
         sample = {key: extremes[index][key] for index, fields in enumerate(
                   [('source', 'source_lengths'), ('target', 'target_lengths'), ('phones', 'phone_lengths')])
                   for key in fields}
-        for step in track(range(probe.limit), 'tt2: disposable train-length stress batches'):
-            batch = collate([sample] * args.batch_size)
-            for group in optimizer.param_groups:
-                group['lr'] = learning_rate(args.learning_rate, step + 1, args.warmup_updates)
-            probe.begin()
-            optimization_step(model, optimizer, batch)
-            probe.finish(args.batch_size)
+        # A completion exception unwinds a suspended track() generator as
+        # GeneratorExit. Count optimizer steps explicitly before that signal.
+        with Progress('tt2: disposable train-length stress batches',
+                      total=probe.limit, counted=True) as progress:
+            for step in range(probe.limit):
+                progress.current = str(step + 1)
+                batch = collate([sample] * args.batch_size)
+                for group in optimizer.param_groups:
+                    group['lr'] = learning_rate(args.learning_rate, step + 1, args.warmup_updates)
+                probe.begin()
+                optimization_step(model, optimizer, batch)
+                progress.count = step + 1
+                progress.advanced = time.monotonic()
+                probe.finish(args.batch_size)
         raise RuntimeError('probe observer did not stop the disposable trainer')
     dev = PreparedDataset(args.data_root, 'dev') if args.validate_interval and rank == 0 else None
     if paper and dev is not None:

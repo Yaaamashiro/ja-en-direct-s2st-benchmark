@@ -1,11 +1,13 @@
 """Train fixed-fairseq HiFi-GAN generators with official MPD/MSD losses."""
 import argparse
-from ..progress import operation, track
+from ..progress import Progress, operation, track
+from contextlib import nullcontext
 import json
 import math
 import os
 from pathlib import Path
 import tempfile
+import time
 
 import torch
 from torch.nn import functional as F
@@ -271,8 +273,13 @@ def main():
         return wave, all_units.get(row['pair_id'])
     probe_longest = max(range(len(rows)), key=lambda i: float(rows[i]['en_duration'])) if probe.path else None
     indices = range(start * args.batch_size, args.max_updates * args.batch_size)
-    with ordered_samples(load, indices, args.num_workers, args.prefetch_factor) as loaded:
-        for update in track(range(start + 1, args.max_updates + 1), 'vocoder: train updates'):
+    with ordered_samples(load, indices, args.num_workers, args.prefetch_factor) as loaded, \
+            (Progress('vocoder: disposable stress batches', total=probe.limit, counted=True)
+             if probe.path else nullcontext()) as probe_progress:
+        updates = range(start + 1, args.max_updates + 1)
+        for update in (updates if probe.path else track(updates, 'vocoder: train updates')):
+            if probe_progress is not None:
+                probe_progress.current = str(update)
             with timing.measure('data_wait'):
                 samples = [next(loaded) for _ in range(args.batch_size)]
             probe.begin()
@@ -283,6 +290,9 @@ def main():
             units = [sample[1] for sample in samples] if args.kind == 'unit' else None
             with timing.measure('optimization', args.device if enabled() else None):
                 losses = gan_step(generator, discriminators, optim_g, optim_d, conditioning, real, mel, units=units)
+            if probe_progress is not None:
+                probe_progress.count += 1
+                probe_progress.advanced = time.monotonic()
             probe.finish(args.batch_size)
             stop = stopping()
             if update % args.save_interval_updates == 0 or update == args.max_updates or stop:

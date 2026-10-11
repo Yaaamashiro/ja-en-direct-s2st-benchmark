@@ -145,3 +145,48 @@ def test_training_cli_updates_and_resumes(setup, tmp_path, monkeypatch, workers)
     _, expected = load_checkpoint(tmp_path/'continuous/checkpoints/checkpoint_last.pt')
     for name, value in state['model'].items():
         assert torch.equal(value, expected['model'][name]), name
+
+
+def test_real_cpu_tt2_probe_completes_three_optimizer_steps_without_checkpoint(setup, tmp_path, monkeypatch, capsys):
+    from direct_s2st.translatotron2 import train
+    from direct_s2st.batch_probe import ProbeComplete
+    import json
+    _, batch = setup
+    single = {key: value[:1] for key, value in batch.items()}
+    class Dataset:
+        spec = {'n_mels': 80}
+        tokens = list('abcdefg')
+        rows = [dict(id='fixture', src_n_frames=24, tgt_n_frames=12)]
+        labels = {'fixture': 'c d e'}
+        def __init__(self, root, split): assert split == 'train'
+        def __len__(self): return 1
+        def __getitem__(self, index): return single
+    monkeypatch.setattr(train, 'PreparedDataset', Dataset)
+    monkeypatch.setattr(train, 'fingerprint', lambda root: {'fixture': 'synthetic'})
+    monkeypatch.setattr('sys.argv', ['tt2-train', '--data-root', str(tmp_path / 'data'),
+        '--run-root', str(tmp_path / 'run'), '--batch-size', '2', '--max-updates', '3'])
+    path = tmp_path / 'measurement.json'
+    monkeypatch.setenv('S2ST_BATCH_PROBE', str(path))
+    monkeypatch.setenv('S2ST_BATCH_PROBE_STEPS', '3')
+    for name in ('synchronize', 'reset_peak_memory_stats'):
+        monkeypatch.setattr(torch.cuda, name, lambda: None)
+    for name, value in [('mem_get_info', (60, 100)), ('memory_reserved', 20),
+                        ('max_memory_allocated', 50), ('max_memory_reserved', 60)]:
+        monkeypatch.setattr(torch.cuda, name, lambda value=value: value)
+    # Actual CPU model, backward and Adam; only telemetry is a CUDA double.
+    original = train.optimization_step
+    calls = []
+    def step(model, optimizer, samples):
+        losses = original(model, optimizer, samples)
+        assert optimizer.state
+        calls.append(losses)
+        return losses
+    monkeypatch.setattr(train, 'optimization_step', step)
+    with pytest.raises(ProbeComplete):
+        train.main()
+    assert len(calls) == 3
+    assert len(json.loads(path.read_text())['steps']) == 3
+    assert not list(tmp_path.rglob('*.pt'))
+    logs = capsys.readouterr().err
+    assert 'stress batches status=completed checked=3/3' in logs
+    assert 'status=interrupted' not in logs

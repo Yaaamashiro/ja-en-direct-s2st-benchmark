@@ -465,7 +465,8 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=3600,
         hw = hardware()
         if hw not in record['verified_hardware']:
             result = trial(config, record['selected'], work.parent)
-            if not safe(result, config['batch_calibration']['reserve_ratio']):
+            if not safe(result, config['batch_calibration']['reserve_ratio'],
+                        steps=config['batch_calibration']['steps']):
                 raise ValueError('saved batch is unsafe on this GPU; use previous GPU or a new run name')
             record['verified_hardware'].append(hw)
             record['hardware_checks'].append(dict(hardware=hw, batch=record['selected'], result=result))
