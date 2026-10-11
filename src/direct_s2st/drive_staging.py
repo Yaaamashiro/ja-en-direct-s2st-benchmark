@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 
@@ -21,6 +22,8 @@ from .progress import operation, track
 
 
 _maps = {}
+_streams = {}
+_map_lock = threading.RLock()
 
 
 def logical(path):
@@ -31,18 +34,35 @@ def mapping():
     name = os.environ.get('S2ST_INPUT_MAP')
     if not name:
         return {}
-    if name not in _maps:
-        document = json.loads(Path(name).read_text(encoding='utf-8'))
-        if document['sha256'] != digest(document['rows']):
-            raise ValueError('corrupt local input map')
-        _maps[name] = document['rows']
+    with _map_lock:
+        if name not in _maps:
+            document = json.loads(Path(name).read_text(encoding='utf-8'))
+            if document['sha256'] != digest(document['rows']):
+                raise ValueError('corrupt local input map')
+            stream = document.get('stream')
+            if stream is not None and stream['sha256'] != digest(stream['body']):
+                raise ValueError('corrupt streaming job index')
+            _maps[name] = document['rows']
+            _streams[name] = stream
     return _maps[name]
+
+
+def stream_document():
+    mapping()
+    name = os.environ.get('S2ST_INPUT_MAP')
+    return name, _streams.get(name)
 
 
 def local_path(path):
     entry = mapping().get(logical(path))
     if entry is None:
         return Path(path)
+    if 'local_stamp' not in entry and 'job' in entry:
+        from .stream_inputs import materialize
+        ready = materialize(path, entry)
+        with _map_lock:
+            if 'local_stamp' not in entry:
+                entry.update(ready)
     target = Path(entry['local'])
     stat = target.stat()
     if target.is_symlink() or [stat.st_size, stat.st_mtime_ns] != entry['local_stamp']:
@@ -330,16 +350,21 @@ def read_common_manifest_row(row, language):
 
 
 @contextmanager
-def active_map(rows, local):
+def active_map(rows, local, *, stream=None):
     name = Path(local) / 'input-map.json'
-    atomic_write_json(name, dict(rows=rows, sha256=digest(rows)), overwrite=True)
+    document = dict(rows=rows, sha256=digest(rows))
+    if stream is not None:
+        document['stream'] = stream
+    atomic_write_json(name, document, overwrite=True)
     prior = os.environ.get('S2ST_INPUT_MAP')
     _maps.pop(str(name), None)
+    _streams.pop(str(name), None)
     os.environ['S2ST_INPUT_MAP'] = str(name)
     try:
         yield name
     finally:
         _maps.pop(str(name), None)
+        _streams.pop(str(name), None)
         if prior is None:
             os.environ.pop('S2ST_INPUT_MAP', None)
         else:

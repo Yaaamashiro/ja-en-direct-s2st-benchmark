@@ -186,6 +186,10 @@ def _main():
     with ordered_samples(lambda i: dataset[i % len(dataset)], indices,
                          args.num_workers, args.prefetch_factor) as samples:
         for update in track(range(completed + 1, args.max_updates + 1), 'tt2: train updates'):
+            from ..stream_inputs import prefetch_dataset
+            prefetch_dataset(dataset,
+                             (update-1)*args.update_freq*args.batch_size*world_size+rank*args.batch_size,
+                             max(128, 2*args.update_freq*args.batch_size*world_size))
             with timing.measure('data_wait_and_collate'):
                 streaming = paper and not tuning.active
                 batches = (StreamingBatches(samples, dataset, update, args.batch_size, args.update_freq, rank, world_size, timing)
@@ -241,6 +245,10 @@ def main():
     try:
         _main()
     finally:
+        # Cancel queued look-ahead at completion/error, before Python joins the
+        # executor at exit. At most two already-started transfers finish.
+        from ..stream_inputs import close_current
+        close_current()
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
 

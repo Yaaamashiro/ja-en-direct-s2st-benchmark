@@ -24,7 +24,8 @@ def read_table(path):
 
 
 def vocabulary(root):
-    tokens = [line.rsplit(' ', 1)[0] for line in (Path(root) / 'target_phoneme/dict.txt').read_text(encoding='utf-8').splitlines()]
+    from ..drive_staging import local_path
+    tokens = [line.rsplit(' ', 1)[0] for line in local_path(Path(root) / 'target_phoneme/dict.txt').read_text(encoding='utf-8').splitlines()]
     tokens = ['<pad>', '<bos>', '<eos>'] + tokens
     if len(tokens) != len(set(tokens)) or len(tokens) < 4:
         raise ValueError('invalid phoneme dictionary')
@@ -98,9 +99,10 @@ class PreparedDataset:
             raise ValueError('phoneme and acoustic IDs must match exactly')
         self.tokens = vocabulary(root)
         self.ids = {token: i for i, token in enumerate(self.tokens)}
-        self.spec = json.loads((self.root / 'mel-spec.json').read_text(encoding='utf-8'))
+        from ..drive_staging import local_path
+        self.spec = json.loads(local_path(self.root / 'mel-spec.json').read_text(encoding='utf-8'))
         source_spec_path = self.root / 'source-mel-spec.json'
-        self.source_spec = json.loads(source_spec_path.read_text(encoding='utf-8')) if source_spec_path.is_file() else self.spec
+        self.source_spec = json.loads(local_path(source_spec_path).read_text(encoding='utf-8')) if source_spec_path.is_file() else self.spec
         self.corpus_root = Path(os.environ['CORPUS_ROOT']) if os.environ.get('CORPUS_ROOT') else None
         for sequence in self.labels.values():
             if not sequence.split() or any(p not in self.ids or self.ids[p] < 3 for p in sequence.split()):
