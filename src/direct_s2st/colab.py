@@ -261,7 +261,7 @@ def publish(work, destination, identity, updates):
 @operation('backup: one verified ZIP with capacity budget')
 def publish_packed(work, destination, identity, updates):
     from .drive_staging import raw_sha, capacity
-    maximum = float(os.environ.get('S2ST_BACKUP_MAX_GB', '20')) * 1024**3
+    maximum = float(os.environ.get('S2ST_BACKUP_MAX_GB', '100')) * 1024**3
     if not math.isfinite(maximum) or maximum <= 0:
         raise ValueError('backup budget must be finite and positive')
     target = destination / f'{updates:012d}-{uuid.uuid4().hex}'
@@ -462,6 +462,10 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=0,
                           resume=True, overwrite=bool(previous))
     if restore_only:
         return dict(status='RESTORED', durable_updates=completed)
+    from .translatotron2.monitor import early_stop_result
+    stopped = early_stop_result(work, config['kind'], completed) if previous else None
+    if stopped is not None:
+        return stopped
     if completed >= total:
         return dict(status='COMPLETE', durable_updates=completed)
     if config.get('batch_calibration'):

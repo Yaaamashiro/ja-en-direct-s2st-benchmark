@@ -21,6 +21,9 @@ EXECUTION_FILES = {
     'src/direct_s2st/stream_inputs.py', 'src/direct_s2st/translatotron2/batching.py',
     'src/direct_s2st/translatotron2/data.py', 'src/direct_s2st/translatotron2/train.py',
     'src/direct_s2st/translatotron2/validation.py',
+    'src/direct_s2st/translatotron2/monitor.py',
+    'src/direct_s2st/translatotron2/infer.py',
+    'src/direct_s2st/translatotron2/engine.py', 'src/direct_s2st/train_runtime.py',
 }
 
 
@@ -62,7 +65,10 @@ def validate_snapshot(config, backup, environment, work):
     if config.get('batch_calibration'):
         from direct_s2st.batch_calibration import selected_config
         selected = json.loads((backup/'batch-calibration.json').read_text(encoding='utf-8'))['selected']
-        expected_config = selected_config(config, int(selected))
+        if type(selected) is not int or selected < 1:
+            raise ValueError('no saved TT2 batch selection in this backup; check the actual run name '
+                             '(including any suffix). Refusing to restart calibration/training')
+        expected_config = selected_config(config, selected)
     markers = sorted(backup.glob('*/snapshot.json'), reverse=True)
     if not markers:
         raise FileNotFoundError('no saved snapshot; refusing to start from update zero')
@@ -98,9 +104,25 @@ def main():
     parser.add_argument('--overlay-revision', required=True)
     parser.add_argument('--total-updates', type=int, default=2)
     parser.add_argument('--confirm-training', action='store_true')
+    parser.add_argument('--monitor', action='store_true', help='Explicitly adopt checkpointed dev-loss monitoring; no optimizer/learning-rate change')
+    parser.add_argument('--monitor-interval', type=int, default=10)
+    parser.add_argument('--monitor-patience', type=int, default=10)
+    parser.add_argument('--monitor-min-relative-improvement', type=float, default=.001)
+    parser.add_argument('--practical-warmup-updates', type=int,
+                        help='Explicit practical continuation: shorten warmup using absolute update count')
     args = parser.parse_args()
     if args.total_updates < 1 or (args.total_updates > 10 and not args.confirm_training):
         parser.error('long training requires --confirm-training')
+    if args.practical_warmup_updates is not None:
+        if args.practical_warmup_updates < 1 or not args.monitor:
+            parser.error('practical warmup requires a positive endpoint and --monitor')
+        os.environ['S2ST_TT2_PRACTICAL_WARMUP'] = str(args.practical_warmup_updates)
+    if args.monitor:
+        import math
+        if min(args.monitor_interval, args.monitor_patience) < 1 or not math.isfinite(args.monitor_min_relative_improvement) or not 0 <= args.monitor_min_relative_improvement < 1:
+            parser.error('invalid monitor interval/patience/relative improvement')
+        os.environ['S2ST_TT2_MONITOR_POLICY'] = json.dumps(dict(interval=args.monitor_interval,
+            patience=args.monitor_patience, min_relative_improvement=args.monitor_min_relative_improvement))
     repo, persistent = args.repo.resolve(), args.persistent.resolve()
     work, backup = args.work_root.resolve(), args.backup_root.resolve()
     corpus = os.environ.get('CORPUS_ROOT')
@@ -141,7 +163,14 @@ def main():
                     base_environment_sha256=environment_sha,
                     config_sha256=hashlib.sha256(args.config.read_bytes()).hexdigest(),
                     work=str(work), backup=str(backup), snapshot_identity_unchanged=True)
-        audit = persistent/'execution-overlays'/f'{args.overlay_revision}.json'
+        monitor_policy = os.environ.get('S2ST_TT2_MONITOR_POLICY')
+        if monitor_policy:
+            body['tt2_monitor_policy'] = json.loads(monitor_policy)
+        if os.environ.get('S2ST_TT2_PRACTICAL_WARMUP'):
+            body['practical_warmup_updates'] = int(os.environ['S2ST_TT2_PRACTICAL_WARMUP'])
+            body['effective_reproduction_mode'] = 'paper_practical'
+        audit_name = args.overlay_revision + '-policy-' + digest(body)[:12]
+        audit = persistent/'execution-overlays'/f'{audit_name}.json'
         atomic_write_json(audit, dict(body=body, sha256=digest(body)), resume=True)
         os.environ['PYTHONPATH'] = str(overlay/'src')+os.pathsep+os.environ.get('PYTHONPATH', '')
         os.environ.update(S2ST_DRIVE_SAFE='1', S2ST_STREAM_INPUTS='1')

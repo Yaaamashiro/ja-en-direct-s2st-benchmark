@@ -246,6 +246,38 @@ def test_packed_snapshots_restore_and_fallback_and_capacity_budget(tmp_path, mon
     assert latest(backup, identity)[0] == first
 
 
+@pytest.mark.parametrize('limit,blocked', [(None, False), ('20', True), ('100', False)])
+def test_backup_default_is_100_gib_and_explicit_limit_is_respected(tmp_path, monkeypatch, limit, blocked):
+    import os
+    from direct_s2st.colab import publish_packed
+    work, backup = tmp_path/'work', tmp_path/'backup'
+    work.mkdir()
+    backup.mkdir()
+    (work/'checkpoint.pt').write_text('new checkpoint')
+    old = backup/'older-copy'
+    old.write_text('preserved')
+    if limit is None:
+        monkeypatch.delenv('S2ST_BACKUP_MAX_GB', raising=False)
+    else:
+        monkeypatch.setenv('S2ST_BACKUP_MAX_GB', limit)
+    original_stat = Path.stat
+    def stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == old:
+            values = list(result)
+            values[6] = 50 * 1024**3  # Simulate usage without allocating large files.
+            return os.stat_result(values)
+        return result
+    monkeypatch.setattr(Path, 'stat', stat)
+    if blocked:
+        with pytest.raises(RuntimeError, match='budget exceeded'):
+            publish_packed(work, backup, {'fixture': True}, 2)
+    else:
+        saved = publish_packed(work, backup, {'fixture': True}, 2)
+        assert (saved/'snapshot.json').is_file()
+    assert old.read_text() == 'preserved'
+
+
 def test_backup_interval_defers_upload_but_final_checkpoint_is_forced(tmp_path, monkeypatch):
     from direct_s2st import train_runtime as runtime
     work, staging = tmp_path/'work', tmp_path/'staging'

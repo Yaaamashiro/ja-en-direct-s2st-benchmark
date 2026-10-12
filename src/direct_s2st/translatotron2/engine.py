@@ -86,7 +86,7 @@ def restore_rank_state(model, state):
         torch.cuda.set_rng_state_all(state['cuda_rng'])
 
 
-def save_checkpoint(path, model, optimizer, updates, tokens, data_fingerprint, *, overwrite=False, rank_states=None, performance_state=None):
+def save_checkpoint(path, model, optimizer, updates, tokens, data_fingerprint, *, overwrite=False, rank_states=None, performance_state=None, monitor_state=None, schedule_transition=None):
     model = model.module if hasattr(model, 'module') else model
     path = Path(path)
     if updates < 1 or not optimizer.state:
@@ -98,6 +98,10 @@ def save_checkpoint(path, model, optimizer, updates, tokens, data_fingerprint, *
                    model=model.state_dict(), optimizer=optimizer.state_dict(), updates=updates,
                    tokens=tokens, data_fingerprint=data_fingerprint, rank_states=rank_states, performance_state=performance_state, rng=torch.get_rng_state(),
                    cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [])
+    if monitor_state is not None:
+        payload['monitor_state'] = monitor_state
+    if schedule_transition is not None:
+        payload['schedule_transition'] = schedule_transition
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, suffix='.pt.tmp')
     os.close(descriptor)
     try:

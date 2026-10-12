@@ -372,8 +372,11 @@ def checkpoint_saved(work, checkpoint, updates, *, force=False):
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(checkpoint, target)
     for name in ('config.json', 'gradient-audit-rank-0.json', 'batch-calibration.json',
-                 'research-metadata.json', 'session-research-metadata.json', 's2ut-recipe-lock.json'):
+                 'research-metadata.json', 'session-research-metadata.json', 's2ut-recipe-lock.json',
+                 'training-monitor.json', 'training-monitor.csv', 'training-monitor.svg',
+                 'checkpoints/checkpoint_best.pt'):
         if (work / name).is_file():
+            (directory / 'files' / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(work / name, directory / 'files' / name)
     atomic_write_json(directory / 'ready.json', dict(updates=updates))
     _last_frozen = (staging, updates)

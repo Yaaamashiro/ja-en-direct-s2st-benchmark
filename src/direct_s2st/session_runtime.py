@@ -62,6 +62,9 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
             if not completed < update <= total or actual != update:
                 raise ValueError('invalid immutable checkpoint update count')
             publish(directory / 'files', backup, identity, update)
+            if config['kind'] == 'tt2' and (directory/'files/training-monitor.json').is_file():
+                from .translatotron2.monitor import mirror_reports
+                mirror_reports(directory/'files', backup)
             return update
         try:
             with ThreadPoolExecutor(max_workers=1) as uploader:
@@ -104,6 +107,11 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
                     process.wait()
         if process.returncode and not forced:
             raise RuntimeError(f'training failed ({process.returncode}); durable update {completed} retained')
+        if not forced:
+            from .translatotron2.monitor import early_stop_result
+            result = early_stop_result(work, config['kind'], completed)
+            if result is not None:
+                return result
         if not forced and completed < total and (deadline is None or time.monotonic() < deadline):
             raise RuntimeError('trainer exited without publishing the requested final checkpoint')
     return dict(status='COMPLETE' if completed >= total else 'PAUSED', durable_updates=completed)

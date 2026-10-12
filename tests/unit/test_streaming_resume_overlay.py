@@ -118,3 +118,14 @@ def test_child_prefers_separate_overlay_code_without_modifying_base(tmp_path):
         capture_output=True, text=True, env=environment, timeout=30)
     assert result.returncode == 0, result.stderr
     assert Path(result.stdout.strip()).is_relative_to(source)
+
+
+def test_missing_selection_points_to_actual_run_name_without_restarting(tmp_path):
+    config, backup, environment, work, marker = fixture(tmp_path)
+    config['batch_calibration'] = {'max_batch': 1024}
+    record = backup/'batch-calibration.json'
+    record.write_text('{"selected":null,"trials":[]}')
+    before = record.read_bytes(), marker.read_bytes()
+    with pytest.raises(ValueError, match='actual run name'):
+        overlay.validate_snapshot(config, backup, environment, work)
+    assert before == (record.read_bytes(), marker.read_bytes())
