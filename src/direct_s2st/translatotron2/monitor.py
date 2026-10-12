@@ -61,6 +61,12 @@ def validate_policy(policy):
 
 
 class Monitor:
+    metrics = METRICS
+    version = VERSION
+    metric = 'teacher_forced_dev_loss'
+    score_key = 'loss'
+    title = 'TT2: train / teacher-forced dev loss (not BLEU)'
+
     def __init__(self, policy, warmup, *, origin=0):
         self.policy = validate_policy(policy)
         if type(warmup) is not int or warmup < 0 or type(origin) is not int or origin < 0:
@@ -82,16 +88,16 @@ class Monitor:
         if self.stopped or type(update) is not int or update != self.update + 1:
             raise ValueError('monitor updates must follow the restored optimizer checkpoint')
         for values in (train, dev):
-            if values is not None and any(not math.isfinite(float(values[k])) or float(values[k]) < 0 for k in METRICS):
+            if values is not None and any(not math.isfinite(float(values[k])) or float(values[k]) < 0 for k in self.metrics):
                 raise ValueError('monitor requires finite nonnegative losses')
         if not math.isfinite(lr) or lr <= 0 or (dev is not None) != self.due(update):
             raise ValueError('monitor learning rate/evaluation schedule mismatch')
-        self.history.append(dict(update=update, train={k: float(train[k]) for k in METRICS},
-                                 dev={k: float(dev[k]) for k in METRICS} if dev is not None else None,
+        self.history.append(dict(update=update, train={k: float(train[k]) for k in self.metrics},
+                                 dev={k: float(dev[k]) for k in self.metrics} if dev is not None else None,
                                  learning_rate=lr))
         improved = False
         if dev is not None:
-            value = float(dev['loss'])
+            value = float(dev[self.score_key])
             improved = self.best_value is None or value < self.best_value
             if improved:
                 self.best_value, self.best_update = value, update
@@ -105,7 +111,7 @@ class Monitor:
         return improved
 
     def state(self):
-        return dict(version=VERSION, metric='teacher_forced_dev_loss', policy=deepcopy(self.policy),
+        return dict(version=self.version, metric=self.metric, policy=deepcopy(self.policy),
                     warmup=self.warmup, origin=self.origin, history=deepcopy(self.history),
                     best_value=self.best_value, best_update=self.best_update, best_sha256=self.best_sha256,
                     anchor=self.anchor, bad_evaluations=self.bad_evaluations, stopped=self.stopped)
@@ -114,7 +120,7 @@ class Monitor:
     def restore(cls, requested, saved, completed, warmup, work):
         if saved is None:
             return cls(requested, warmup, origin=completed) if requested is not None else None
-        if saved.get('version') != VERSION or saved.get('warmup') != warmup:
+        if saved.get('version') != cls.version or saved.get('warmup') != warmup:
             raise ValueError('monitor version/warmup changed')
         if requested is not None and validate_policy(requested) != saved['policy']:
             raise ValueError('monitor policy changed; retain the saved policy for this run')
@@ -144,23 +150,24 @@ class Monitor:
         if not render:
             return
         table = io.StringIO(newline='')
-        fields = ['update', 'learning_rate'] + [f'{split}_{key}' for split in ('train', 'dev') for key in METRICS]
+        fields = ['update', 'learning_rate'] + [f'{split}_{key}' for split in ('train', 'dev') for key in self.metrics]
         writer = csv.DictWriter(table, fieldnames=fields)
         writer.writeheader()
         for row in self.history:
             writer.writerow(dict(update=row['update'], learning_rate=row['learning_rate'],
                 **{f'{split}_{key}': row[split][key] if row[split] is not None else ''
-                   for split in ('train', 'dev') for key in METRICS}))
+                   for split in ('train', 'dev') for key in self.metrics}))
         atomic_write_text(work/'training-monitor.csv', table.getvalue(), overwrite=True)
         atomic_write_text(work/'training-monitor.svg', self.svg(), overwrite=True)
 
     def svg(self):
-        parts = ['<svg xmlns="http://www.w3.org/2000/svg" width="880" height="680" viewBox="0 0 880 680">',
-                 '<rect width="880" height="680" fill="white"/>',
-                 '<text x="25" y="25" font-size="18">TT2: train / teacher-forced dev loss (not BLEU)</text>',
+        height = 100 + math.ceil(len(self.metrics)/2)*290
+        parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="880" height="{height}" viewBox="0 0 880 {height}">',
+                 f'<rect width="880" height="{height}" fill="white"/>',
+                 f'<text x="25" y="25" font-size="18">{self.title}</text>',
                  '<text x="25" y="48" fill="#2563eb">train</text><text x="95" y="48" fill="#dc2626">dev</text>']
         maximum_update = max(1, self.update)
-        for index, key in enumerate(METRICS):
+        for index, key in enumerate(self.metrics):
             left, top = 65 + (index % 2)*435, 100 + (index // 2)*290
             points = {split: [(r['update'], r[split][key]) for r in self.history if r[split] is not None]
                       for split in ('train', 'dev')}
@@ -186,15 +193,19 @@ class Monitor:
 def early_stop_result(work, kind, completed):
     """Accept termination only with a published checkpoint-aligned monitor record."""
     path = Path(work)/'training-monitor.json'
-    if kind != 'tt2' or not path.is_file():
+    if kind not in ('tt2', 's2ut') or not path.is_file():
         return None
     saved = json.loads(path.read_text(encoding='utf-8'))
     if not saved.get('stopped'):
         return None
-    monitor = Monitor.restore(policy_from_env(), saved, completed, saved['warmup'], work)
+    monitor_class, policy = Monitor, policy_from_env()
+    if kind == 's2ut':
+        from ..s2ut.monitor import S2UTMonitor, policy_from_env as s2ut_policy
+        monitor_class, policy = S2UTMonitor, s2ut_policy()
+    monitor = monitor_class.restore(policy, saved, completed, saved['warmup'], work)
     return dict(status='EARLY_STOPPED', durable_updates=completed,
                 best_update=monitor.best_update, best_dev_loss=monitor.best_value,
-                selection_metric='teacher_forced_dev_loss')
+                selection_metric=monitor.metric)
 
 
 def select_checkpoint(work, selection='auto'):
@@ -207,7 +218,11 @@ def select_checkpoint(work, selection='auto'):
         saved = json.loads(report.read_text(encoding='utf-8'))
         if saved.get('best_update') is not None:
             completed = saved['history'][-1]['update'] if saved['history'] else saved['origin']
-            Monitor.restore(None, saved, completed, saved['warmup'], work)
+            monitor_class = Monitor
+            if saved.get('version') == 's2ut-dev-unit-monitor-v1':
+                from ..s2ut.monitor import S2UTMonitor
+                monitor_class = S2UTMonitor
+            monitor_class.restore(None, saved, completed, saved['warmup'], work)
             return work/'checkpoints/checkpoint_best.pt'
     if selection == 'best':
         raise FileNotFoundError('no verified dev-best checkpoint yet')

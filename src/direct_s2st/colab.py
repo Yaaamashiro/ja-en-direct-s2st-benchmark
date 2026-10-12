@@ -29,7 +29,8 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
                 cache_gb=8, adaptive_batch=False, precision='default',
                 calibrate_batch=False, calibration_max_batch=1024, calibration_steps=3,
                 calibration_reserve_ratio=.1, calibration_trial_seconds=1800, calibration_objective='throughput',
-                reproduction_mode=None, tt2_vocoder_mode='griffin_lim', s2ut_vocoder_mode='trained'):
+                reproduction_mode=None, tt2_vocoder_mode='griffin_lim', s2ut_vocoder_mode='trained',
+                s2ut_warmup_updates=None):
     """Explicit throughput knobs; gpu80 is a starting point, not a VRAM guarantee."""
     from .config import load_config
     from .recipes import (MODES, TT2_VOCODERS, S2UT_VOCODERS, replace_option,
@@ -39,6 +40,11 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
     if reproduction_mode not in MODES or tt2_vocoder_mode not in TT2_VOCODERS or s2ut_vocoder_mode not in S2UT_VOCODERS:
         raise ValueError('invalid reproduction/vocoder mode')
     paper = reproduction_mode != 'smoke' and kind in ('tt2', 's2ut')
+    if s2ut_warmup_updates is not None:
+        if kind != 's2ut' or type(s2ut_warmup_updates) is not int or s2ut_warmup_updates not in (1000, 10000):
+            raise ValueError('S2UT warmup must be 1000 or 10000')
+        if reproduction_mode == 'paper_exact' and s2ut_warmup_updates != 10000:
+            raise ValueError('shortened S2UT warmup requires paper_practical')
     if paper and reproduction_mode == 'paper_exact' and (adaptive_batch or precision != 'default'):
         raise ValueError('paper_exact does not silently change batch statistics/precision; use paper_practical')
     if paper and kind == 'tt2':
@@ -104,6 +110,8 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
         command[0] = '{python}'
         replace_option(command, '--reproduction-mode', reproduction_mode)
         replace_option(command, '--vocoder-mode', s2ut_vocoder_mode)
+        if s2ut_warmup_updates is not None:
+            replace_option(command, '--warmup-updates', s2ut_warmup_updates)
         command[command.index('--max-tokens')+1] = str(max_tokens)
         command[command.index('--num-workers')+1] = str(num_workers)
         command[command.index('--update-freq')+1] = str(update_freq)

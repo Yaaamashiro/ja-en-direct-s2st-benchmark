@@ -71,7 +71,7 @@ def training_metadata(command, system, mode, vocoder_mode, *, world_size=1):
     tt2 = system == 'tt2'
     size = int(value('--batch-size', '1')) if tt2 else None
     frequency = int(value('--update-freq', '1'))
-    return dict(system='translatotron2' if tt2 else system, reproduction_mode=mode,
+    result = dict(system='translatotron2' if tt2 else system, reproduction_mode=mode,
         architecture_preset=value('--model-size') if tt2 else 'fisher',
         model_architecture='native_translatotron2' if tt2 else value('--arch'),
         optimizer='Adam', learning_rate=float(value('--learning-rate' if tt2 else '--lr')),
@@ -110,6 +110,9 @@ def training_metadata(command, system, mode, vocoder_mode, *, world_size=1):
         numerical_equivalence=('not established; TT2 BatchNorm statistics remain microbatch-local' if tt2 else 'not established for the adapted corpus'),
         implementation='independent PyTorch, not Google code' if tt2 else 'official pinned fairseq',
         fairseq_revision=FAIRSEQ_REVISION)
+    if system == 's2ut' and result['warmup_updates'] != 10000:
+        result['deviations'].append(f"S2UT warmup shortened from paper 10000 to {result['warmup_updates']} optimizer updates")
+    return result
 
 
 def validate_s2ut_runtime(mode, *, fixed_microbatch=0, adaptive_batch=False, precision='default'):
@@ -129,6 +132,8 @@ def validate_s2ut_paper(command, *, exact=True):
         expected.update({'--max-tokens': '20000', '--update-freq': '4'})
         if any(key in command for key in ('--batch-size', '--max-sentences')):
             raise ValueError('S2UT paper_exact uses official token-budget batches, not an utterance batch cap')
+    elif option(command, '--warmup-updates') == '1000':
+        expected['--warmup-updates'] = '1000'
     required = ('--target-is-code', '--share-decoder-input-output-embed')
     if any(command.count(key) != 1 or option(command, key) != val for key, val in expected.items()) or any(key not in command for key in required) or (exact and ('--fp16' not in command or '--bf16' in command or '--memory-efficient-fp16' in command)):
         raise ValueError('S2UT paper_exact requires the pinned Fisher architecture/optimizer/batch/FP16 recipe')

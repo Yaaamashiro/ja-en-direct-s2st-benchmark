@@ -1,5 +1,27 @@
 # Google Colab：テストと通常実験
 
+S2UTの`S2UT_WARMUP_UPDATES`は既定1,000更新です。セル5ではS2UTのみ
+`paper_practical`と記録し、学習名に`-warmup1000`を付けます。
+`REPRODUCTION_MODE=paper_exact`のままこの短縮を選んだ場合、token予算20,000・
+勾配蓄積4・FP16を維持し、追加バッチ分割の事前測定は無効にします。
+論文設定の10,000を選べば従来の学習名・条件へ戻ります。
+準備済み4A/4Bの再生成は不要です。旧10,000設定のS2UT checkpointからの途中移行は
+未対応で、設定不一致を検出します。1,000で開始したrunは同じ設定で再開できます。
+S2UTの`S2UT_MONITOR=True`は全devを10更新ごとに評価し、Unit予測の
+teacher-forced dev lossで最良checkpointを選択します。ウォームアップ終了後、
+0.1%以上の改善が10回連続で不足すると早期終了します。設定は
+`S2UT_MONITOR_INTERVAL=10`、`S2UT_MONITOR_PATIENCE=10`、
+`S2UT_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.001`です。
+合計loss、Unit loss、source_letter、target_letter、decoder_target_ctcのtrain/dev推移を
+`training-monitor.json`・`.csv`・`.svg`へ記録します。
+lossは各タスクのsample_sizeで重み付き平均を取りbits単位で表示し、合計lossには
+補助lossの重みが入ります。Unit lossの停止判定はBLEUによるモデル選択とは異なります。
+履歴・判定counter・最良checkpointのSHA256をlast checkpoint内に保持し、Drive snapshotに
+グラフ・最良モデルも含めます。再開はlast、推論・比較は検証済みbestを優先します。
+常駐単一プロセス、固定バッチ、全dev、同期checkpoint保存が必要です。
+VRAM事前測定の間は監視を実行しません。停止後の再開は更新せず`EARLY_STOPPED`を返します。
+Driveの保存先には確認用のグラフとCSVもコピーします。初回有効化以前の履歴は復元しません。
+
 ## 使うノートブック
 
 | 用途 | ノートブック | データ・学習 | Drive保存先 |
