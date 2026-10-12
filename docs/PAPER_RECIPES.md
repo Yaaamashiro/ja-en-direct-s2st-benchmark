@@ -24,6 +24,7 @@ smokeは小型TT2・2更新の配線確認で、品質の証拠ではない。
 | S2UT_TOTAL_UPDATES | 400000 | S2UT専用。RUN_TRAININGとCONFIRM_TRAININGは既定OFFのまま。短期変更時は論文の学習量に未達と記録 |
 | TRAIN_CALIBRATION_OBJECTIVE | throughput | 安全な候補から試運転速度で選ぶ。capacityは収まる最大数。S2UT exactは収容確認のみ |
 | TRAIN_SAVE_INTERVAL | 1 | exactの1更新が長いため毎更新ローカル保存。Drive公開は別の時間間隔・容量制限 |
+| TT2_MONITOR | True | dev lossによる独自の監視・最良checkpoint保持・早期終了。原論文のdev BLEU選択とは異なる。optimizer/batch/warmupは保持 |
 
 `paper_exact` は**本学習中**の適応バッチ分割・精度変更を禁止する。TT2は開始前の明示的な
 VRAM測定で物理batchを選定し、蓄積回数とともに記録・固定する。

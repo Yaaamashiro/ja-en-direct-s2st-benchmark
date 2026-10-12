@@ -4,6 +4,7 @@ from ..progress import Progress, operation, track
 from dataclasses import asdict
 import json
 import os
+import sys
 import time
 from pathlib import Path
 import torch
@@ -113,6 +114,17 @@ def _main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.l2_regularization)
     if args.restore_file:
         optimizer.load_state_dict(state['optimizer'])
+    from .monitor import resume_schedule
+    requested_warmup = os.environ.get('S2ST_TT2_PRACTICAL_WARMUP')
+    effective_warmup, schedule_transition = resume_schedule(
+        args.warmup_updates, completed, state if args.restore_file else None,
+        int(requested_warmup) if requested_warmup is not None else None)
+    if schedule_transition:
+        if world_size != 1:
+            raise ValueError('practical warmup continuation requires a single process')
+        print(f'[training-schedule] mode=paper_practical base_warmup={args.warmup_updates} '
+              f'effective_warmup={effective_warmup} adopted_at={schedule_transition["adopted_at"]} '
+              'optimizer_state=restored absolute_updates=True', file=sys.stderr, flush=True)
     metadata = None
     if paper and rank == 0:
         command = ['--model-size', 'fisher', '--learning-rate', str(args.learning_rate),
@@ -129,6 +141,13 @@ def _main():
             dataset_fingerprint=identity, max_updates=args.max_updates, completed_updates=completed)
         if dataset.spec['sample_rate'] == 24000:
             metadata['deviations'] = [v for v in metadata['deviations'] if 'target retained' not in v]
+        if schedule_transition:
+            metadata['reproduction_mode'] = 'paper_practical'
+            metadata['schedule_transition'] = schedule_transition
+            metadata['base_warmup_updates'] = args.warmup_updates
+            metadata['warmup_updates'] = effective_warmup
+            metadata['effective_warmup_updates'] = effective_warmup
+            metadata['deviations'].append('Explicit warmup shortening on resume; original fingerprint records base training, not the effective continuation schedule')
         atomic_write_json(args.run_root / 'research-metadata.json', metadata,
                           resume=True, overwrite=args.overwrite or bool(args.restore_file))
     core = model
@@ -173,6 +192,30 @@ def _main():
                 progress.advanced = time.monotonic()
                 probe.finish(args.batch_size)
         raise RuntimeError('probe observer did not stop the disposable trainer')
+    from .monitor import Monitor, policy_from_env
+    requested = policy_from_env()
+    monitor = Monitor.restore(requested, state.get('monitor_state') if args.restore_file else None,
+                              completed, effective_warmup, args.run_root)
+    if monitor and world_size != 1:
+        raise ValueError('TT2 monitor currently supports the single-process Colab trainer only')
+    if monitor and args.validation_limit is not None:
+        raise ValueError('dev-loss stopping requires the full dev split, not a changing subset')
+    if monitor:
+        args.validate_interval = monitor.policy['interval']
+        print('[training-monitor] metric=teacher_forced_dev_loss (not BLEU) '
+              f'interval={args.validate_interval} patience={monitor.policy["patience"]} '
+              f'warmup_guard={effective_warmup} adopted_at={monitor.origin}', file=sys.stderr, flush=True)
+        if args.max_updates <= effective_warmup:
+            print('[training-monitor] total_updates <= warmup: early stopping cannot trigger before the requested cap',
+                  file=sys.stderr, flush=True)
+        if metadata is not None:
+            metadata['monitoring'] = dict(policy=monitor.policy, metric='teacher_forced_dev_loss',
+                                          warmup_guard=effective_warmup, adopted_at=monitor.origin,
+                                          paper_stopping_rule_reproduced=False)
+        if monitor.stopped:
+            monitor.write_reports(args.run_root)
+            print('[training-monitor] restored terminal early-stop checkpoint; no optimizer update', file=sys.stderr, flush=True)
+            return
     dev = PreparedDataset(args.data_root, 'dev') if args.validate_interval and rank == 0 else None
     if paper and dev is not None:
         dev.source_spec = dataset.source_spec
@@ -198,7 +241,7 @@ def _main():
                 if not streaming and enabled() and args.device.startswith('cuda'):
                     batches = [pin_batch(batch) for batch in batches]
             for group in optimizer.param_groups:
-                group['lr'] = learning_rate(args.learning_rate, update, args.warmup_updates)
+                group['lr'] = learning_rate(args.learning_rate, update, effective_warmup)
             with timing.measure('optimization', args.device if enabled() else None):
                 losses = (optimization_step(model, optimizer, batches) if streaming else
                           tuning.run(model, optimizer, batches,
@@ -206,6 +249,7 @@ def _main():
             if rank == 0:
                 atomic_write_json(args.run_root / 'losses' / f'{update:08d}.json',
                                   dict(update=update, **losses), overwrite=args.overwrite or bool(args.restore_file))
+            validation = None
             if args.validate_interval and update % args.validate_interval == 0:
                 if rank == 0:
                     from .validation import validate
@@ -214,8 +258,14 @@ def _main():
                                       overwrite=args.overwrite or bool(args.restore_file))
                 if world_size > 1:
                     torch.distributed.barrier()
-            stop = stopping()
-            if update % args.save_interval_updates == 0 or update == args.max_updates or stop:
+            improved = monitor.observe(update, losses, validation, optimizer.param_groups[0]['lr']) if monitor else False
+            stop = stopping() or bool(monitor and monitor.stopped)
+            if monitor and validation is not None:
+                print(f'[training-monitor] update={update} dev_loss={validation["loss"]:.6g} '
+                      f'best_update={monitor.best_update} bad_evaluations={monitor.bad_evaluations}/'
+                      f'{monitor.policy["patience"]} warmup_guard={update <= monitor.warmup} '
+                      f'early_stopped={monitor.stopped}', file=sys.stderr, flush=True)
+            if update % args.save_interval_updates == 0 or update == args.max_updates or stop or (monitor and validation is not None):
                 local_state = capture_rank_state(model)
                 states = [None]*world_size
                 if world_size > 1:
@@ -224,9 +274,17 @@ def _main():
                     states = [local_state]
                 if rank == 0:
                     with timing.measure('checkpoint_and_local_freeze'):
+                        if monitor and improved:
+                            monitor.save_best(args.run_root, lambda path: save_checkpoint(
+                                path, model, optimizer, update, dataset.tokens, identity, overwrite=True,
+                                rank_states=states, performance_state=tuning.state(), schedule_transition=schedule_transition))
                         save_checkpoint(checkpoint, model, optimizer, update, dataset.tokens, identity,
                                         overwrite=args.overwrite or bool(args.restore_file) or update > 1,
-                                        rank_states=states, performance_state=tuning.state())
+                                        rank_states=states, performance_state=tuning.state(),
+                                        monitor_state=monitor.state() if monitor else None,
+                                        schedule_transition=schedule_transition)
+                        if monitor:
+                            monitor.write_reports(args.run_root, render=validation is not None or stop or update == args.max_updates)
                         if metadata is not None:
                             atomic_write_json(args.run_root / 'research-metadata.json',
                                               dict(metadata, completed_updates=update), overwrite=True)

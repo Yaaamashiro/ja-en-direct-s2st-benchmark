@@ -72,6 +72,35 @@ snapshot本体・各入力の既存検証と再開チェックは迂回しませ
 この場合、環境lockを編集して一致させたりcheckpointを消したりせず、ログを確認してください。
 実Colab/GPUのoverlay実行とDrive速度は未検証です。
 
+### 既存TT2学習へ監視を明示的に追加
+
+上記overlayをこの機能を含むcommitへ更新し、実際の保存済みrun名を使う。
+`-probe-fix-v1`付きで学習した場合は`RUN_NAME = training_run_name('tt2') + '-probe-fix-v1'`。
+helperの引数へ`--monitor`を追加する（既定は評価10更新間隔、patience10、相対改善0.001）。
+旧config/snapshot identityとoptimizer条件は保持し、監視の採用をoverlay auditと新checkpointに記録する。
+監視counterと最良checkpointのSHA256はcheckpoint内でも保持し、将来の再開は保存済みpolicyを継承する。
+history/CSV/SVG/最良checkpointも不変snapshotに同梱される。
+終了済みの監視checkpointを再開すると更新せず`EARLY_STOPPED`を返す。
+履歴は有効化後からの記録で、warmupの終了前は停止判定を進めない。
+TOTAL_UPDATESをwarmup以下のままにした場合、早期終了は上限より前に働かない。
+この停止規則は全devのteacher-forced lossに基づく独自方針であり、論文のdev BLEU選択とは区別する。
+
+### 85更新などからウォームアップを通算1,000更新に短縮
+
+まだ監視を採用していない既存TT2 checkpointの場合、上記helperへ
+`--monitor --monitor-interval 10 --practical-warmup-updates 1000`を追加する。
+同じconfig、work-root、backup-rootと実際のrun名（`-probe-fix-v1`付き）を使う。
+最新の検証済みsnapshotからモデル・Adam・更新数・RNGを復元し、次の更新から
+`base_lr * min(absolute_update / 1000, sqrt(1000 / absolute_update))`を適用する。
+1,000までは線形増加、その後は逆平方根で減衰する。85で復元すれば次は86であり、
+学習率は旧10,000設定での86更新目の10倍になる。データの再準備・再学習は不要。
+旧configとfingerprintは出発点の証跡として保持し、実際の変更は`paper_practical`として
+overlay audit、research metadata、last/best checkpointの`schedule_transition`に記録する。
+これは最初から1,000 warmupで学習した実験とは異なる。
+以後はcheckpointから短縮設定を継承する。旧コードでは再開せず、この変更以降のoverlayを使う。
+再変更、1,000以降の初回採用、既存監視履歴のリセットは拒否する。
+早期終了は通算1,000更新を超えてから判定する。上限10,000は維持できる。
+
 ## 4A・4Bを完了後に再実行した場合
 
 ノートブックは`direct_s2st.preparation_workflow`を呼び、正常終了した個々の工程を

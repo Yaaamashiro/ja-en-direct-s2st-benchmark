@@ -289,7 +289,11 @@ TT2/vocoderの試運転ログは最後のoptimizer更新も数えて完了表示
 - `TRAIN_CACHE_GB=8`: 旧方式のローカルLRUキャッシュ上限。新しいDrive安全モードでは必要な音声とMel ZIPを先に全てローカルへ取り込むため、全データを8GiBに制限する設定ではありません。ローカル容量不足時は学習開始前に停止し、Driveへの読込みに黙って戻りません。
 - `TRAIN_SAVE_INTERVAL=1`: 通常用のoptimizer更新単位の保存間隔。最終更新・時間予算到達時にも保存します。ローカル固定コピーは同期、その後のDriveコピー・SHA-256検証は別スレッドで1件ずつ実行。未確認コピーは最大2件で、遅いDriveには待ち合わせます。
 - `TRAIN_BACKUP_MIN_SECONDS=600`: 常駐学習でDriveへ転送する最短間隔。ローカルの50更新ごとの保存は維持し、最初・最終・時間予算到達時の保存は間隔によらず転送します。強制切断では前の`durable_updates`から再開し、未確認更新を再実行します。
-- `TRAIN_BACKUP_MAX_GB=20`: そのrunのDriveバックアップ総容量上限。旧snapshot・未完コピーも数えます。上限到達時は既存復旧点を削除せず停止します。必要なDrive空き容量を確認したうえで明示的に増やしてください。
+- `TRAIN_BACKUP_MAX_GB=100`: そのrunのDriveバックアップ総容量上限（100GiB）。旧snapshot・未完コピーも数えます。上限到達時は既存復旧点を削除せず停止します。必要なDrive空き容量を確認したうえで明示的に増やしてください。
+- `TT2_MONITOR=True`: TT2の常駐・単一GPU学習を監視。`TT2_MONITOR_INTERVAL=10`更新ごとに**全devのteacher-forced loss**を評価し、`TT2_MONITOR_PATIENCE=10`回連続で十分な改善がなければ早期終了。`TT2_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.001`は0.1%改善を判定基準とする（絶対最小lossのbest保存とは別）。ウォームアップ以下では停止カウンタをリセットする。現在の`TOTAL_UPDATES=10000`とwarmup=10000では上限より前には早期終了しない。学習率・バッチ数・上限更新数は変更しない。
+- TT2監視は`training-monitor.json`（全履歴・policy・カウンタ）、CSV、SVGをローカルrunに保存し、確認済み学習snapshotへ同梱。`checkpoints/checkpoint_best.pt`はdev loss最小のモデルとoptimizer、`checkpoint_last.pt`は再開位置。切断後はsnapshotを復元すると履歴・最良モデル・カウンタが戻る。旧checkpointからの明示的な有効化はその更新から履歴を開始し、過去の指標を捏造しない。保存済みpolicyを再開時に変更すると停止する。
+- 確認済みsnapshotの公開後、`PERSISTENT/checkpoints/<実際のrun名>/training-monitor.svg`・CSV・JSONへ閲覧用コピーを保存する。Driveからグラフを開けるため、学習セルの流れるログを追う必要はない。履歴のJSONは最後の永続保存まで、グラフ/CSVは直近の評価時点までを表示する。閲覧用コピーにI/Oエラーが出ても検証済みsnapshotは保持し、監視データはsnapshotから復元可能。
+- TT2推論は既定で検証済みdev-bestを選択し、旧runや初回評価前はlastを使用。`--checkpoint-selection last/best`で明示指定可能。bestが記録されているのに欠落・破損した場合はlastへ黙って戻らない。**これはdev BLEUによるモデル選択や原論文の停止規則の再現ではない**。自由生成の音声・ASR BLEU評価は別途必要。最良モデルもsnapshotへ同梱するためバックアップ容量は増える。古い復旧点は自動削除しない。
 - `TRAIN_ADAPTIVE_BATCH=False`: ONはTT2/S2UT限定。論理バッチ・サンプル順・更新回数を維持して分割を調整します。ただしTT2のBatchNorm統計やdropoutは変わるため、同一学習結果は保証しません。別の実験条件です。vocoderは2 optimizerを一組として扱い、分割・OOM再試行はしません。
 - `TRAIN_PRECISION='default'`: 既存精度を維持（TT2/vocoder FP32、S2UTのレシピFP16）。明示的にFP32/BF16を選べます。BF16非対応GPUでは停止し、黙って精度を変更しません。
 

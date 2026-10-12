@@ -3,6 +3,7 @@ import argparse
 from ..progress import operation, track
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 import time
@@ -20,6 +21,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-root', type=Path, required=True)
     parser.add_argument('--run-root', type=Path, required=True)
+    parser.add_argument('--checkpoint-selection', choices=['auto', 'last', 'best'], default='auto',
+                        help='auto: verified teacher-forced dev-best when available, otherwise legacy last')
     parser.add_argument('--common-root', type=Path, required=True)
     parser.add_argument('--predictions', type=Path, required=True)
     parser.add_argument('--split', choices=['dev', 'test'], default='test')
@@ -36,7 +39,9 @@ def main():
     feature_root = args.predictions.parent / 'mels'
     if not (args.overwrite or args.resume) and (args.predictions.exists() or feature_root.exists()):
         raise ExistingOutputError(str(args.predictions))
-    checkpoint = args.run_root / 'checkpoints/checkpoint_last.pt'
+    from .monitor import select_checkpoint
+    checkpoint = select_checkpoint(args.run_root, args.checkpoint_selection)
+    print(f'TT2 inference checkpoint: {checkpoint}', file=sys.stderr, flush=True)
     started = time.perf_counter()
     model, state = load_checkpoint(checkpoint, device=args.device)
     model.eval()
