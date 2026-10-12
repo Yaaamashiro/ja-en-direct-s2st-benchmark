@@ -86,10 +86,25 @@ def prepare_fairseq_copy(source, runtime):
 
 @operation('setup: runtime construction')
 def main():
+    global ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inference', action='store_true', help='Install shared Cascade/S2T and core evaluation dependencies before locking')
     parser.add_argument('--allow-cpu', action='store_true', help='Allow CPU-only preparation; keep the same CUDA-capable packages for later GPU use')
+    parser.add_argument('--repository', type=Path, help='Build the actual saved repository without changing its revision')
+    parser.add_argument('--environment-lock', type=Path, help='Restore exact transitive dependency versions from a saved environment')
     args = parser.parse_args()
+    if args.repository:
+        ROOT = args.repository.resolve()
+    restored = None
+    if args.environment_lock:
+        from environment_recovery import freeze_pins
+        restored = json.loads(args.environment_lock.read_text(encoding='utf-8'))
+        revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+        if (restored['repository'] != revision or restored['python'] != PYTHON_VERSION or
+                restored['fairseq'] != FAIRSEQ or restored['espeak'] != ESPEAK or
+                restored['requirements_sha256'] != hashlib.sha256((ROOT/'requirements/colab310.txt').read_bytes()).hexdigest() or
+                restored['inference_dependencies'] != args.inference):
+            raise ValueError('saved environment belongs to different code/dependency pins')
     if not Path('/content').is_dir() or sys.platform != 'linux':
         raise RuntimeError('This bootstrap is for a Linux Colab runtime')
     run('apt-get', 'update', '-qq')
@@ -104,6 +119,13 @@ def main():
     if actual != PYTHON_VERSION:
         raise RuntimeError('Different Python runtime found; start a fresh Colab VM instead of reusing the existing venv')
     os.environ['PIP_CONSTRAINT'] = str(ROOT / 'requirements/colab310.txt')
+    if restored:
+        from direct_s2st.io import atomic_write_text
+        constraint = PREFIX/'restore-constraints.txt'
+        pins = freeze_pins(restored['packages'])
+        atomic_write_text(constraint, (ROOT/'requirements/colab310.txt').read_text()+'\n'+
+                          '\n'.join(f'{k}=={v}' for k, v in sorted(pins.items()))+'\n', overwrite=True)
+        os.environ['PIP_CONSTRAINT'] = str(constraint)
     run(python, '-m', 'pip', 'install', 'pip==24.0', 'setuptools==80.9.0', 'wheel==0.45.1')
     run(python, '-m', 'pip', 'install', 'torch==2.7.1', 'torchaudio==2.7.1',
         '--index-url', 'https://download.pytorch.org/whl/cu126')
