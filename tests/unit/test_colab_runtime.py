@@ -116,7 +116,11 @@ def test_notebooks_split_gpu_stage_and_restore_before_training(tmp_path, monkeyp
             assert calls[1][:5] == ('python', '-m', 'direct_s2st.preparation_workflow', '--stage', 'audio-packs')
             assert len(calls) == 2
         train = next(s for s in codes if s.startswith('#@title 5.'))
-        assert train.index('ensure_runtime(require_gpu=True)') < train.index('CONFIG =')
+        if name == 'training':
+            assert train.index('ensure_workspace()') < train.index('training_session.py')
+            assert 'TRAIN_RUN_NAME' in train
+        else:
+            assert train.index('ensure_runtime(require_gpu=True)') < train.index('CONFIG =')
         exec(train, cfg | {'RUN_TRAINING': False,
              'ensure_runtime': lambda **kw: (_ for _ in ()).throw(AssertionError('unexpected setup'))})
 

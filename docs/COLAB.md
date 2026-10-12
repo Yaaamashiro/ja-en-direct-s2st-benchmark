@@ -1,5 +1,35 @@
 # Google Colab：テストと通常実験
 
+## セル5の統合再開
+
+更新済みノートブックでは、切断後は同じ実験名でセル1（設定）→セル5を実行する。
+Drive接続・コード取得・ランタイム構築もセル5から呼ぶ。追加の再開セルは不要。
+`TRAIN_RUN_NAME`は空欄なら、選択したモデルの学習済みrunが1つの場合に自動選択する。
+例えば`experiment-001`のTT2は空のrecipe-v2 runを避け、snapshotを持つ
+`tt2-training-experiment-001-paper_exact-recipe-v2-probe-fix-v1`を選ぶ。
+複数の学習済みrunがある場合は、セル1の`TRAIN_RUN_NAME`に保存名を指定する。
+読み取り可能なmarkerがない既存snapshotや選択ミスからupdate 0へ自動開始しない。
+snapshot本体のSHA/更新数/設定の検証は従来どおり行い、壊れた直近コピーは検証済みの古い保存地点へ戻す。
+
+再開するrunは保存済みconfig・batchを使う。セル1の性能設定を変えて既存configを上書きしない。
+学習率scheduleと監視状態はcheckpointから継承する。モデルの総更新上限とセッション時間は今回の指定を使う。
+旧48fcdb7のTT2は既に確認済みのd70516a実行コードを使い、元の依存環境・snapshot identityを維持する。
+S2UTなど新規学習はlauncherの固定SHAを記録して開始し、4A/4Bの準備済みデータを使う。
+
+初回launcher取得はorigin/mainを完全SHAに解決して`training-launcher-revision.txt`へ保存する。
+次回から同じSHAを使用し、学習runごとの`<RUN_NAME>.launch.json`にも実際のコード・環境を記録する。
+launcherを明示更新する場合だけ`TRAIN_CODE_REVISION`へ対応する新しい完全SHAを指定する。
+launcherの更新自体で保存済みモデルの実行コード・optimizer条件は変更しない。
+
+依存環境の完全なJSONを`.runtime-environments/<SHA256>.json`へatomic保存・readbackする。
+新しいランタイムではその全依存版をconstraintとして構築する。
+旧TT2で環境JSONがない場合は、`session.log`の成功した実行記録から依存版の候補を抽出し、
+実際にインストールして再計測したSHAがsnapshotと完全一致した場合だけ採用する。
+一致しない場合は学習を開始せず停止する。保存済みハッシュや環境JSONを偽装しない。
+モデルごとの`tt2-session.log`、`s2ut-session.log`等に構築・復元・学習ログを残す。
+初回のlauncher取得後は旧手動移行セルや通常セル3を追加実行する必要はない。
+CPUテストで選択・復元・中断時の保持を検証しているが、実Colabでの全手順は未検証。
+
 S2UTの`S2UT_WARMUP_UPDATES`は既定1,000更新です。セル5ではS2UTのみ
 `paper_practical`と記録し、学習名に`-warmup1000`を付けます。
 `REPRODUCTION_MODE=paper_exact`のままこの短縮を選んだ場合、token予算20,000・
