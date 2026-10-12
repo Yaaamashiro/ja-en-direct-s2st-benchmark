@@ -93,7 +93,8 @@ def test_reports_are_machine_readable_and_terminal_state_is_checkpoint_aligned(t
     assert len((tmp_path/'training-monitor.csv').read_text().splitlines()) == 4
     ET.fromstring((tmp_path/'training-monitor.svg').read_text())
     assert early_stop_result(tmp_path, 'tt2', 3)['status'] == 'EARLY_STOPPED'
-    assert early_stop_result(tmp_path, 's2ut', 3) is None
+    with pytest.raises(ValueError, match='version/warmup'):
+        early_stop_result(tmp_path, 's2ut', 3)
     assert select_checkpoint(tmp_path) == tmp_path/'checkpoints/checkpoint_best.pt'
     assert select_checkpoint(tmp_path, 'last') == tmp_path/'checkpoints/checkpoint_last.pt'
     with pytest.raises(ValueError, match='checkpoint'):
@@ -228,7 +229,8 @@ def test_warmup_transition_from_85_is_absolute_and_cannot_silently_change():
         resume_schedule(10000, 85, {'monitor_state': {}}, 1000)
 
 
-def test_frozen_best_reports_and_terminal_session_restore_without_training(tmp_path, monkeypatch):
+@pytest.mark.parametrize('kind', ['tt2', 's2ut'])
+def test_frozen_best_reports_and_terminal_session_restore_without_training(tmp_path, monkeypatch, kind):
     from direct_s2st.train_runtime import checkpoint_saved
     from direct_s2st.session_runtime import run_continuous
     from direct_s2st.colab import publish, latest, run_session
@@ -237,16 +239,18 @@ def test_frozen_best_reports_and_terminal_session_restore_without_training(tmp_p
     work.mkdir()
     lock = tmp_path/'lock'
     lock.write_text('data')
-    cfg = dict(kind='tt2', checkpoint='checkpoint.pt', command=['fixture', '{updates}'],
+    cfg = dict(kind=kind, checkpoint='checkpoint.pt', command=['fixture', '{updates}'],
                resume_args=[], identity_files=[str(lock)],
                runtime=dict(cache_gb=0, readers=1, precision='default', adaptive_batch=False))
     identity = dict(config=cfg, work=str(work), inputs={str(lock): sha256_file(lock)})
     class Process:
         returncode = 0
         def __init__(self, args, env):
-            monitor = Monitor(POLICY, 0)
+            from direct_s2st.s2ut.monitor import S2UTMonitor
+            monitor = (Monitor if kind == 'tt2' else S2UTMonitor)(POLICY, 0)
             for update in range(1, 4):
-                if monitor.observe(update, losses(1), losses(1), .001):
+                values = {key: 1. for key in monitor.metrics}
+                if monitor.observe(update, values, values, .001):
                     bind_best(monitor, work)
             monitor.write_reports(work)
             (work/'checkpoint.pt').write_text('3')
@@ -255,6 +259,7 @@ def test_frozen_best_reports_and_terminal_session_restore_without_training(tmp_p
                 checkpoint_saved(work, work/'checkpoint.pt', 3, force=True)
         def poll(self): return self.returncode
     monkeypatch.delenv('S2ST_TT2_MONITOR_POLICY', raising=False)
+    monkeypatch.delenv('S2ST_S2UT_MONITOR_POLICY', raising=False)
     monkeypatch.delenv('S2ST_DRIVE_SAFE', raising=False)
     result = run_continuous(cfg, work=work, backup=backup, identity=identity, completed=0,
         total=20, seconds=0, inspect_checkpoint=lambda p,k: int(p.read_text()), publish=publish, popen=Process)

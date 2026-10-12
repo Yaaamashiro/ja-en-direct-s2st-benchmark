@@ -31,7 +31,9 @@ VRAM測定で物理batchを選定し、蓄積回数とともに記録・固定�
 S2UTは開始前も追加分割・拡大禁止で、公式token-budget batchの収容確認のみ行う。OOM時にbatchや精度を黙って
 変えず停止する。物理batch8はVRAM収容の保証ではない。新runで物理batchを下げても
 exactの実効1024は維持できるが、microbatch-localなBatchNorm統計は同じにならない。
-practicalでもFisherモデル・LR・warmup・L2は保持し、資源設定の差を記録する。
+practicalでも通常はFisherモデル・LR・warmup・L2を保持する。
+例外としてS2UTの明示的な`S2UT_WARMUP_UPDATES=1000`を許可し、論文の10,000との差を記録する。
+ノートブックではこの短縮を既定にして新しい学習名を使う。TT2の既存checkpoint向け短縮はRESUME.md参照。
 
 ## 共通の開始前VRAM測定（Colabセル5）
 

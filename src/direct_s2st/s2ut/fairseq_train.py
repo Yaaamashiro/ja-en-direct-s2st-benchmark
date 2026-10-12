@@ -146,7 +146,7 @@ def main():
     last_main = []
     def compute(self, *args, **kwargs):
         output = original_compute(self, *args, **kwargs)
-        last_main[:] = [output[0].detach()]
+        last_main[:] = [output[0].detach().clone()]
         return output
     def forward(self, model, *args, **kwargs):
         if model.training:
@@ -154,6 +154,8 @@ def main():
         output = original_forward(self, model, *args, **kwargs)
         if model.training:
             audit.record(output[0], last_main[0], output[2])
+        if hasattr(audit, 'monitor'):
+            audit.monitor.record(output, last_main[0])
         return output
     Criterion.compute_loss, Criterion.forward = compute, forward
     from fairseq.trainer import Trainer
@@ -162,6 +164,11 @@ def main():
         extra_state = dict(extra_state)
         if research:
             extra_state['s2st_recipe_fingerprint'] = research[1]['training_fingerprint']
+            if hasattr(audit, 'monitor') and audit.monitor.monitor:
+                monitor = audit.monitor.monitor
+                research[1]['monitoring'] = dict(policy=monitor.policy, metric=monitor.metric,
+                    warmup_guard=monitor.warmup, adopted_at=monitor.origin,
+                    paper_stopping_rule_reproduced=False)
             atomic_write_json(research[0] / 'research-metadata.json',
                               dict(research[1], completed_updates=self.get_num_updates()), overwrite=True)
         return original_save(self, filename, extra_state)
@@ -175,8 +182,10 @@ def main():
         Trainer.save_checkpoint = save
     try:
         from .performance import runtime_hooks
+        from .monitor import runtime_hooks as monitor_hooks
         with runtime_hooks(audit):
-            cli_main()
+            with monitor_hooks(audit, command):
+                cli_main()
         directory = Path(sys.argv[sys.argv.index('--save-dir')+1])
         rank = os.environ.get('RANK', '0')
         atomic_write_json(directory.parent / ('gradient-audit-rank-'+rank+'.json'), audit.result(), overwrite=True)

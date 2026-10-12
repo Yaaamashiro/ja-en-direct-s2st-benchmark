@@ -48,6 +48,13 @@ def stage_direct_artifacts(runs_root, experiment, trained_runs, vocoder_roots,
         output = Path(runs_root) / f'{experiment}-{system}'
         source = Path(trained_runs[system])
         stage_file(source/'checkpoints/checkpoint_last.pt', output/'checkpoints/checkpoint_last.pt')
+        # Carry selection evidence and best bytes into the comparison run too.
+        if (source/'training-monitor.json').is_file():
+            from .translatotron2.monitor import select_checkpoint
+            selected = select_checkpoint(source)
+            if selected.name == 'checkpoint_best.pt':
+                stage_file(selected, output/'checkpoints/checkpoint_best.pt')
+            stage_file(source/'training-monitor.json', output/'training-monitor.json')
         if system == 's2ut':
             stage_file(source/'gradient-audit-rank-0.json', output/'gradient-audit-rank-0.json')
         if (source/'research-metadata.json').is_file():

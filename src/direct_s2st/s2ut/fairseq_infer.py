@@ -79,9 +79,11 @@ def main() -> None:
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--checkpoint-selection', choices=('auto', 'last', 'best'), default='auto')
     args = parser.parse_args()
     validate_prepared(args.data_root)
-    checkpoint = args.run_root / "checkpoints" / "checkpoint_last.pt"
+    from ..translatotron2.monitor import select_checkpoint
+    checkpoint = select_checkpoint(args.run_root, args.checkpoint_selection)
     if not checkpoint.is_file():
         raise FileNotFoundError(checkpoint)
     if args.predictions.exists() and not (args.overwrite or args.resume):

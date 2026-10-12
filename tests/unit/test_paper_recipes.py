@@ -122,6 +122,22 @@ def test_s2ut_colab_metadata_and_recipe_resume_guard(tmp_path, monkeypatch):
     assert option(config['command'], '--arch') == 's2ut_transformer_fisher'
     assert option(config['command'], '--update-freq') == '4'
     assert config['research_metadata']['unit_artifacts'] == identity
+    shortened = make_config(ROOT, data, env, 's2ut', 'fisher', performance='gpu80',
+                            reproduction_mode='paper_practical', s2ut_warmup_updates=1000)
+    assert option(shortened['command'], '--warmup-updates') == '1000'
+    assert option(shortened['command'], '--update-freq') == '4'
+    assert shortened['research_metadata']['warmup_updates'] == 1000
+    assert any('warmup shortened' in d for d in shortened['research_metadata']['deviations'])
+    with pytest.raises(ValueError, match='requires paper_practical'):
+        make_config(ROOT, data, env, 's2ut', 'fisher', s2ut_warmup_updates=1000)
+    short_command = ['wrapper'] + [v.format(run_root=str(tmp_path/'short'), updates='2') for v in shortened['command'][3:]]
+    _, (short_run, short_meta) = prepare_research_metadata(short_command)
+    _, (_, short_resume) = prepare_research_metadata(short_command + ['--restore-file', str(short_run/'checkpoints/checkpoint_last.pt')])
+    assert short_resume['training_fingerprint'] == short_meta['training_fingerprint']
+    changed_warmup = short_command + ['--restore-file', str(short_run/'checkpoints/checkpoint_last.pt')]
+    changed_warmup[changed_warmup.index('--warmup-updates')+1] = '10000'
+    with pytest.raises(ValueError, match='identity mismatch'):
+        prepare_research_metadata(changed_warmup)
     command = ['wrapper'] + [v.format(run_root=str(tmp_path/'run'), updates='2') for v in config['command'][3:]]
     clean, (run, meta) = prepare_research_metadata(command)
     assert '--reproduction-mode' not in clean and '--vocoder-mode' not in clean
