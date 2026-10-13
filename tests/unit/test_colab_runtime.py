@@ -81,7 +81,7 @@ def test_notebooks_separate_data_models_and_training_guards(monkeypatch):
     assert settings['training']['TT2_VOCODER_MODE'] == 'griffin_lim'
     assert settings['training']['S2UT_VOCODER_MODE'] == 'trained'
     assert settings['training']['S2UT_TOTAL_UPDATES'] == 400000
-    assert settings['training']['TT2_WARMUP_UPDATES'] == 500
+    assert settings['training']['TT2_WARMUP_UPDATES'] == 400
     assert settings['training']['S2UT_WARMUP_UPDATES'] == 1000
     assert settings['training']['TRAIN_CALIBRATION_OBJECTIVE'] == 'throughput'
     assert not settings['training']['RUN_TRAINING']
