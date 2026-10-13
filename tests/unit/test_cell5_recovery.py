@@ -132,13 +132,16 @@ def test_cell5_resume_retains_config_work_snapshot_and_execution_pin(tmp_path, m
     checked = []
     monkeypatch.setattr(session.legacy, 'validate_snapshot', lambda cfg, *a: checked.append(cfg))
     monkeypatch.setattr(session, 'ensure_environment', lambda *a, **kw: tmp_path/'python')
+    import tt2_schedule_overlay
+    monkeypatch.setattr(tt2_schedule_overlay, 'prepare', lambda execution, *a: execution)
     monkeypatch.setenv('S2ST_TT2_MONITOR_POLICY', '{"interval":10,"patience":10,"min_relative_improvement":0.001}')
     calls = []
     for _ in range(2):
         assert session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 'tt2', 'tt2-empty',
-            'fisher', {'batch_size':999}, 10000, 0, confirm=True, run=lambda *a: calls.append(a)) == name
+            'fisher', {'batch_size':999, 'tt2_warmup_updates':500}, 10000, 0, confirm=True, run=lambda *a: calls.append(a)) == name
     assert before == (path.read_bytes(), marker.read_bytes())
     assert checked == [config, config]
+    assert os.environ['S2ST_TT2_PRACTICAL_WARMUP'] == '500'
     assert all('--resume' in c and '--auto-resume' not in c for c in calls)
     assert all(str(path) in list(map(str,c)) for c in calls)
     route = json.loads((tmp_path/(name+'.launch.json')).read_text())
