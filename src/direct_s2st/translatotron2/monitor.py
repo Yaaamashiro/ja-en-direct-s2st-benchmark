@@ -68,8 +68,11 @@ def policy_from_env():
 
 
 def validate_policy(policy):
-    if not isinstance(policy, dict) or set(policy) != {'interval', 'patience', 'min_relative_improvement'}:
+    fields = {'interval', 'patience', 'min_relative_improvement'}
+    if not isinstance(policy, dict) or set(policy) not in (fields, fields | {'version'}):
         raise ValueError('invalid TT2 monitor policy fields')
+    if 'version' in policy and (type(policy['version']) is not int or policy['version'] != 2):
+        raise ValueError('invalid TT2 monitor policy version')
     for key in ('interval', 'patience'):
         if type(policy[key]) is not int or policy[key] < 1:
             raise ValueError('monitor interval/patience must be positive integers')
@@ -121,12 +124,19 @@ class Monitor:
             if improved:
                 self.best_value, self.best_update = value, update
                 self.best_sha256 = None  # Caller must publish this exact checkpoint.
-            meaningful = self.anchor is None or value < self.anchor * (1-self.policy['min_relative_improvement'])
-            if meaningful or update <= self.warmup:
-                self.anchor, self.bad_evaluations = value, 0
+            modern = self.policy.get('version') == 2 and self.version == VERSION
+            meaningful = (self.anchor is None or
+                          (value < self.anchor and value <= self.anchor * (1-self.policy['min_relative_improvement']))) if modern else (
+                          self.anchor is None or value < self.anchor * (1-self.policy['min_relative_improvement']))
+            adoption = getattr(self, '_policy_history', [])
+            start = max(self.warmup, adoption[-1]['adopted_at'] if adoption else self.origin) if modern else self.warmup
+            if meaningful or update <= start:
+                # v2 starts after warmup/adoption, using the lowest observed
+                # dev loss, not the last (possibly worse) warmup evaluation.
+                self.anchor, self.bad_evaluations = self.best_value if modern else value, 0
             else:
                 self.bad_evaluations += 1
-            self.stopped = update > self.warmup and self.bad_evaluations >= self.policy['patience']
+            self.stopped = update > start and self.bad_evaluations >= self.policy['patience']
         return improved
 
     def state(self):
@@ -136,6 +146,8 @@ class Monitor:
                     anchor=self.anchor, bad_evaluations=self.bad_evaluations, stopped=self.stopped)
         if getattr(self, '_warmup_history', None):
             result['warmup_history'] = deepcopy(self._warmup_history)
+        if getattr(self, '_policy_history', None):
+            result['policy_history'] = deepcopy(self._policy_history)
         return result
 
     @classmethod
@@ -144,11 +156,18 @@ class Monitor:
             return cls(requested, warmup, origin=completed) if requested is not None else None
         if saved.get('version') != cls.version:
             raise ValueError('monitor version/warmup changed')
-        if requested is not None and validate_policy(requested) != saved['policy']:
+        requested = validate_policy(requested) if requested is not None else None
+        migrating = requested is not None and requested != saved['policy']
+        if migrating and (cls.version != VERSION or requested.get('version') != 2 or
+                          requested['interval'] != saved['policy']['interval'] or saved['stopped']):
             raise ValueError('monitor policy changed; retain the saved policy for this run')
         changes = deepcopy(saved.get('warmup_history', []))
         initial = changes[0]['from'] if changes else saved['warmup']
-        result = cls(saved['policy'], initial, origin=saved['origin'])
+        policies = deepcopy(saved.get('policy_history', []))
+        if not isinstance(policies, list):
+            raise ValueError('invalid monitor policy history')
+        original_policy = policies[0]['from'] if policies else saved['policy']
+        result = cls(original_policy, initial, origin=saved['origin'])
         previous_at = result.origin - 1
         for change in changes:
             if (set(change) != {'from', 'to', 'adopted_at'} or
@@ -158,16 +177,36 @@ class Monitor:
                     change['adopted_at'] >= change['from']):
                 raise ValueError('invalid monitor warmup history')
             previous_at = change['adopted_at']
+        previous_at, previous_policy = result.origin - 1, result.policy
+        for policy_change in policies:
+            if (cls.version != VERSION or set(policy_change) != {'from', 'to', 'adopted_at'} or
+                    type(policy_change['adopted_at']) is not int or
+                    not previous_at < policy_change['adopted_at'] <= completed or
+                    validate_policy(policy_change['from']) != previous_policy or
+                    validate_policy(policy_change['to']).get('version') != 2 or
+                    policy_change['to']['interval'] != previous_policy['interval'] or
+                    policy_change['from'] == policy_change['to']):
+                raise ValueError('invalid monitor policy history')
+            previous_at, previous_policy = policy_change['adopted_at'], policy_change['to']
         pending = iter(changes)
         change = next(pending, None)
+        policy_pending = iter(policies)
+        policy_change = next(policy_pending, None)
         def apply_changes(update):
-            nonlocal change
+            nonlocal change, policy_change
             while change is not None and change['adopted_at'] == update:
                 if result.warmup != change['from'] or result.stopped or result.bad_evaluations:
                     raise ValueError('invalid monitor warmup history')
                 result.warmup = change['to']
                 result._warmup_history = getattr(result, '_warmup_history', []) + [change]
                 change = next(pending, None)
+            while policy_change is not None and policy_change['adopted_at'] == update:
+                if result.policy != policy_change['from'] or result.stopped:
+                    raise ValueError('invalid monitor policy history')
+                result.policy = deepcopy(policy_change['to'])
+                result.anchor, result.bad_evaluations = result.best_value, 0
+                result._policy_history = getattr(result, '_policy_history', []) + [policy_change]
+                policy_change = next(policy_pending, None)
         for row in saved['history']:
             apply_changes(result.update)
             result.observe(row['update'], row['train'], row['dev'], row['learning_rate'])
@@ -190,6 +229,15 @@ class Monitor:
             result._warmup_history = changes + [
                 {'from': result.warmup, 'to': warmup, 'adopted_at': completed}]
             result.warmup = warmup
+        if migrating:
+            # Explicit v2 request changes future decisions only. Keep and first
+            # verify all old losses, best bytes, counters and policy timelines.
+            result._policy_history = policies + [
+                {'from': deepcopy(result.policy), 'to': deepcopy(requested), 'adopted_at': completed}]
+            result.policy = deepcopy(requested)
+            result.anchor, result.bad_evaluations = result.best_value, 0
+            print(f'[training-monitor-policy] adopted_at={completed} policy={json.dumps(requested, sort_keys=True)} '
+                  'history_best_optimizer_preserved=True stopping_counter_restarted=True', file=sys.stderr, flush=True)
         return result
 
     def save_best(self, work, save):

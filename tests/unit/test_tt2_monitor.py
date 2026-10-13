@@ -9,6 +9,7 @@ from direct_s2st.drive_staging import raw_sha
 
 
 POLICY = dict(interval=1, patience=2, min_relative_improvement=.01)
+POST_WARMUP_POLICY = dict(version=2, interval=10, patience=5, min_relative_improvement=.01)
 
 
 def losses(value):
@@ -17,6 +18,82 @@ def losses(value):
 
 def bind_best(monitor, work):
     monitor.save_best(work, lambda p: (p.parent.mkdir(parents=True, exist_ok=True), p.write_text('best')))
+
+
+def _old_run_at_400(work):
+    monitor = Monitor(dict(POLICY, interval=10, patience=10, min_relative_improvement=.001),
+                      warmup=500, origin=380)
+    for update in range(381, 401):
+        dev = losses(100 if update == 390 else 105) if update % 10 == 0 else None
+        if monitor.observe(update, losses(1), dev, .001):
+            bind_best(monitor, work)
+    return monitor
+
+
+def test_explicit_five_checks_one_percent_policy_starts_after_400_not_retroactively(tmp_path):
+    old = _old_run_at_400(tmp_path)
+    saved = old.state()
+    monitor = Monitor.restore(POST_WARMUP_POLICY, saved, 400, 400, tmp_path)
+    assert monitor.history == saved['history']
+    assert monitor.best_update == 390 and monitor.best_sha256 == saved['best_sha256']
+    assert monitor.anchor == 100 and not monitor.stopped and monitor.bad_evaluations == 0
+    assert monitor.state()['policy_history'] == [dict(
+        adopted_at=400, **{'from': saved['policy'], 'to': POST_WARMUP_POLICY})]
+    for update in range(401, 451):
+        monitor.observe(update, losses(1), losses(100.5) if update % 10 == 0 else None, .001)
+        assert monitor.stopped == (update == 450)
+        if update in (410, 430, 450):
+            assert monitor.bad_evaluations == (update-400)//10
+            assert Monitor.restore(None, monitor.state(), update, 400, tmp_path).state() == monitor.state()
+    assert monitor.best_update == 390  # Below the last loss, but not a new best.
+    assert saved == old.state()  # The saved state was not rewritten.
+
+
+def test_small_best_updates_saved_but_exact_cumulative_one_percent_resets_patience(tmp_path):
+    monitor = Monitor.restore(POST_WARMUP_POLICY, _old_run_at_400(tmp_path).state(), 400, 400, tmp_path)
+    values = {410:99.7, 420:99.5, 430:99.3, 440:99.1, 450:99.0}
+    for update in range(401, 451):
+        if monitor.observe(update, losses(1), losses(values[update]) if update in values else None, .001):
+            bind_best(monitor, tmp_path)
+        if update in values:
+            assert monitor.best_value == values[update]
+            assert monitor.bad_evaluations == ((update-400)//10 if update < 450 else 0)
+            assert monitor.anchor == (100 if update < 450 else 99)
+            assert not monitor.stopped
+    assert Monitor.restore(POST_WARMUP_POLICY, monitor.state(), 450, 400, tmp_path).state() == monitor.state()
+
+
+def test_new_policy_change_after_warmup_never_counts_earlier_checks(tmp_path):
+    old = _old_run_at_400(tmp_path)
+    old = Monitor.restore(None, old.state(), 400, 400, tmp_path)
+    for update in range(401, 431):
+        old.observe(update, losses(1), losses(110) if update % 10 == 0 else None, .001)
+    assert old.bad_evaluations == 3
+    monitor = Monitor.restore(POST_WARMUP_POLICY, old.state(), 430, 400, tmp_path)
+    assert monitor.bad_evaluations == 0
+    for update in range(431, 481):
+        monitor.observe(update, losses(1), losses(110) if update % 10 == 0 else None, .001)
+        assert monitor.stopped == (update == 480)
+    assert Monitor.restore(None, monitor.state(), 480, 400, tmp_path).state() == monitor.state()
+
+
+def test_policy_transition_rejects_tampered_history_interval_and_terminal_reset(tmp_path):
+    saved = _old_run_at_400(tmp_path).state()
+    with pytest.raises(ValueError, match='policy changed'):
+        Monitor.restore(dict(POST_WARMUP_POLICY, interval=5), saved, 400, 500, tmp_path)
+    monitor = Monitor.restore(POST_WARMUP_POLICY, saved, 400, 400, tmp_path)
+    corrupt = monitor.state()
+    corrupt['policy_history'][0]['adopted_at'] = 401
+    with pytest.raises(ValueError, match='policy history'):
+        Monitor.restore(None, corrupt, 400, 400, tmp_path)
+    corrupt = monitor.state()
+    corrupt['anchor'] = 105
+    with pytest.raises(ValueError, match='counters'):
+        Monitor.restore(None, corrupt, 400, 400, tmp_path)
+    for update in range(401, 451):
+        monitor.observe(update, losses(1), losses(100) if update % 10 == 0 else None, .001)
+    with pytest.raises(ValueError, match='policy changed'):
+        Monitor.restore(dict(POST_WARMUP_POLICY, patience=10), monitor.state(), 450, 400, tmp_path)
 
 
 def test_warmup_guard_patience_counts_evaluations_not_updates(tmp_path):
@@ -152,6 +229,57 @@ def test_trainer_early_stop_and_resume_keep_optimizer_and_history(tmp_path, monk
     before = (resumed/'checkpoints/checkpoint_last.pt').read_bytes()
     run(resumed, 9, resumed/'checkpoints/checkpoint_last.pt')
     assert (resumed/'checkpoints/checkpoint_last.pt').read_bytes() == before
+
+
+def test_real_trainer_policy_migration_preserves_weights_optimizer_and_terminal_backup_state(tmp_path, monkeypatch):
+    torch = pytest.importorskip('torch')
+    from direct_s2st.translatotron2 import train
+    from direct_s2st.translatotron2.engine import load_checkpoint
+    torch.set_num_threads(1)
+    torch.manual_seed(10)
+    sample = dict(source=torch.randn(1, 12, 80), source_lengths=torch.tensor([12]),
+                  phones=torch.tensor([[3, 4, 2]]), phone_lengths=torch.tensor([3]),
+                  target=torch.randn(1, 8, 80), target_lengths=torch.tensor([8]))
+    class Dataset:
+        spec = dict(n_mels=80)
+        tokens = list('abcdefg')
+        def __init__(self, root, split): assert split in ('train', 'dev')
+        def __len__(self): return 1
+        def __getitem__(self, index): return sample
+    monkeypatch.setattr(train, 'PreparedDataset', Dataset)
+    monkeypatch.setattr(train, 'fingerprint', lambda root: {'fixture': 'synthetic'})
+    monkeypatch.setattr('direct_s2st.translatotron2.validation.validate', lambda *a: losses(1))
+    for name in ('S2ST_TRAIN_STAGING', 'S2ST_TRAIN_DEADLINE', 'S2ST_TRAIN_OPTIMIZE', 'S2ST_TT2_PRACTICAL_WARMUP'):
+        monkeypatch.delenv(name, raising=False)
+    def run(work, total, policy, restore=False):
+        monkeypatch.setenv('S2ST_TT2_MONITOR_POLICY', json.dumps(policy))
+        args = ['train', '--data-root', str(tmp_path/'data'), '--run-root', str(work),
+                '--warmup-updates', '4', '--save-interval-updates', '1', '--max-updates', str(total)]
+        if restore:
+            args += ['--restore-file', str(work/'checkpoints/checkpoint_last.pt')]
+        monkeypatch.setattr('sys.argv', args)
+        train.main()
+        return load_checkpoint(work/'checkpoints/checkpoint_last.pt')[1]
+    policy = dict(POST_WARMUP_POLICY, interval=2)
+    expected = run(tmp_path/'continuous', 20, policy)
+    work = tmp_path/'resumed'
+    prefix = run(work, 4, dict(POLICY, interval=2, patience=10))
+    actual = run(work, 20, policy, True)
+    assert expected['updates'] == actual['updates'] == 14
+    assert actual['monitor_state']['stopped']
+    assert actual['monitor_state']['history'][:4] == prefix['monitor_state']['history']
+    assert actual['monitor_state']['history'] == expected['monitor_state']['history']
+    assert actual['monitor_state']['policy_history'][0]['adopted_at'] == 4
+    for name, value in expected['model'].items():
+        torch.testing.assert_close(value, actual['model'][name], rtol=0, atol=0)
+    for key, values in expected['optimizer']['state'].items():
+        for name, value in values.items():
+            torch.testing.assert_close(value, actual['optimizer']['state'][key][name], rtol=0, atol=0)
+    assert actual['data_fingerprint'] == prefix['data_fingerprint']
+    assert actual['monitor_state']['best_sha256'] == raw_sha(work/'checkpoints/checkpoint_best.pt')
+    before = (work/'checkpoints/checkpoint_last.pt').read_bytes()
+    run(work, 20, policy, True)
+    assert (work/'checkpoints/checkpoint_last.pt').read_bytes() == before
 
 
 def test_monitor_and_real_dev_validation_do_not_change_training_weights(tmp_path, monkeypatch):

@@ -15,8 +15,9 @@ def baseline(revision):
         '-C', str(ROOT), 'show', revision+':src/'+MONITOR])
 
 
-@pytest.mark.parametrize('revision', ['d70516a221199262a0fbd26637c6c5a8b86f73df', '6e311c45b1fe95f8646e41172e9dda878f53e570'])
-def test_reviewed_overlay_changes_only_three_functions_and_supports_v1(revision, tmp_path):
+@pytest.mark.parametrize('revision', ['d70516a221199262a0fbd26637c6c5a8b86f73df', '6e311c45b1fe95f8646e41172e9dda878f53e570',
+                                    '41c6ca22a7c45bd19374999bf10945d3e7ce3804'])
+def test_reviewed_overlay_changes_only_five_functions_and_supports_v1(revision, tmp_path):
     original = baseline(revision)
     current = (ROOT/'src'/MONITOR).read_bytes()
     changed = patched_monitor(original, current)
@@ -43,6 +44,11 @@ def test_reviewed_overlay_changes_only_three_functions_and_supports_v1(revision,
     assert restored.history == saved['history']
     restored.observe(134, losses(1), losses(1), .001)
     assert module['Monitor'].restore(None, restored.state(), 134, 500, tmp_path).state() == restored.state()
+    policy = dict(version=2, interval=1, patience=5, min_relative_improvement=.01)
+    migrated = module['Monitor'].restore(policy, restored.state(), 134, 500, tmp_path)
+    assert migrated.history == restored.history
+    assert migrated.state()['policy_history'][0]['adopted_at'] == 134
+    assert module['Monitor'].restore(None, migrated.state(), 134, 500, tmp_path).state() == migrated.state()
 
 
 def test_overlay_is_resumable_and_never_overwrites_changed_copies(tmp_path):
