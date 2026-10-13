@@ -41,8 +41,8 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
         raise ValueError('invalid reproduction/vocoder mode')
     paper = reproduction_mode != 'smoke' and kind in ('tt2', 's2ut')
     if s2ut_warmup_updates is not None:
-        if kind != 's2ut' or type(s2ut_warmup_updates) is not int or s2ut_warmup_updates not in (1000, 10000):
-            raise ValueError('S2UT warmup must be 1000 or 10000')
+        if kind != 's2ut' or type(s2ut_warmup_updates) is not int or s2ut_warmup_updates not in (400, 500, 1000, 10000):
+            raise ValueError('S2UT warmup must be 400, 500, 1000 or 10000')
         if reproduction_mode == 'paper_exact' and s2ut_warmup_updates != 10000:
             raise ValueError('shortened S2UT warmup requires paper_practical')
     if paper and reproduction_mode == 'paper_exact' and (adaptive_batch or precision != 'default'):

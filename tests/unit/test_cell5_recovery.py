@@ -13,9 +13,11 @@ import environment_recovery as recovery
 import training_session as session
 
 
-def snapshot(persistent, name, *, updates=133, kind='tt2', base=None, expected='a'*64):
+def snapshot(persistent, name, *, updates=133, kind='tt2', base=None, expected='a'*64, warmup=400):
     config = dict(kind=kind, runtime={'cache_gb':8}, identity_files=['/content/s2st-runtime/environment.json'],
                   research_metadata=dict(repository_revision=base or session.legacy.BASE_REVISION))
+    if kind == 's2ut':
+        config['research_metadata']['warmup_updates'] = warmup
     path = persistent/(name+'.json')
     path.write_text(json.dumps(config))
     marker = persistent/'checkpoints'/name/f'{updates:012d}-fixture'/'snapshot.json'
@@ -171,18 +173,23 @@ def test_new_native_run_records_code_and_environment_then_reuses_them(tmp_path, 
         return tmp_path/'python'
     monkeypatch.setattr(session, 'ensure_environment', restore)
     cfg = dict(kind='s2ut', runtime={'cache_gb':8}, identity_files=['/content/s2st-runtime/environment.json'],
-               research_metadata=dict(repository_revision=code))
+               research_metadata=dict(repository_revision=code, warmup_updates=400))
     monkeypatch.setattr(session.subprocess, 'check_output', lambda *a, **kw: json.dumps(cfg))
     calls = []
-    name = 's2ut-training-experiment-001-paper_practical-recipe-v3-warmup1000'
+    name = 's2ut-training-experiment-001-paper_practical-recipe-v3-warmup400'
     session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 's2ut', name, 'fisher',
-                   {'s2ut_warmup_updates':1000}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
+                   {'s2ut_warmup_updates':400}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
     assert '--auto-resume' in calls[-1]
     _, path, marker = snapshot(tmp_path, name, kind='s2ut', base=code, expected=expected)
     before = path.read_bytes(), marker.read_bytes()
     session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 's2ut', name, 'fisher',
-                   {'s2ut_warmup_updates':999}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
+                   {'s2ut_warmup_updates':400, 'batch_size':999}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
     assert '--resume' in calls[-1]
     assert restored_environments == [None, expected]
     assert checked_out == [code, code]
+    assert before == (path.read_bytes(), marker.read_bytes())
+    with pytest.raises(ValueError, match='warmup differs from saved run'):
+        session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 's2ut', name, 'fisher',
+                       {'s2ut_warmup_updates':1000}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
+    assert restored_environments == [None, expected]  # Reject before setup/download.
     assert before == (path.read_bytes(), marker.read_bytes())

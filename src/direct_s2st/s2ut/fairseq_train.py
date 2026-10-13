@@ -167,6 +167,8 @@ def main():
             if hasattr(audit, 'monitor') and audit.monitor.monitor:
                 monitor = audit.monitor.monitor
                 research[1]['monitoring'] = dict(policy=monitor.policy, metric=monitor.metric,
+                    stopping_metrics=['unit_loss', 'loss'] if monitor.policy.get('version') == 2 else ['unit_loss'],
+                    stopping_rule='all_plateau' if monitor.policy.get('version') == 2 else 'unit_plateau',
                     warmup_guard=monitor.warmup, adopted_at=monitor.origin,
                     paper_stopping_rule_reproduced=False)
             atomic_write_json(research[0] / 'research-metadata.json',

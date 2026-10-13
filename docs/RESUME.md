@@ -112,9 +112,13 @@ overlay audit、research metadata、last/best checkpointの`schedule_transition`
 ## 4A・4Bを完了後に再実行した場合
 
 S2UTの監視は`S2ST_S2UT_MONITOR_POLICY`で明示的に有効化する（通常はノートブックが設定）。
-1,000 warmupで新規開始したS2UT runは同じ学習名・configで再開し、last checkpoint内の
+400 warmupで新規開始したS2UT runは同じ学習名・configで再開し、last checkpoint内の
 `extra_state.s2st_monitor`から履歴と停止counterを復元する。最良モデルも同じsnapshotから戻す。
-保存済みpolicyと異なるinterval/patience/改善率への変更、best欠損・破損は検出して停止する。
+policy v2はUnit/合計lossの両counterと基準を保存し、同条件の再開ではリセットしない。
+同じ実行コードがv2に対応している場合のみ、同じ評価間隔のままv2を明示要求すると
+旧履歴・bestの検証後に監査付きで将来の停止条件を変更できる。過去を遡って停止しない。
+評価間隔変更、旧policy v1の変更、終了済みrunの停止解除、best欠損・破損は拒否する。
+既存S2UT runのwarmup変更は構築前に拒否する。1000/10000で開始したrunは元の設定で再開する。
 監視を有効化済みならpolicyを省いた再開でも保存済みpolicyを継承する。
 TT2専用の`resume_streaming_training.py`はS2UTへの移行には使わない。
 
