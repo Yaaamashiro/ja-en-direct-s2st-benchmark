@@ -28,6 +28,24 @@ def bootstrap_environment():
     return env
 
 
+def write_restore_constraints(repository, prefix, packages):
+    """Retain the original base directory of nested requirements/includes."""
+    from environment_recovery import freeze_pins
+    from direct_s2st.io import atomic_write_text
+    requirements = Path(repository).resolve()/'requirements/colab310.txt'
+    if not requirements.is_file():
+        raise FileNotFoundError(requirements)
+    pins = freeze_pins(packages)
+    constraint = Path(prefix)/'restore-constraints.txt'
+    # Copying colab310.txt here would move '-r preparation.txt' to the runtime
+    # directory. An absolute include lets pip resolve it beside the original.
+    # Quote the path for checkout names containing spaces; use portable slashes.
+    content = '-c '+json.dumps(requirements.as_posix(), ensure_ascii=False)+'\n'
+    content += '\n'.join(f'{k}=={v}' for k, v in sorted(pins.items()))+'\n'
+    atomic_write_text(constraint, content, overwrite=True)
+    return constraint
+
+
 @operation('setup: external command')
 def run(*args, **kwargs):
     print('Setup:', ' '.join(str(a) for a in args), flush=True)
@@ -120,12 +138,7 @@ def main():
         raise RuntimeError('Different Python runtime found; start a fresh Colab VM instead of reusing the existing venv')
     os.environ['PIP_CONSTRAINT'] = str(ROOT / 'requirements/colab310.txt')
     if restored:
-        from direct_s2st.io import atomic_write_text
-        constraint = PREFIX/'restore-constraints.txt'
-        pins = freeze_pins(restored['packages'])
-        atomic_write_text(constraint, (ROOT/'requirements/colab310.txt').read_text()+'\n'+
-                          '\n'.join(f'{k}=={v}' for k, v in sorted(pins.items()))+'\n', overwrite=True)
-        os.environ['PIP_CONSTRAINT'] = str(constraint)
+        os.environ['PIP_CONSTRAINT'] = str(write_restore_constraints(ROOT, PREFIX, restored['packages']))
     run(python, '-m', 'pip', 'install', 'pip==24.0', 'setuptools==80.9.0', 'wheel==0.45.1')
     run(python, '-m', 'pip', 'install', 'torch==2.7.1', 'torchaudio==2.7.1',
         '--index-url', 'https://download.pytorch.org/whl/cu126')
