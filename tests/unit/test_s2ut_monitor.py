@@ -12,6 +12,83 @@ from direct_s2st.translatotron2.monitor import early_stop_result, select_checkpo
 
 
 POLICY = dict(interval=2, patience=2, min_relative_improvement=.001)
+DUAL_POLICY = dict(version=2, interval=10, patience=5, min_relative_improvement=.01)
+
+
+def observe(monitor, update, unit, total, work):
+    values = {key: 1. for key in monitor.metrics}
+    values.update(unit_loss=unit, loss=total)
+    if monitor.observe(update, values, values if monitor.due(update) else None, .001):
+        def save(path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(str(update))
+        monitor.save_best(work, save)
+
+
+@pytest.mark.parametrize('improving', ['unit_loss', 'loss'])
+def test_dual_stopping_waits_for_both_losses_after_warmup(tmp_path, improving):
+    monitor = S2UTMonitor(DUAL_POLICY, 400, origin=380)
+    for update in range(381, 401):
+        # Worse at the warmup boundary: anchors must retain historical minima.
+        observe(monitor, update, 100 if update < 400 else 110,
+                100 if update < 400 else 120, tmp_path)
+        assert not monitor.stopped and monitor.bad_evaluations == monitor.total_bad_evaluations == 0
+    for update in range(401, 461):
+        values = dict(unit_loss=100, loss=100)
+        if update >= 410:
+            values[improving] = 98
+        observe(monitor, update, values['unit_loss'], values['loss'], tmp_path)
+        assert monitor.stopped == (update == 460)
+    assert monitor.best_update == (410 if improving == 'unit_loss' else 390)
+    assert monitor.best_total_update == (410 if improving == 'loss' else 390)
+    restored = S2UTMonitor.restore(DUAL_POLICY, monitor.state(), 460, 400, tmp_path)
+    assert restored.state() == monitor.state()
+    with pytest.raises(ValueError, match='monitor updates'):
+        observe(restored, 461, 97, 97, tmp_path)
+
+
+def test_dual_small_best_improvements_accumulate_and_resume_without_reset(tmp_path):
+    monitor = S2UTMonitor(DUAL_POLICY, 400, origin=380)
+    scores = {410:99.8, 420:99.5, 430:99.2, 440:99.01, 450:99.}
+    for update in range(381, 501):
+        unit = scores.get(update//10*10, 100 if update < 410 else 99)
+        observe(monitor, update, unit, 100, tmp_path)
+        if update == 440:
+            assert monitor.bad_evaluations == monitor.total_bad_evaluations == 4
+            original = monitor.state()
+            monitor = S2UTMonitor.restore(DUAL_POLICY, original, 440, 400, tmp_path)
+            assert monitor.state() == original
+        if update == 450:
+            assert monitor.best_update == 450 and monitor.anchor == 99
+            assert monitor.bad_evaluations == 0 and monitor.total_bad_evaluations == 5
+        assert monitor.stopped == (update == 500)
+    invalid = monitor.state()
+    invalid['total_bad_evaluations'] = 0
+    with pytest.raises(ValueError, match='history/counters'):
+        S2UTMonitor.restore(DUAL_POLICY, invalid, 500, 400, tmp_path)
+
+
+def test_dual_policy_adoption_keeps_history_and_bests_without_retrospective_count(tmp_path):
+    old = S2UTMonitor(dict(POLICY, interval=10), 400, origin=380)
+    for update in range(381, 401):
+        observe(old, update, 100 if update < 400 else 110,
+                200 if update < 400 else 210, tmp_path)
+    history, best_sha = old.state()['history'], old.best_sha256
+    monitor = S2UTMonitor.restore(DUAL_POLICY, old.state(), 400, 400, tmp_path)
+    assert monitor.history == history and monitor.best_sha256 == best_sha
+    assert monitor.anchor == 100 and monitor.total_anchor == 200
+    for update in range(401, 451):
+        observe(monitor, update, 105, 202, tmp_path)
+        if update == 430:
+            original = monitor.state()
+            monitor = S2UTMonitor.restore(DUAL_POLICY, original, 430, 400, tmp_path)
+            assert monitor.state() == original
+        assert monitor.stopped == (update == 450)
+    assert monitor.best_update == monitor.best_total_update == 390
+    with pytest.raises(ValueError, match='policy changed'):
+        S2UTMonitor.restore(dict(DUAL_POLICY, patience=6), monitor.state(), 450, 400, tmp_path)
+    with pytest.raises(ValueError, match='warmup changed'):
+        S2UTMonitor.restore(DUAL_POLICY, monitor.state(), 450, 500, tmp_path)
 
 
 def output(value, size=2):
@@ -110,9 +187,10 @@ def install_trainer(monkeypatch):
     return Trainer, loop, dev_updates
 
 
-def test_real_adam_hooks_resume_counters_best_and_restore_methods(tmp_path, monkeypatch):
+@pytest.mark.parametrize('policy, terminal', [(POLICY, 6), (dict(DUAL_POLICY, interval=2), 12)])
+def test_real_adam_hooks_resume_counters_best_and_restore_methods(tmp_path, monkeypatch, policy, terminal):
     Trainer, loop, dev_updates = install_trainer(monkeypatch)
-    monkeypatch.setenv('S2ST_S2UT_MONITOR_POLICY', json.dumps(POLICY))
+    monkeypatch.setenv('S2ST_S2UT_MONITOR_POLICY', json.dumps(policy))
     monkeypatch.delenv('S2ST_BATCH_PROBE', raising=False)
     monkeypatch.delenv('S2ST_TRAIN_ADAPTIVE_BATCH', raising=False)
     monkeypatch.delenv('S2ST_TRAIN_DEADLINE', raising=False)
@@ -137,22 +215,29 @@ def test_real_adam_hooks_resume_counters_best_and_restore_methods(tmp_path, monk
         return torch.load(path, weights_only=True)
     torch.manual_seed(8)
     continuous = run(tmp_path/'continuous', 20)
-    assert continuous['updates'] == 6
+    assert continuous['updates'] == terminal
     torch.manual_seed(8)
     initial = run(tmp_path/'resumed', 3)
     assert initial['updates'] == 3
     resumed = run(tmp_path/'resumed', 20, resume=True)
-    assert resumed['updates'] == 6
+    assert resumed['updates'] == terminal
     for field, value in continuous['extra_state']['s2st_monitor'].items():
         if field != 'best_sha256':  # Serialized best file names can differ.
             assert resumed['extra_state']['s2st_monitor'][field] == value
     for name, tensor in continuous['model'].items():
         torch.testing.assert_close(tensor, resumed['model'][name], rtol=0, atol=0)
-    assert early_stop_result(tmp_path/'resumed', 's2ut', 6)['best_update'] == 2
+    for parameter, state in continuous['optimizer']['state'].items():
+        for key, value in state.items():
+            torch.testing.assert_close(value, resumed['optimizer']['state'][parameter][key], rtol=0, atol=0)
+    result = early_stop_result(tmp_path/'resumed', 's2ut', terminal)
+    assert result['best_update'] == 2
+    if policy.get('version') == 2:
+        assert result['stopping_metrics'] == ['unit_loss', 'loss'] and result['stopping_rule'] == 'all_plateau'
+        assert result['best_total_update'] == 2
     best = torch.load(select_checkpoint(tmp_path/'resumed'), weights_only=True)
     assert best['updates'] == 2 and best['optimizer']['state']
     assert best['extra_state']['train_iterator']['iterations'] == 2
-    assert dev_updates == [2, 4, 6, 2, 4, 6]
+    assert dev_updates == list(range(2, terminal+1, 2))*2
     (tmp_path/'resumed/checkpoints/checkpoint_best.pt').write_text('corrupt')
     with pytest.raises(ValueError, match='best dev checkpoint'):
         run(tmp_path/'resumed', 1, resume=True)

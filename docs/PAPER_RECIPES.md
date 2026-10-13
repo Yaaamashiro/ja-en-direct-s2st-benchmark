@@ -32,8 +32,11 @@ S2UTは開始前も追加分割・拡大禁止で、公式token-budget batchの�
 変えず停止する。物理batch8はVRAM収容の保証ではない。新runで物理batchを下げても
 exactの実効1024は維持できるが、microbatch-localなBatchNorm統計は同じにならない。
 practicalでも通常はFisherモデル・LR・warmup・L2を保持する。
-例外としてS2UTの明示的な`S2UT_WARMUP_UPDATES=1000`を許可し、論文の10,000との差を記録する。
+例外としてS2UTの明示的な`S2UT_WARMUP_UPDATES=400/500/1000`を許可し、論文の10,000との差を記録する。
 ノートブックではこの短縮を既定にして新しい学習名を使う。TT2の既存checkpoint向け短縮はRESUME.md参照。
+通常セルの既定は両モデルとも400 warmup・10更新ごとのdev評価・patience 5・最低改善率1%。
+TT2の停止判定は合計dev loss、S2UTはUnit/合計dev lossの両方の改善不足を使う。
+これらは独自の短縮/早期終了条件であり、原論文の学習量やBLEUでのモデル選択の再現ではない。
 
 ## 共通の開始前VRAM測定（Colabセル5）
 

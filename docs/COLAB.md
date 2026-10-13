@@ -36,7 +36,7 @@ TT2の`TT2_WARMUP_UPDATES`は既定400（選択肢400/500/1000/10000）。通常
 旧固定コードへは、検証済みのmonitor実装に対してスケジュール/監視/履歴復元の5関数だけを
 変更したローカル実行コピーを作り、全ソース/configのSHAと監査記録を検証する。
 未確認のコード差分や改変済みコピーは拒否し、元コード・snapshotは上書きしない。
-S2UTのウォームアップ既定1,000と原論文の設定ファイルは変更しない。
+S2UTの通常セルのウォームアップも400に揃える。原論文の設定ファイルは変更しない。
 
 通常セル1はTT2の監視policy v2を明示要求する。旧policyからの再開時は、旧履歴・
 旧カウンター・bestのSHAをまず検証し、変更地点と旧/新policyを`policy_history`に記録する。
@@ -58,18 +58,27 @@ max(ウォームアップ終了点, policy変更地点)より後の評価から�
 初回のlauncher取得後は旧手動移行セルや通常セル3を追加実行する必要はない。
 CPUテストで選択・復元・中断時の保持を検証しているが、実Colabでの全手順は未検証。
 
-S2UTの`S2UT_WARMUP_UPDATES`は既定1,000更新です。セル5ではS2UTのみ
-`paper_practical`と記録し、学習名に`-warmup1000`を付けます。
+S2UTの`S2UT_WARMUP_UPDATES`は既定400更新（選択肢400/500/1000/10000）です。
+短縮時は`paper_practical`と記録し、学習名に`-warmup400`等を付けます。
 `REPRODUCTION_MODE=paper_exact`のままこの短縮を選んだ場合、token予算20,000・
 勾配蓄積4・FP16を維持し、追加バッチ分割の事前測定は無効にします。
 論文設定の10,000を選べば従来の学習名・条件へ戻ります。
-準備済み4A/4Bの再生成は不要です。旧10,000設定のS2UT checkpointからの途中移行は
-未対応で、設定不一致を検出します。1,000で開始したrunは同じ設定で再開できます。
+準備済み4A/4Bの再生成は不要です。既存S2UT checkpointのwarmupを途中で変更する機能は
+未対応です。通常セル5は構築/ダウンロード前に不一致を拒否します。
+既存runは元のwarmupで再開し、異なるスケジュールは別実験で開始してください。
 S2UTの`S2UT_MONITOR=True`は全devを10更新ごとに評価し、Unit予測の
-teacher-forced dev lossで最良checkpointを選択します。ウォームアップ終了後、
-0.1%以上の改善が10回連続で不足すると早期終了します。設定は
-`S2UT_MONITOR_INTERVAL=10`、`S2UT_MONITOR_PATIENCE=10`、
-`S2UT_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.001`です。
+teacher-forced dev lossで最良checkpointを選択します。policy v2ではウォームアップ終了後、
+Unit lossと合計lossが**両方とも**累計1%以上の改善を5回連続で示さなければ早期終了します。
+片方が改善すればその指標のcounterを0に戻し、両方のcounterが5以上になるまで続行します。
+400時点の過去5回を遡って停止せず、最短で410/420/430/440/450の評価後に停止します。
+各指標の基準はwarmup中の最小値です。小さなbest更新も保存し、基準から累計1%以上
+改善した時点だけそのcounterをリセットします。合計lossのbest値/更新数も別途記録しますが、
+checkpoint_bestの選択はUnit lossのままです。設定は
+`S2UT_MONITOR_INTERVAL=10`、`S2UT_MONITOR_PATIENCE=5`、
+`S2UT_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.01`です。
+旧policy v1は従来のUnit-only判定を保持します。同じ実行コードでv2への明示変更時は
+履歴・bestの検証後、変更地点を記録して両counterをリセットします。
+同じpolicyでの再開はcounterを継承します。既存runの固定実行コードを自動更新はしません。
 合計loss、Unit loss、source_letter、target_letter、decoder_target_ctcのtrain/dev推移を
 `training-monitor.json`・`.csv`・`.svg`へ記録します。
 lossは各タスクのsample_sizeで重み付き平均を取りbits単位で表示し、合計lossには

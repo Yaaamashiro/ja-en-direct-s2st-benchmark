@@ -86,9 +86,12 @@ def test_notebooks_separate_data_models_and_training_guards(monkeypatch):
     assert settings['training']['TT2_MONITOR_MIN_RELATIVE_IMPROVEMENT'] == .01
     settings['training']['configure_preparation']()
     assert json.loads(os.environ['S2ST_TT2_MONITOR_POLICY']) == dict(version=2, interval=10, patience=5, min_relative_improvement=.01)
-    assert settings['training']['S2UT_MONITOR_PATIENCE'] == 10
-    assert settings['training']['S2UT_MONITOR_MIN_RELATIVE_IMPROVEMENT'] == .001
-    assert settings['training']['S2UT_WARMUP_UPDATES'] == 1000
+    assert settings['training']['S2UT_MONITOR_PATIENCE'] == 5
+    assert settings['training']['S2UT_MONITOR_MIN_RELATIVE_IMPROVEMENT'] == .01
+    assert settings['training']['S2UT_WARMUP_UPDATES'] == 400
+    assert json.loads(os.environ['S2ST_S2UT_MONITOR_POLICY']) == dict(version=2, interval=10, patience=5, min_relative_improvement=.01)
+    assert settings['training']['training_mode']('s2ut') == 'paper_practical'
+    assert settings['training']['training_run_name']('s2ut').endswith('-recipe-v3-warmup400')
     assert settings['training']['TRAIN_CALIBRATION_OBJECTIVE'] == 'throughput'
     assert not settings['training']['RUN_TRAINING']
     assert not settings['training']['CONFIRM_TRAINING']
@@ -138,6 +141,28 @@ def _runtime_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_cell5_short_s2ut_schedule_keeps_official_batch_options(monkeypatch):
+    import os
+    monkeypatch.setattr(os, 'environ', dict(os.environ))
+    nb = json.loads((ROOT/'notebooks/colab_training.ipynb').read_text(encoding='utf-8'))
+    codes = [''.join(c['source']) for c in nb['cells'] if c['cell_type'] == 'code']
+    cfg = {}
+    exec(codes[0], cfg)
+    cfg.update(RUN_TRAINING=True, CONFIRM_TRAINING=True, TRAIN_TARGET='s2ut', os=os,
+               ensure_workspace=lambda: None)
+    # Execute the real cell-5 option builder, stopping before remote code retrieval.
+    builder = next(s for s in codes if s.startswith('#@title 5.')).split('    import sys\n')[0]
+    for warmup in (400, 500, 1000, 10000):
+        cfg['S2UT_WARMUP_UPDATES'] = warmup
+        exec(builder, cfg)
+        options = cfg['options']
+        assert options['s2ut_warmup_updates'] == warmup and 'update_freq' not in options
+        assert options['precision'] == 'default' and options['adaptive_batch'] is False
+        assert options['calibrate_batch'] == (warmup == 10000)
+        assert options['reproduction_mode'] == ('paper_exact' if warmup == 10000 else 'paper_practical')
+        assert cfg['RUN_NAME'].endswith('-recipe-v3' if warmup == 10000 else '-recipe-v3-warmup'+str(warmup))
 
 
 def _fake_runtime(prefix):

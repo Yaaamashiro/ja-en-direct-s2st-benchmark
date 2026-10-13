@@ -124,7 +124,7 @@ class Monitor:
             if improved:
                 self.best_value, self.best_update = value, update
                 self.best_sha256 = None  # Caller must publish this exact checkpoint.
-            modern = self.policy.get('version') == 2 and self.version == VERSION
+            modern = self.policy.get('version') == 2 and self.version in (VERSION, 's2ut-dev-unit-monitor-v1')
             meaningful = (self.anchor is None or
                           (value < self.anchor and value <= self.anchor * (1-self.policy['min_relative_improvement']))) if modern else (
                           self.anchor is None or value < self.anchor * (1-self.policy['min_relative_improvement']))
@@ -158,7 +158,7 @@ class Monitor:
             raise ValueError('monitor version/warmup changed')
         requested = validate_policy(requested) if requested is not None else None
         migrating = requested is not None and requested != saved['policy']
-        if migrating and (cls.version != VERSION or requested.get('version') != 2 or
+        if migrating and (cls.version not in (VERSION, 's2ut-dev-unit-monitor-v1') or requested.get('version') != 2 or
                           requested['interval'] != saved['policy']['interval'] or saved['stopped']):
             raise ValueError('monitor policy changed; retain the saved policy for this run')
         changes = deepcopy(saved.get('warmup_history', []))
@@ -179,7 +179,7 @@ class Monitor:
             previous_at = change['adopted_at']
         previous_at, previous_policy = result.origin - 1, result.policy
         for policy_change in policies:
-            if (cls.version != VERSION or set(policy_change) != {'from', 'to', 'adopted_at'} or
+            if (cls.version not in (VERSION, 's2ut-dev-unit-monitor-v1') or set(policy_change) != {'from', 'to', 'adopted_at'} or
                     type(policy_change['adopted_at']) is not int or
                     not previous_at < policy_change['adopted_at'] <= completed or
                     validate_policy(policy_change['from']) != previous_policy or
@@ -205,6 +205,8 @@ class Monitor:
                     raise ValueError('invalid monitor policy history')
                 result.policy = deepcopy(policy_change['to'])
                 result.anchor, result.bad_evaluations = result.best_value, 0
+                if hasattr(result, 'reset_total_stopping'):
+                    result.reset_total_stopping()
                 result._policy_history = getattr(result, '_policy_history', []) + [policy_change]
                 policy_change = next(policy_pending, None)
         for row in saved['history']:
@@ -236,6 +238,8 @@ class Monitor:
                 {'from': deepcopy(result.policy), 'to': deepcopy(requested), 'adopted_at': completed}]
             result.policy = deepcopy(requested)
             result.anchor, result.bad_evaluations = result.best_value, 0
+            if hasattr(result, 'reset_total_stopping'):
+                result.reset_total_stopping()
             print(f'[training-monitor-policy] adopted_at={completed} policy={json.dumps(requested, sort_keys=True)} '
                   'history_best_optimizer_preserved=True stopping_counter_restarted=True', file=sys.stderr, flush=True)
         return result
@@ -306,9 +310,13 @@ def early_stop_result(work, kind, completed):
         from ..s2ut.monitor import S2UTMonitor, policy_from_env as s2ut_policy
         monitor_class, policy = S2UTMonitor, s2ut_policy()
     monitor = monitor_class.restore(policy, saved, completed, saved['warmup'], work)
-    return dict(status='EARLY_STOPPED', durable_updates=completed,
-                best_update=monitor.best_update, best_dev_loss=monitor.best_value,
-                selection_metric=monitor.metric)
+    result = dict(status='EARLY_STOPPED', durable_updates=completed,
+                  best_update=monitor.best_update, best_dev_loss=monitor.best_value,
+                  selection_metric=monitor.metric)
+    if kind == 's2ut' and monitor.policy.get('version') == 2:
+        result.update(stopping_metrics=['unit_loss', 'loss'], stopping_rule='all_plateau',
+                      best_total_dev_loss=monitor.best_total_value, best_total_update=monitor.best_total_update)
+    return result
 
 
 def select_checkpoint(work, selection='auto'):

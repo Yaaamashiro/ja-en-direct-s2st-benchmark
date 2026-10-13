@@ -100,7 +100,8 @@ def test_pinned_s2ut_fisher_registry_and_official_recipe():
             validate_s2ut_paper(command + [cap, '32'])
 
 
-def test_s2ut_colab_metadata_and_recipe_resume_guard(tmp_path, monkeypatch):
+@pytest.mark.parametrize('warmup', [400, 500, 1000])
+def test_s2ut_colab_metadata_and_recipe_resume_guard(tmp_path, monkeypatch, warmup):
     import subprocess
     from direct_s2st.colab import make_config
     from direct_s2st.s2ut import preflight
@@ -123,13 +124,18 @@ def test_s2ut_colab_metadata_and_recipe_resume_guard(tmp_path, monkeypatch):
     assert option(config['command'], '--update-freq') == '4'
     assert config['research_metadata']['unit_artifacts'] == identity
     shortened = make_config(ROOT, data, env, 's2ut', 'fisher', performance='gpu80',
-                            reproduction_mode='paper_practical', s2ut_warmup_updates=1000)
-    assert option(shortened['command'], '--warmup-updates') == '1000'
+                            reproduction_mode='paper_practical', s2ut_warmup_updates=warmup)
+    assert option(shortened['command'], '--warmup-updates') == str(warmup)
     assert option(shortened['command'], '--update-freq') == '4'
-    assert shortened['research_metadata']['warmup_updates'] == 1000
+    assert option(shortened['command'], '--max-tokens') == '20000'
+    assert '--fp16' in shortened['command']
+    assert shortened['research_metadata']['warmup_updates'] == warmup
     assert any('warmup shortened' in d for d in shortened['research_metadata']['deviations'])
     with pytest.raises(ValueError, match='requires paper_practical'):
-        make_config(ROOT, data, env, 's2ut', 'fisher', s2ut_warmup_updates=1000)
+        make_config(ROOT, data, env, 's2ut', 'fisher', s2ut_warmup_updates=warmup)
+    for invalid in (399, True):
+        with pytest.raises(ValueError, match='S2UT warmup must'):
+            make_config(ROOT, data, env, 's2ut', 'fisher', reproduction_mode='paper_practical', s2ut_warmup_updates=invalid)
     short_command = ['wrapper'] + [v.format(run_root=str(tmp_path/'short'), updates='2') for v in shortened['command'][3:]]
     _, (short_run, short_meta) = prepare_research_metadata(short_command)
     _, (_, short_resume) = prepare_research_metadata(short_command + ['--restore-file', str(short_run/'checkpoints/checkpoint_last.pt')])

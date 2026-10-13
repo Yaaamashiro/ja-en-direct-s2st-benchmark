@@ -132,8 +132,8 @@ def validate_s2ut_paper(command, *, exact=True):
         expected.update({'--max-tokens': '20000', '--update-freq': '4'})
         if any(key in command for key in ('--batch-size', '--max-sentences')):
             raise ValueError('S2UT paper_exact uses official token-budget batches, not an utterance batch cap')
-    elif option(command, '--warmup-updates') == '1000':
-        expected['--warmup-updates'] = '1000'
+    elif option(command, '--warmup-updates') in ('400', '500', '1000'):
+        expected['--warmup-updates'] = option(command, '--warmup-updates')
     required = ('--target-is-code', '--share-decoder-input-output-embed')
     if any(command.count(key) != 1 or option(command, key) != val for key, val in expected.items()) or any(key not in command for key in required) or (exact and ('--fp16' not in command or '--bf16' in command or '--memory-efficient-fp16' in command)):
         raise ValueError('S2UT paper_exact requires the pinned Fisher architecture/optimizer/batch/FP16 recipe')

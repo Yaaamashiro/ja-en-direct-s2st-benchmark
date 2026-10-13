@@ -90,6 +90,9 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     practical_warmup = options.get('tt2_warmup_updates') if kind == 'tt2' else None
     if practical_warmup is not None and (type(practical_warmup) is not int or practical_warmup not in (400, 500, 1000, 10000)):
         raise ValueError('TT2 warmup must be 400, 500, 1000 or 10000')
+    s2ut_warmup = options.get('s2ut_warmup_updates') if kind == 's2ut' else None
+    if s2ut_warmup is not None and (type(s2ut_warmup) is not int or s2ut_warmup not in (400, 500, 1000, 10000)):
+        raise ValueError('S2UT warmup must be 400, 500, 1000 or 10000')
     corpus = os.environ.get('CORPUS_ROOT')
     if corpus and any(p.resolve().is_relative_to(Path(corpus).resolve()) for p in (persistent, data)):
         raise ValueError('training outputs must stay outside CORPUS_ROOT')
@@ -99,6 +102,15 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     work = WORK_ROOT/name
     route_path = persistent/(name+'.launch.json')
     config = json.loads(config_path.read_text()) if config_path.is_file() else None
+    if snapshot and s2ut_warmup is not None:
+        from direct_s2st.recipes import option
+        saved_warmup = (config or {}).get('research_metadata', {}).get('warmup_updates')
+        if saved_warmup is None:
+            saved_warmup = option((config or {}).get('command', []), '--warmup-updates')
+        if str(saved_warmup) != str(s2ut_warmup):
+            raise ValueError(f'S2UT warmup differs from saved run ({saved_warmup} vs {s2ut_warmup}); '
+                             'retain its cell-1 warmup to resume, or use a new experiment for a different schedule; '
+                             'saved checkpoints are preserved')
     route = json.loads(route_path.read_text()) if route_path.is_file() else None
     if route and (route.get('version') != 1 or route['run_name'] != name or route['kind'] != kind or route['work'] != str(work)):
         raise ValueError('saved launch route belongs to a different training run')

@@ -19,6 +19,43 @@ class S2UTMonitor(Monitor):
     score_key = 'unit_loss'
     title = 'S2UT: train / teacher-forced dev losses (bits; not BLEU)'
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.best_total_value = self.best_total_update = self.total_anchor = None
+        self.total_bad_evaluations = 0
+
+    def reset_total_stopping(self):
+        # Policy adoption changes future stopping only, retaining raw bests.
+        self.total_anchor, self.total_bad_evaluations = self.best_total_value, 0
+
+    def observe(self, update, train, dev, lr):
+        improved = super().observe(update, train, dev, lr)
+        if dev is not None:
+            value = float(dev['loss'])
+            if self.best_total_value is None or value < self.best_total_value:
+                self.best_total_value, self.best_total_update = value, update
+            if self.policy.get('version') == 2:
+                meaningful = (self.total_anchor is None or
+                    (value < self.total_anchor and value <= self.total_anchor *
+                     (1-self.policy['min_relative_improvement'])))
+                adoption = getattr(self, '_policy_history', [])
+                start = max(self.warmup, adoption[-1]['adopted_at'] if adoption else self.origin)
+                if meaningful or update <= start:
+                    self.reset_total_stopping()
+                else:
+                    self.total_bad_evaluations += 1
+                self.stopped = (update > start and self.bad_evaluations >= self.policy['patience'] and
+                                self.total_bad_evaluations >= self.policy['patience'])
+        return improved  # Unit loss alone selects the best inference checkpoint.
+
+    def state(self):
+        result = super().state()
+        if self.policy.get('version') == 2:
+            result.update(stopping_metrics=['unit_loss', 'loss'],
+                best_total_value=self.best_total_value, best_total_update=self.best_total_update,
+                total_anchor=self.total_anchor, total_bad_evaluations=self.total_bad_evaluations)
+        return result
+
 
 def policy_from_env():
     value = os.environ.get('S2ST_S2UT_MONITOR_POLICY')
@@ -160,8 +197,11 @@ def runtime_hooks(audit, command):
                         trainer.cumulative_training_time()/3600 > cfg.optimization.stop_time_hours))
         if dev is not None:
             print(f'[training-monitor] S2UT update={update} dev_unit_loss={dev["unit_loss"]:.6g} '
-                  f'best_update={monitor.best_update} bad_evaluations={monitor.bad_evaluations}/'
-                  f'{monitor.policy["patience"]} warmup_guard={update <= monitor.warmup} '
+                  f'dev_loss={dev["loss"]:.6g} '
+                  f'best_update={monitor.best_update} unit_bad_evaluations={monitor.bad_evaluations}/'
+                  f'{monitor.policy["patience"]} total_bad_evaluations={monitor.total_bad_evaluations}/'
+                  f'{monitor.policy["patience"]} stopping_metrics={(["unit_loss", "loss"] if monitor.policy.get("version") == 2 else ["unit_loss"])} '
+                  f'warmup_guard={update <= monitor.warmup} '
                   f'early_stopped={monitor.stopped}', file=sys.stderr, flush=True)
         save_due = (should_stop or dev is not None or end_of_epoch or
                     (cfg.checkpoint.save_interval_updates > 0 and update % cfg.checkpoint.save_interval_updates == 0))
