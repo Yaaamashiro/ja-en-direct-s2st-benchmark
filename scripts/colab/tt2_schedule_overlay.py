@@ -11,15 +11,17 @@ MONITOR = 'direct_s2st/translatotron2/monitor.py'
 REVIEWED = {
     '97b631236281ba33b8a5520736e80ba0c6031f4cfe20ac676a839d4072a95a79': True,  # d70516a
     '7510b3efec45dab148b2f83a108e2e22d07cb07fddb68970756764a01124542d': False,  # 6e311c4
+    '6648895bb16a4f102020355f83b930c290050b6442f0b94b81b9a72106cf92fb': False,  # d55102b..41c6ca2
 }
 
 
 def functions(source):
     tree = ast.parse(source)
     monitor = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Monitor')
-    nodes = [next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'resume_schedule')]
+    nodes = [next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+             for name in ('resume_schedule', 'validate_policy')]
     nodes += [next(n for n in monitor.body if isinstance(n, ast.FunctionDef) and n.name == name)
-              for name in ('state', 'restore')]
+              for name in ('observe', 'state', 'restore')]
     return {n.name: (min([n.lineno] + [d.lineno for d in n.decorator_list])-1, n.end_lineno) for n in nodes}
 
 
@@ -38,6 +40,7 @@ def patched_monitor(original, reviewed):
         value = ''.join(replacements[new[name][0]:new[name][1]])
         if REVIEWED[digest]:
             value = value.replace('cls.version', 'VERSION').replace('self.version', 'VERSION')
+            value = value.replace('self.metrics', 'METRICS').replace('self.score_key', "'loss'")
             value = value.replace('self.metric', "'teacher_forced_dev_loss'")
         lines[a:b] = [value]
     result = ''.join(lines).encode()
@@ -75,7 +78,7 @@ def prepare(execution, launcher, persistent, name):
             raise ValueError('schedule overlay source verification failed')
     audit = dict(version=1, pinned_execution=str(execution), source_sha256=hashes,
                  overlay=str(root), modified_files=['src/'+MONITOR],
-                 modified_functions=['resume_schedule', 'Monitor.state', 'Monitor.restore'],
+                 modified_functions=['resume_schedule', 'validate_policy', 'Monitor.observe', 'Monitor.state', 'Monitor.restore'],
                  snapshot_identity_unchanged=True)
     atomic_write_json(persistent/'execution-overlays'/f'{name}-schedule-{identity}.json', audit, resume=True)
     print(f'[training-schedule-overlay] verified={identity} model_optimizer_unchanged=True', flush=True)

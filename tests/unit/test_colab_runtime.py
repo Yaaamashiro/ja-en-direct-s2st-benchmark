@@ -82,6 +82,12 @@ def test_notebooks_separate_data_models_and_training_guards(monkeypatch):
     assert settings['training']['S2UT_VOCODER_MODE'] == 'trained'
     assert settings['training']['S2UT_TOTAL_UPDATES'] == 400000
     assert settings['training']['TT2_WARMUP_UPDATES'] == 400
+    assert settings['training']['TT2_MONITOR_PATIENCE'] == 5
+    assert settings['training']['TT2_MONITOR_MIN_RELATIVE_IMPROVEMENT'] == .01
+    settings['training']['configure_preparation']()
+    assert json.loads(os.environ['S2ST_TT2_MONITOR_POLICY']) == dict(version=2, interval=10, patience=5, min_relative_improvement=.01)
+    assert settings['training']['S2UT_MONITOR_PATIENCE'] == 10
+    assert settings['training']['S2UT_MONITOR_MIN_RELATIVE_IMPROVEMENT'] == .001
     assert settings['training']['S2UT_WARMUP_UPDATES'] == 1000
     assert settings['training']['TRAIN_CALIBRATION_OBJECTIVE'] == 'throughput'
     assert not settings['training']['RUN_TRAINING']
