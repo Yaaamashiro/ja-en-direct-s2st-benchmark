@@ -21,6 +21,19 @@ S2UTなど新規学習はlauncherの固定SHAを記録して開始し、4A/4Bの
 launcherを明示更新する場合だけ`TRAIN_CODE_REVISION`へ対応する新しい完全SHAを指定する。
 launcherの更新自体で保存済みモデルの実行コード・optimizer条件は変更しない。
 
+TT2の`TT2_WARMUP_UPDATES`は既定500（選択肢500/1000/10000）。通常セル5から
+明示的に学習率スケジュールを短縮し、`paper_practical`の変更履歴をcheckpointへ保存する。
+旧1,000短縮済みrunも、既存ウォームアップ終了前なら同じrunで500へ変更できる。
+500は学習の強制終了点ではなく、dev lossによる早期終了判定の開始目安。
+10更新ごと・patience 10なら、改善が止まっても通常は500直後には終了しない。
+重み・Adam状態・絶対更新数・過去loss/学習率・best checkpointは維持する。
+新しい学習率は次の更新から適用するため、過去を500設定で学習したことにはしない。
+再開時の10000選択は保存済みスケジュールを継承し、途中で延長はしない。
+旧固定コードへは、検証済みのmonitor実装に対してスケジュール/履歴復元の3関数だけを
+変更したローカル実行コピーを作り、全ソース/configのSHAと監査記録を検証する。
+未確認のコード差分や改変済みコピーは拒否し、元コード・snapshotは上書きしない。
+S2UTのウォームアップ既定1,000と原論文の設定ファイルは変更しない。
+
 依存環境の完全なJSONを`.runtime-environments/<SHA256>.json`へatomic保存・readbackする。
 新しいランタイムではその全依存版をconstraintとして構築する。
 旧TT2で環境JSONがない場合は、`session.log`の成功した実行記録から依存版の候補を抽出し、
@@ -342,7 +355,7 @@ TT2/vocoderの試運転ログは最後のoptimizer更新も数えて完了表示
 - `TRAIN_SAVE_INTERVAL=1`: 通常用のoptimizer更新単位の保存間隔。最終更新・時間予算到達時にも保存します。ローカル固定コピーは同期、その後のDriveコピー・SHA-256検証は別スレッドで1件ずつ実行。未確認コピーは最大2件で、遅いDriveには待ち合わせます。
 - `TRAIN_BACKUP_MIN_SECONDS=600`: 常駐学習でDriveへ転送する最短間隔。ローカルの50更新ごとの保存は維持し、最初・最終・時間予算到達時の保存は間隔によらず転送します。強制切断では前の`durable_updates`から再開し、未確認更新を再実行します。
 - `TRAIN_BACKUP_MAX_GB=100`: そのrunのDriveバックアップ総容量上限（100GiB）。旧snapshot・未完コピーも数えます。上限到達時は既存復旧点を削除せず停止します。必要なDrive空き容量を確認したうえで明示的に増やしてください。
-- `TT2_MONITOR=True`: TT2の常駐・単一GPU学習を監視。`TT2_MONITOR_INTERVAL=10`更新ごとに**全devのteacher-forced loss**を評価し、`TT2_MONITOR_PATIENCE=10`回連続で十分な改善がなければ早期終了。`TT2_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.001`は0.1%改善を判定基準とする（絶対最小lossのbest保存とは別）。ウォームアップ以下では停止カウンタをリセットする。現在の`TOTAL_UPDATES=10000`とwarmup=10000では上限より前には早期終了しない。学習率・バッチ数・上限更新数は変更しない。
+- `TT2_MONITOR=True`: TT2の常駐・単一GPU学習を監視。`TT2_MONITOR_INTERVAL=10`更新ごとに**全devのteacher-forced loss**を評価し、`TT2_MONITOR_PATIENCE=10`回連続で十分な改善がなければ早期終了。`TT2_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.001`は0.1%改善を判定基準とする（絶対最小lossのbest保存とは別）。ウォームアップ以下では停止カウンタをリセットする。通常セルのTT2 warmup既定は500。monitor自体は学習率・バッチ数・上限更新数を変更しない。
 - TT2監視は`training-monitor.json`（全履歴・policy・カウンタ）、CSV、SVGをローカルrunに保存し、確認済み学習snapshotへ同梱。`checkpoints/checkpoint_best.pt`はdev loss最小のモデルとoptimizer、`checkpoint_last.pt`は再開位置。切断後はsnapshotを復元すると履歴・最良モデル・カウンタが戻る。旧checkpointからの明示的な有効化はその更新から履歴を開始し、過去の指標を捏造しない。保存済みpolicyを再開時に変更すると停止する。
 - 確認済みsnapshotの公開後、`PERSISTENT/checkpoints/<実際のrun名>/training-monitor.svg`・CSV・JSONへ閲覧用コピーを保存する。Driveからグラフを開けるため、学習セルの流れるログを追う必要はない。履歴のJSONは最後の永続保存まで、グラフ/CSVは直近の評価時点までを表示する。閲覧用コピーにI/Oエラーが出ても検証済みsnapshotは保持し、監視データはsnapshotから復元可能。
 - TT2推論は既定で検証済みdev-bestを選択し、旧runや初回評価前はlastを使用。`--checkpoint-selection last/best`で明示指定可能。bestが記録されているのに欠落・破損した場合はlastへ黙って戻らない。**これはdev BLEUによるモデル選択や原論文の停止規則の再現ではない**。自由生成の音声・ASR BLEU評価は別途必要。最良モデルもsnapshotへ同梱するためバックアップ容量は増える。古い復旧点は自動削除しない。

@@ -87,6 +87,9 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     repo, persistent, data = Path(repo), Path(persistent), Path(data)
     if total < 1 or seconds < 0 or (total > 10 and not confirm):
         raise ValueError('long training requires CONFIRM_TRAINING=True')
+    practical_warmup = options.get('tt2_warmup_updates') if kind == 'tt2' else None
+    if practical_warmup is not None and (type(practical_warmup) is not int or practical_warmup not in (500, 1000, 10000)):
+        raise ValueError('TT2 warmup must be 500, 1000 or 10000')
     corpus = os.environ.get('CORPUS_ROOT')
     if corpus and any(p.resolve().is_relative_to(Path(corpus).resolve()) for p in (persistent, data)):
         raise ValueError('training outputs must stay outside CORPUS_ROOT')
@@ -144,8 +147,19 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
         legacy.validate_snapshot(config, backup, environment, work)
         # This reviewed continuation uses the original optimizer/config. Saved
         # schedule/monitor state is inherited and checked by the trainer.
-        if os.environ.get('S2ST_TT2_MONITOR_POLICY'):
+        if practical_warmup is None and os.environ.get('S2ST_TT2_MONITOR_POLICY'):
             os.environ.setdefault('S2ST_TT2_PRACTICAL_WARMUP', '1000')
+    if kind == 'tt2':
+        if practical_warmup is not None:
+            # 10000 selects the saved schedule on resume, never lengthens it.
+            if practical_warmup == 10000:
+                os.environ.pop('S2ST_TT2_PRACTICAL_WARMUP', None)
+            else:
+                os.environ['S2ST_TT2_PRACTICAL_WARMUP'] = str(practical_warmup)
+        if practical_warmup is not None or os.environ.get('S2ST_TT2_PRACTICAL_WARMUP'):
+            from tt2_schedule_overlay import prepare
+            execution = prepare(execution, ROOT, persistent, name)
+    builder_options = {k: v for k, v in options.items() if k != 'tt2_warmup_updates'}
     os.environ['PYTHONPATH'] = str(execution/'src')+os.pathsep+os.environ.get('PYTHONPATH', '')
     os.environ['S2ST_CONFIG_ROOT'] = str(execution/'configs')
     if snapshot:
@@ -158,7 +172,7 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
                    'print(json.dumps(cfg))')
         # Generate in the actual fixed Python, not the notebook kernel.
         cfg = json.loads(subprocess.check_output([str(python), '-c', builder, str(execution), str(data),
-            str(environment), kind, model_size, json.dumps(options)], text=True))
+            str(environment), kind, model_size, json.dumps(builder_options)], text=True))
         atomic_write_json(config_path, cfg, resume=True)
         config = cfg
     atomic_write_json(route_path, route, resume=True)

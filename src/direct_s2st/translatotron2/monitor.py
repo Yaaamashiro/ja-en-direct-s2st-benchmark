@@ -21,7 +21,7 @@ def resume_schedule(base_warmup, completed, checkpoint, requested=None):
     saved = checkpoint.get('schedule_transition') if checkpoint else None
     if requested is not None and (type(requested) is not int or requested < 1):
         raise ValueError('practical warmup must be a positive integer')
-    if saved is not None:
+    if saved is not None and saved.get('version') == 1:
         if (set(saved) != {'version', 'base_warmup', 'warmup', 'adopted_at', 'mode'} or
                 saved['version'] != 1 or saved['mode'] != 'paper_practical' or
                 saved['base_warmup'] != base_warmup or
@@ -30,17 +30,36 @@ def resume_schedule(base_warmup, completed, checkpoint, requested=None):
                 not 0 < saved['adopted_at'] < saved['warmup'] < base_warmup or
                 saved['adopted_at'] > completed):
             raise ValueError('invalid saved warmup transition')
-        if requested is not None and requested != saved['warmup']:
-            raise ValueError('saved practical warmup cannot change again')
-        return saved['warmup'], deepcopy(saved)
-    if requested is None:
-        return base_warmup, None
-    if not checkpoint or not 0 < completed < requested < base_warmup:
-        raise ValueError('warmup shortening requires a checkpoint before the new warmup endpoint')
-    if checkpoint.get('monitor_state') is not None:
-        raise ValueError('adopt shortened warmup before adopting monitoring; existing history must not be reset')
-    return requested, dict(version=1, base_warmup=base_warmup, warmup=requested,
-                           adopted_at=completed, mode='paper_practical')
+        changes = [dict(warmup=saved['warmup'], adopted_at=saved['adopted_at'])]
+        effective = saved['warmup']
+    else:
+        changes, effective = [], base_warmup
+    # An old trainer rejects version 2 instead of silently changing the guard.
+    revised = saved if saved is not None and saved.get('version') != 1 else None
+    if revised is not None:
+        if set(revised) != {'version', 'base_warmup', 'changes', 'warmup', 'adopted_at', 'mode'} or revised['version'] != 2 or revised['base_warmup'] != base_warmup or revised['mode'] != 'paper_practical':
+            raise ValueError('invalid saved warmup transition')
+        changes = deepcopy(revised['changes'])
+        previous, adopted = base_warmup, -1
+        if not isinstance(changes, list) or not changes:
+            raise ValueError('invalid saved warmup transition')
+        for change in changes:
+            if (set(change) != {'warmup', 'adopted_at'} or type(change['warmup']) is not int or
+                    type(change['adopted_at']) is not int or
+                    not 0 < change['warmup'] < previous or
+                    not adopted < change['adopted_at'] < previous or change['adopted_at'] > completed):
+                raise ValueError('invalid saved warmup transition')
+            previous, adopted = change['warmup'], change['adopted_at']
+        if revised['warmup'] != previous or revised['adopted_at'] != adopted:
+            raise ValueError('invalid saved warmup transition')
+        effective = previous
+    if requested is None or requested == effective:
+        return effective, deepcopy(revised or saved)
+    if not 0 <= completed < effective or not 0 < requested < effective:
+        raise ValueError('warmup shortening requires an update before the existing warmup ends and a smaller endpoint')
+    changes.append(dict(warmup=requested, adopted_at=completed))
+    return requested, dict(version=2, base_warmup=base_warmup, changes=changes,
+                           warmup=requested, adopted_at=completed, mode='paper_practical')
 
 
 def policy_from_env():
@@ -111,22 +130,48 @@ class Monitor:
         return improved
 
     def state(self):
-        return dict(version=self.version, metric=self.metric, policy=deepcopy(self.policy),
+        result = dict(version=self.version, metric=self.metric, policy=deepcopy(self.policy),
                     warmup=self.warmup, origin=self.origin, history=deepcopy(self.history),
                     best_value=self.best_value, best_update=self.best_update, best_sha256=self.best_sha256,
                     anchor=self.anchor, bad_evaluations=self.bad_evaluations, stopped=self.stopped)
+        if getattr(self, '_warmup_history', None):
+            result['warmup_history'] = deepcopy(self._warmup_history)
+        return result
 
     @classmethod
     def restore(cls, requested, saved, completed, warmup, work):
         if saved is None:
             return cls(requested, warmup, origin=completed) if requested is not None else None
-        if saved.get('version') != cls.version or saved.get('warmup') != warmup:
+        if saved.get('version') != cls.version:
             raise ValueError('monitor version/warmup changed')
         if requested is not None and validate_policy(requested) != saved['policy']:
             raise ValueError('monitor policy changed; retain the saved policy for this run')
-        result = cls(saved['policy'], warmup, origin=saved['origin'])
+        changes = deepcopy(saved.get('warmup_history', []))
+        initial = changes[0]['from'] if changes else saved['warmup']
+        result = cls(saved['policy'], initial, origin=saved['origin'])
+        previous_at = result.origin - 1
+        for change in changes:
+            if (set(change) != {'from', 'to', 'adopted_at'} or
+                    any(type(change[k]) is not int for k in change) or
+                    not 0 < change['to'] < change['from'] or
+                    not previous_at < change['adopted_at'] <= completed or
+                    change['adopted_at'] >= change['from']):
+                raise ValueError('invalid monitor warmup history')
+            previous_at = change['adopted_at']
+        pending = iter(changes)
+        change = next(pending, None)
+        def apply_changes(update):
+            nonlocal change
+            while change is not None and change['adopted_at'] == update:
+                if result.warmup != change['from'] or result.stopped or result.bad_evaluations:
+                    raise ValueError('invalid monitor warmup history')
+                result.warmup = change['to']
+                result._warmup_history = getattr(result, '_warmup_history', []) + [change]
+                change = next(pending, None)
         for row in saved['history']:
+            apply_changes(result.update)
             result.observe(row['update'], row['train'], row['dev'], row['learning_rate'])
+        apply_changes(result.update)
         result.best_sha256 = saved['best_sha256']
         if result.update != completed or result.state() != saved:
             raise ValueError('monitor history/counters do not match checkpoint')
@@ -135,6 +180,16 @@ class Monitor:
             best = Path(work)/'checkpoints/checkpoint_best.pt'
             if not result.best_sha256 or not best.is_file() or raw_sha(best) != result.best_sha256:
                 raise ValueError('best dev checkpoint missing or changed; restore its verified snapshot')
+        if warmup != result.warmup:
+            # Only TT2 explicitly shortened schedules may migrate the guard.
+            # Validate all old history first; never reinterpret losses or reset
+            # patience/best/optimizer state under the new schedule.
+            if (cls.version != VERSION or type(warmup) is not int or
+                    not 0 < warmup < result.warmup or completed >= result.warmup or result.stopped or result.bad_evaluations):
+                raise ValueError('monitor version/warmup changed')
+            result._warmup_history = changes + [
+                {'from': result.warmup, 'to': warmup, 'adopted_at': completed}]
+            result.warmup = warmup
         return result
 
     def save_best(self, work, save):

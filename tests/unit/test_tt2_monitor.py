@@ -212,21 +212,73 @@ def test_monitor_and_real_dev_validation_do_not_change_training_weights(tmp_path
         best = load_checkpoint(work/'checkpoints/checkpoint_best.pt')[1]
         assert best['schedule_transition'] == continued['schedule_transition']
         monkeypatch.delenv('S2ST_TT2_PRACTICAL_WARMUP', raising=False)
+    before_history = continued['monitor_state']['history']
+    previous_best = continued['monitor_state']['best_update']
+    monkeypatch.setenv('S2ST_TT2_PRACTICAL_WARMUP', '500')
+    monkeypatch.setattr('sys.argv', ['train', '--data-root', str(tmp_path/'data'), '--run-root', str(work),
+        '--warmup-updates', '10000', '--max-updates', '9',
+        '--restore-file', str(work/'checkpoints/checkpoint_last.pt')])
+    train.main()
+    shortened = load_checkpoint(work/'checkpoints/checkpoint_last.pt')[1]
+    assert shortened['data_fingerprint'] == continued['data_fingerprint']
+    assert shortened['monitor_state']['warmup'] == 500
+    assert shortened['monitor_state']['history'][:len(before_history)] == before_history
+    assert shortened['monitor_state']['best_update'] in (previous_best, 9)
+    assert max(int(v['step']) for v in shortened['optimizer']['state'].values()) == 9
+    assert shortened['optimizer']['param_groups'][0]['lr'] == learning_rate(1e-4, 9, 500)
+    assert shortened['schedule_transition']['changes'] == [
+        dict(warmup=1000, adopted_at=4), dict(warmup=500, adopted_at=8)]
+    monkeypatch.delenv('S2ST_TT2_PRACTICAL_WARMUP', raising=False)
+    monkeypatch.setattr('sys.argv', ['train', '--data-root', str(tmp_path/'data'), '--run-root', str(work),
+        '--warmup-updates', '10000', '--max-updates', '10',
+        '--restore-file', str(work/'checkpoints/checkpoint_last.pt')])
+    train.main()
+    inherited = load_checkpoint(work/'checkpoints/checkpoint_last.pt')[1]
+    assert inherited['schedule_transition'] == shortened['schedule_transition']
+    assert inherited['monitor_state']['warmup'] == 500
+    assert inherited['monitor_state']['history'][:-1] == shortened['monitor_state']['history']
+    assert inherited['optimizer']['param_groups'][0]['lr'] == learning_rate(1e-4, 10, 500)
 
 
-def test_warmup_transition_from_85_is_absolute_and_cannot_silently_change():
+def test_warmup_transition_from_85_is_absolute_and_records_explicit_shortening():
     from direct_s2st.translatotron2.monitor import resume_schedule
     warmup, record = resume_schedule(10000, 85, {'updates': 85}, 1000)
     assert warmup == 1000 and record['adopted_at'] == 85
     assert resume_schedule(10000, 1100, {'schedule_transition': record}) == (1000, record)
-    with pytest.raises(ValueError, match='cannot change again'):
-        resume_schedule(10000, 90, {'schedule_transition': record}, 500)
-    with pytest.raises(ValueError, match='before the new warmup'):
-        resume_schedule(10000, 1001, {'updates': 1001}, 1000)
-    with pytest.raises(ValueError, match='before the new warmup'):
-        resume_schedule(10000, 0, None, 1000)
-    with pytest.raises(ValueError, match='history must not be reset'):
-        resume_schedule(10000, 85, {'monitor_state': {}}, 1000)
+    # An original v1 checkpoint (the real experiment) remains supported.
+    old = dict(version=1, base_warmup=10000, warmup=1000, adopted_at=85, mode='paper_practical')
+    warmup, revised = resume_schedule(10000, 133, {'schedule_transition': old}, 500)
+    assert warmup == 500 and revised['changes'] == [dict(warmup=1000, adopted_at=85), dict(warmup=500, adopted_at=133)]
+    assert resume_schedule(10000, 600, {'schedule_transition': revised}) == (500, revised)
+    with pytest.raises(ValueError, match='existing warmup'):
+        resume_schedule(10000, 1001, {'schedule_transition': old}, 500)
+    with pytest.raises(ValueError, match='existing warmup'):
+        resume_schedule(10000, 90, {'schedule_transition': old}, 2000)
+    assert resume_schedule(10000, 0, None, 500)[0] == 500
+    corrupt = dict(revised, warmup=250)
+    with pytest.raises(ValueError, match='invalid saved'):
+        resume_schedule(10000, 600, {'schedule_transition': corrupt})
+
+
+def test_monitor_warmup_migration_preserves_history_best_and_patience(tmp_path):
+    monitor = Monitor(dict(POLICY, interval=10, patience=10), 1000, origin=85)
+    for update in range(86, 134):
+        if monitor.observe(update, losses(1), losses(1) if update % 10 == 0 else None, .001):
+            bind_best(monitor, tmp_path)
+    saved = monitor.state()
+    shortened = Monitor.restore(None, saved, 133, 500, tmp_path)
+    assert shortened.history == saved['history']
+    assert shortened.best_sha256 == saved['best_sha256']
+    assert shortened.best_update == saved['best_update']
+    assert shortened.state()['warmup_history'] == [{'from':1000, 'to':500, 'adopted_at':133}]
+    for update in range(134, 601):
+        shortened.observe(update, losses(1), losses(1) if update % 10 == 0 else None, .001)
+        if update in (134, 500, 550):
+            restored = Monitor.restore(None, shortened.state(), update, 500, tmp_path)
+            assert restored.state() == shortened.state()
+        assert shortened.stopped == (update == 600)
+    with pytest.raises(ValueError, match='warmup changed'):
+        Monitor.restore(None, shortened.state(), 600, 1000, tmp_path)
 
 
 @pytest.mark.parametrize('kind', ['tt2', 's2ut'])
