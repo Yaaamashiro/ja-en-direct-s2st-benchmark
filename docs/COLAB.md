@@ -89,6 +89,26 @@ lossは各タスクのsample_sizeで重み付き平均を取りbits単位で表�
 VRAM事前測定の間は監視を実行しません。停止後の再開は更新せず`EARLY_STOPPED`を返します。
 Driveの保存先には確認用のグラフとCSVもコピーします。初回有効化以前の履歴は復元しません。
 
+### S2UTの初回FP16 overflow
+
+固定fairseqが`gradient overflow detected`でscaleを128→64等へ下げると、
+その試行はoptimizerを更新せず`None`を返します。常駐S2UTはこの場合のみ同じ論理バッチを
+再試行し、`[fp16-retry] update=... retry=... loss_scale=128->64`を記録します。
+optimizer.step未呼び出し・更新数不変・scaleの正常な低下をすべて確認します。
+乱数・model/criterionのbuffer・勾配を復元し、失敗した試行の監視lossとgradient証拠を破棄します。
+低下後のscaleは保持し、成功時だけ更新数、loss履歴、probe完了数を進めます。
+OOMやoptimizer実行後の失敗はこの処理では再試行せず、最小scale到達や上限32回でも停止します。
+FP32/BF16へ黙って切り替えず、token予算・蓄積回数・warmup・Adam設定は維持します。
+
+2486164で固定済みのrunは、新launcherの通常セル5で検証済みFP16 runtimeと
+TrainingAuditだけを差し替えた実行コピーを作ります。元checkout・config・依存環境・
+recipe fingerprint・snapshotは保持し、全source/configのSHAを`execution-overlays/`へ記録します。
+未レビューの旧コードや改変されたコピーは拒否します。初回overflowで更新0・snapshotなしの
+場合も、同じ実験名・設定でセル1→5を再実行できます。4A/4Bの再生成は不要です。
+launcherの固定SHAは自動更新しないため、反映時はセル1の`TRAIN_CODE_REVISION`に
+修正を含む公開済みSHAを指定してください。CPUの制御フロー/Adamテストで確認済みですが、
+実A100のFP16オーバーフロー再試行は未検証です。
+
 ## 使うノートブック
 
 | 用途 | ノートブック | データ・学習 | Drive保存先 |
