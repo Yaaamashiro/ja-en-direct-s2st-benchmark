@@ -19,6 +19,8 @@ def rescue(config, work, backup, total):
     path = work/safe_relative(config['checkpoint'])
     if not path.is_file():
         return None
+    from preflight_s2ut_resume import selected, runtime_environment
+    config = selected(config, backup)
     inputs = {p: sha256_file(Path(p)) for p in config['identity_files']}
     identity = dict(config=config, work=str(work), inputs=inputs)
     previous = latest(backup, identity)
@@ -34,7 +36,9 @@ def rescue(config, work, backup, total):
     mapping = dict(python='wrapper', run_root=str(work), checkpoint=str(path), updates=str(total))
     command = ['wrapper']+[p.format(**mapping) for p in config['command'][3:]]
     command += ['--restore-file', str(path)]
-    _, (_, metadata) = prepare_research_metadata(command)
+    import os
+    os.environ.update(runtime_environment(config))
+    _, (_, metadata) = prepare_research_metadata(command, check_audio=False)
     import torch
     state = torch.load(path, map_location='cpu', weights_only=False)
     if state.get('extra_state', {}).get('s2st_recipe_fingerprint') != metadata['training_fingerprint']:

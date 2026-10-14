@@ -1,4 +1,4 @@
-"""Reviewed FP16 retry fix for a pinned S2UT execution, without recipe changes."""
+"""Reviewed S2UT runtime/recovery fixes, preserving pinned scientific inputs."""
 import ast
 import hashlib
 import json
@@ -13,17 +13,22 @@ RUNTIME = 'src/direct_s2st/train_runtime.py'
 SESSION = 'src/direct_s2st/session_runtime.py'
 CHECKPOINT = 'src/direct_s2st/s2ut/checkpoint.py'
 RECOVERY = 'src/direct_s2st/recovery.py'
+RECIPE = 'src/direct_s2st/s2ut/recipe_identity.py'
+PREFLIGHT = 'src/direct_s2st/s2ut/preflight.py'
 REVIEWED = {  # 2486164: the reported run's immutable execution code.
     ('eb384f0900fb47f2cc8def3b08d3cb6a4eae9b675332f3696edddabdc92469a1',
      '1235756223b300578acde2a081de116105fadb001cb383417fe4685b93ca28a3'),
     ('c2d257ab42b41546bb307e4ca1b62219b835468d20cd39d5c454922f92d5de56',
      'd53124076a1804e9e82f1e90f3e6403d1a8bb5295b71829b2ee2ffe3f8933f16'),  # e56ca1c
+    ('ee51261415ccdbd26b7f609212eb60199d40f20b4309e33194abfab9fad501a7',
+     '0a6cb3ea1cf20906637eafd5adcc53e6beb7e50a886bdcd956724de691403863'),  # 39b41c3
 }
 
 EXTRA_REVIEWED = {
     RUNTIME: '51a8f053a7d88d19239840b8d67f419f9d1d97d85bf8eaf46ae8f2a0661c30a6',
     SESSION: 'd70b530541b60d39da4f2ad270b339bef24af8cf903de393cd874c1ee4c60f18',
     CHECKPOINT: 'd9672003743cd110e215eeabddfb6140e0a806d26a1e005f88e9f6b92c487496',
+    PREFLIGHT: '6a14765746c3b871a80fc0be869b892d9d81ec2d7da224191c7d48fa4d706ece',
 }
 
 
@@ -32,18 +37,25 @@ def audit_span(source):
     return node.lineno-1, node.end_lineno
 
 
+def metadata_span(source):
+    node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'prepare_research_metadata')
+    return min([node.lineno]+[d.lineno for d in node.decorator_list])-1, node.end_lineno
+
+
 def replacements(execution, launcher):
     old = {name: (execution/name).read_bytes() for name in (PERFORMANCE, AUDIT)}
     new = {name: (launcher/name).read_bytes() for name in old}
-    start, end = audit_span(old[AUDIT])
-    a, b = audit_span(new[AUDIT])
     lines = old[AUDIT].decode().splitlines(keepends=True)
-    lines[start:end] = new[AUDIT].decode().splitlines(keepends=True)[a:b]
+    # Descending spans keep original line positions valid.
+    for span in sorted((audit_span, metadata_span), key=lambda f: f(old[AUDIT])[0], reverse=True):
+        start, end = span(old[AUDIT])
+        a, b = span(new[AUDIT])
+        lines[start:end] = new[AUDIT].decode().splitlines(keepends=True)[a:b]
     changed = {PERFORMANCE: new[PERFORMANCE], AUDIT: ''.join(lines).encode()}
     if changed != old and tuple(hashlib.sha256(old[name]).hexdigest() for name in (PERFORMANCE, AUDIT)) not in REVIEWED:
         raise ValueError('S2UT FP16 repair requires reviewed pinned runtime sources; saved run preserved')
     changed = {name: value for name, value in changed.items() if value != old[name]}
-    for name in (RUNTIME, SESSION, CHECKPOINT):
+    for name in (RUNTIME, SESSION, CHECKPOINT, PREFLIGHT):
         original, reviewed = (execution/name).read_bytes(), (launcher/name).read_bytes()
         replacement = reviewed
         if name == RUNTIME:
@@ -59,11 +71,12 @@ def replacements(execution, launcher):
             if hashlib.sha256(original).hexdigest() != EXTRA_REVIEWED[name]:
                 raise ValueError('S2UT recovery repair requires reviewed pinned sources: '+name)
             changed[name] = replacement
-    if (execution/RECOVERY).is_file():
-        if (execution/RECOVERY).read_bytes() != (launcher/RECOVERY).read_bytes():
-            raise ValueError('S2UT recovery helper differs from reviewed source')
-    else:
-        changed[RECOVERY] = (launcher/RECOVERY).read_bytes()
+    for name in (RECOVERY, RECIPE):
+        if (execution/name).is_file():
+            if (execution/name).read_bytes() != (launcher/name).read_bytes():
+                raise ValueError('S2UT recovery helper differs from reviewed source: '+name)
+        else:
+            changed[name] = (launcher/name).read_bytes()
     for value in changed.values():
         ast.parse(value)
     return changed
@@ -96,7 +109,9 @@ def prepare(execution, launcher, persistent, name):
     atomic_write_json(persistent/'execution-overlays'/f'{name}-fp16-{identity}.json',
         dict(version=1, pinned_execution=str(execution), overlay=str(root), source_sha256=hashes,
              modified_files=list(changed), modified_scope=['FP16 runtime retry', 'TrainingAudit',
-                 'checkpoint validation/freezing', 'resident error-exit backup'],
+                 'checkpoint validation/freezing', 'resident error-exit backup',
+                 'recipe argv[0] canonical comparison; original saved fingerprint retained',
+                 'metadata-only predownload validation; training audio checks unchanged'],
              snapshot_identity_unchanged=True, model_optimizer_recipe_unchanged=True), resume=True)
     print(f'[s2ut-fp16-overlay] verified={identity} config_environment_checkpoint_identity_unchanged=true', flush=True)
     return root

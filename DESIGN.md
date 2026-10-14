@@ -49,6 +49,12 @@ S2UTはデータ取得前に実CTCのtrain/backward/dev経路を確認し、評�
 Driveへ救済してから復元する。dev後・異常終了後もbackupし、VM強制削除時の未保存分は保証しない。
 ローカルの中間checkpointは有界に保持し、last/best・不変Drive snapshotを残す。
 
+S2UT recipe照合では起動moduleのargv[0]を固定名へ正規化する。旧lockは内容と元の
+fingerprintを検証し、argv[0]以外の引数・学習条件・入力SHAが完全一致する場合だけ
+元fingerprintを継承する。既存lock/checkpointは書き換えない。通常セル5は音声ZIPの
+全件取得より前に、保存状態の復元・recipe・checkpoint内fingerprintを照合する。
+この先行検査だけはWAV存在確認を省き、入力取得後の通常検査・payload SHA検証は維持する。
+
 通常Colabの全学習targetは、別プロセスの開始前VRAM測定を共通に使用する。
 測定はtrainのみ、試行weights/optimizerを本学習へ持ち込まず、update 0から新規開始する。
 TT2は実効batch1024を維持して物理batchを選び、GANは実batchを選ぶ。

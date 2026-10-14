@@ -182,6 +182,9 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     if kind == 's2ut' and snapshot and (work/'checkpoints/checkpoint_last.pt').is_file():
         run(python, ROOT/'scripts/colab/rescue_local_s2ut.py', '--config', config_path,
             '--work', work, '--backup', backup, '--total', str(total))
+    if kind == 's2ut' and snapshot:
+        run(python, ROOT/'scripts/colab/preflight_s2ut_resume.py', '--config', config_path,
+            '--work', work, '--backup', backup, '--total', str(total))
     if snapshot:
         print('[cell5-recovery] saved config/batch retained; cell-1 throughput options do not replace them', flush=True)
     else:
