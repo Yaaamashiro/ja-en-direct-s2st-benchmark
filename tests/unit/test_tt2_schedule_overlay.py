@@ -17,7 +17,7 @@ def baseline(revision):
 
 @pytest.mark.parametrize('revision', ['d70516a221199262a0fbd26637c6c5a8b86f73df', '6e311c45b1fe95f8646e41172e9dda878f53e570',
                                     '41c6ca22a7c45bd19374999bf10945d3e7ce3804',
-                                    '334c14bb9681efd3d6d73b8ab4419c4f5301d7ae'])
+                                    '334c14bb9681efd3d6d73b8ab4419c4f5301d7ae', '761a87f'])
 def test_reviewed_overlay_changes_only_five_functions_and_supports_v1(revision, tmp_path):
     original = baseline(revision)
     current = (ROOT/'src'/MONITOR).read_bytes()
@@ -25,8 +25,8 @@ def test_reviewed_overlay_changes_only_five_functions_and_supports_v1(revision, 
     def without_functions(source):
         lines = source.decode().splitlines(keepends=True)
         for a, b in sorted(functions(source.decode()).values(), reverse=True):
-            lines[a:b] = ['<reviewed-function>\n']
-        return ''.join(lines)
+            lines[a:b] = []
+        return '\n'.join(line for line in ''.join(lines).splitlines() if line.strip())
     assert without_functions(original) == without_functions(changed)
     ast.parse(changed)
     # Execute the actual patched legacy module, not a mocked scheduler.
@@ -50,6 +50,11 @@ def test_reviewed_overlay_changes_only_five_functions_and_supports_v1(revision, 
     assert migrated.history == restored.history
     assert migrated.state()['policy_history'][0]['adopted_at'] == 134
     assert module['Monitor'].restore(None, migrated.state(), 134, 500, tmp_path).state() == migrated.state()
+    v3 = module['Monitor'].restore(dict(policy, version=3), migrated.state(), 134, 500, tmp_path)
+    assert v3.history == migrated.history and v3.bad_evaluations == 0
+    assert v3.state()['stopping_metrics'] == ['loss', 'mel_loss', 'phone_loss', 'duration_loss']
+    assert module['Monitor'].restore(None, v3.state(), 134, 500, tmp_path).state() == v3.state()
+    assert module['absolute_update_limit']('tt2', 10000, v3.policy) == 1000
 
 
 def test_overlay_is_resumable_and_never_overwrites_changed_copies(tmp_path):

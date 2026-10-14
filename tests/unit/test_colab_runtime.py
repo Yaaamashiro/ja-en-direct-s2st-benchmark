@@ -80,16 +80,18 @@ def test_notebooks_separate_data_models_and_training_guards(monkeypatch):
     assert settings['training']['REPRODUCTION_MODE'] == 'paper_exact'
     assert settings['training']['TT2_VOCODER_MODE'] == 'griffin_lim'
     assert settings['training']['S2UT_VOCODER_MODE'] == 'trained'
-    assert settings['training']['S2UT_TOTAL_UPDATES'] == 400000
+    assert settings['training']['TOTAL_UPDATES'] == 1000
+    assert settings['training']['S2UT_TOTAL_UPDATES'] == 1000
+    assert settings['training']['VOCODER_TOTAL_UPDATES'] == 10000
     assert settings['training']['TT2_WARMUP_UPDATES'] == 400
     assert settings['training']['TT2_MONITOR_PATIENCE'] == 5
     assert settings['training']['TT2_MONITOR_MIN_RELATIVE_IMPROVEMENT'] == .01
     settings['training']['configure_preparation']()
-    assert json.loads(os.environ['S2ST_TT2_MONITOR_POLICY']) == dict(version=2, interval=10, patience=5, min_relative_improvement=.01)
+    assert json.loads(os.environ['S2ST_TT2_MONITOR_POLICY']) == dict(version=3, interval=10, patience=5, min_relative_improvement=.01)
     assert settings['training']['S2UT_MONITOR_PATIENCE'] == 5
     assert settings['training']['S2UT_MONITOR_MIN_RELATIVE_IMPROVEMENT'] == .01
     assert settings['training']['S2UT_WARMUP_UPDATES'] == 400
-    assert json.loads(os.environ['S2ST_S2UT_MONITOR_POLICY']) == dict(version=2, interval=10, patience=5, min_relative_improvement=.01)
+    assert json.loads(os.environ['S2ST_S2UT_MONITOR_POLICY']) == dict(version=3, interval=10, patience=5, min_relative_improvement=.01)
     assert settings['training']['training_mode']('s2ut') == 'paper_practical'
     assert settings['training']['training_run_name']('s2ut').endswith('-recipe-v3-warmup400')
     assert settings['training']['TRAIN_CALIBRATION_OBJECTIVE'] == 'throughput'

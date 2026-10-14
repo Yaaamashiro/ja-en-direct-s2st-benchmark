@@ -17,6 +17,10 @@ def prepare_research_metadata(command, *, check_audio=True):
                            prepared_metadata, MODES, S2UT_VOCODERS)
     from ..hashing import sha256_file
     command = list(command)
+    from ..translatotron2.monitor import absolute_update_limit
+    if '--max-update' in command:
+        index = command.index('--max-update') + 1
+        command[index] = str(absolute_update_limit('s2ut', int(command[index])))
     mode, vocoder = option(command, '--reproduction-mode', 'smoke'), option(command, '--vocoder-mode', 'trained')
     for flag in ('--reproduction-mode', '--vocoder-mode'):
         if flag in command:
@@ -150,6 +154,39 @@ def main():
         raise RuntimeError('S2UT dev CTC requires editdistance; use the fixed runtime requirements '
                            'or normal Colab cell 5 before training') from error
     command, research = prepare_research_metadata(sys.argv)
+    from ..recipes import option
+    from ..translatotron2.monitor import absolute_update_limit
+    restore_file = option(command, '--restore-file')
+    if restore_file:
+        checkpoint = torch.load(restore_file, map_location='cpu', weights_only=False)
+        if research and checkpoint.get('extra_state', {}).get('s2st_recipe_fingerprint') != research[1]['training_fingerprint']:
+            raise ValueError('S2UT checkpoint recipe fingerprint mismatch')
+        saved_monitor = checkpoint.get('extra_state', {}).get('s2st_monitor') or {}
+        saved_policy = saved_monitor.get('policy')
+        from .monitor import policy_from_env
+        requested_policy = policy_from_env()
+        if (requested_policy and requested_policy.get('version') == 3) or (saved_policy and saved_policy.get('version') == 3):
+            limit = absolute_update_limit('s2ut', int(option(command, '--max-update', '0')) or 1000, saved_policy)
+            if '--max-update' in command:
+                command[command.index('--max-update')+1] = str(limit)
+            else:
+                command += ['--max-update',str(limit)]
+            if research:
+                research[1].update(max_updates=limit, paper_training_length_reached=limit >= 400000)
+            history = checkpoint.get('optimizer_history', [])
+            completed = int(history[-1]['num_updates']) if history else 0
+            if completed >= limit:
+                from .checkpoint import validate_checkpoint
+                validate_checkpoint(Path(restore_file))
+                print(f'[training-limit] completed={completed} absolute_max_update={limit} optimizer_steps=0',
+                      file=sys.stderr, flush=True)
+                return  # No fairseq model/optimizer construction or empty gradient-audit failure.
+        if saved_monitor.get('stopped') and (requested_policy is None or requested_policy == saved_policy):
+            from .checkpoint import validate_checkpoint
+            validate_checkpoint(Path(restore_file))
+            print('[training-monitor] restored terminal early-stop checkpoint; optimizer_steps=0',
+                  file=sys.stderr, flush=True)
+            return
     sys.argv[:] = command
     from fairseq.criterions.speech_to_speech_criterion import SpeechToUnitMultitaskTaskCriterion as Criterion
     from fairseq_cli.train import cli_main
@@ -179,20 +216,19 @@ def main():
             if hasattr(audit, 'monitor') and audit.monitor.monitor:
                 monitor = audit.monitor.monitor
                 research[1]['monitoring'] = dict(policy=monitor.policy, metric=monitor.metric,
-                    stopping_metrics=['unit_loss', 'loss'] if monitor.policy.get('version') == 2 else ['unit_loss'],
-                    stopping_rule='all_plateau' if monitor.policy.get('version') == 2 else 'unit_plateau',
+                    stopping_metrics=(list(monitor.metrics) if monitor.policy.get('version') == 3 else
+                                      ['unit_loss', 'loss'] if monitor.policy.get('version') == 2 else ['unit_loss']),
+                    stopping_rule=('any_meaningful_resets_patience' if monitor.policy.get('version') == 3 else
+                                   'all_plateau' if monitor.policy.get('version') == 2 else 'unit_plateau'),
                     warmup_guard=monitor.warmup, adopted_at=monitor.origin,
                     paper_stopping_rule_reproduced=False)
+                if monitor.policy.get('version') == 3:
+                    research[1]['monitoring']['absolute_max_update'] = 1000
             atomic_write_json(research[0] / 'research-metadata.json',
                               dict(research[1], completed_updates=self.get_num_updates()), overwrite=True)
         return original_save(self, filename, extra_state)
     if research:
         # Bind the actual restored file too, not only a sibling lock document.
-        restore_file = command[command.index('--restore-file') + 1] if '--restore-file' in command else None
-        if restore_file:
-            checkpoint = torch.load(restore_file, map_location='cpu', weights_only=False)
-            if checkpoint.get('extra_state', {}).get('s2st_recipe_fingerprint') != research[1]['training_fingerprint']:
-                raise ValueError('S2UT checkpoint recipe fingerprint mismatch')
         Trainer.save_checkpoint = save
     try:
         from .performance import runtime_hooks

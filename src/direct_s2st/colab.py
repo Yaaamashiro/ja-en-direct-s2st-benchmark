@@ -386,6 +386,8 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=0,
                 resume=False, auto_resume=False, confirm_training=False, restore_only=False, runner=subprocess.run, clock=time.monotonic,
                 inspect_checkpoint=checkpoint_updates, _staged=False):
     work, backup = Path(work).resolve(), Path(backup).resolve()
+    from .translatotron2.monitor import absolute_update_limit
+    total = absolute_update_limit(config['kind'], total)
     if restore_only and not resume:
         raise ValueError('restore-only requires resume')
     if min(total, chunk) <= 0 or seconds < 0 or not math.isfinite(seconds):
@@ -463,6 +465,9 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=0,
         completed = inspect_checkpoint(checkpoint, config['kind'])
         if completed != previous[1]['updates']:
             raise ValueError('snapshot update count mismatch')
+        report = work/'training-monitor.json'
+        if report.is_file():
+            total = absolute_update_limit(config['kind'], total, json.loads(report.read_text(encoding='utf-8'))['policy'])
     if config.get('research_metadata') and not restore_only and completed < total:
         work.mkdir(parents=True, exist_ok=True)
         atomic_write_json(work / 'session-research-metadata.json',

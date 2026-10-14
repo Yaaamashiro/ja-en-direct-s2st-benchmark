@@ -46,14 +46,20 @@ class S2UTMonitor(Monitor):
                     self.total_bad_evaluations += 1
                 self.stopped = (update > start and self.bad_evaluations >= self.policy['patience'] and
                                 self.total_bad_evaluations >= self.policy['patience'])
+            elif self.policy.get('version') == 3:
+                self.total_anchor = self.anchors['loss']
+                self.total_bad_evaluations = self.bad_evaluations
         return improved  # Unit loss alone selects the best inference checkpoint.
 
     def state(self):
         result = super().state()
-        if self.policy.get('version') == 2:
+        if self.policy.get('version') in (2, 3):
             result.update(stopping_metrics=['unit_loss', 'loss'],
                 best_total_value=self.best_total_value, best_total_update=self.best_total_update,
                 total_anchor=self.total_anchor, total_bad_evaluations=self.total_bad_evaluations)
+            if self.policy.get('version') == 3:
+                result.update(stopping_metrics=list(self.metrics), total_anchor=self.anchors['loss'],
+                              total_bad_evaluations=self.bad_evaluations)
         return result
 
 
@@ -102,6 +108,10 @@ class Controller:
     def restore(self, trainer, extra):
         self.monitor = S2UTMonitor.restore(self.requested, (extra or {}).get('s2st_monitor'),
                                           trainer.get_num_updates(), self.warmup, self.work)
+        from ..translatotron2.monitor import absolute_update_limit
+        if self.monitor and self.monitor.policy.get('version') == 3:
+            configured = trainer.cfg.optimization.max_update or 1000
+            trainer.cfg.optimization.max_update = absolute_update_limit('s2ut', configured, self.monitor.policy)
 
 
 @contextmanager
@@ -144,6 +154,11 @@ def runtime_hooks(audit, command):
                 raise ValueError('S2UT checkpoint monitor was not restored')
             controller.restore(self, None)
         before = self.get_num_updates()
+        if controller.monitor.stopped or (controller.monitor.policy.get('version') == 3 and
+                                          before >= self.cfg.optimization.max_update):
+            # Upstream's epoch loop calls train_step once before its limit check.
+            # A resumed checkpoint already at the cap must not optimize again.
+            return None
         controller.collector = LossSums()
         try:
             result = original_step(self, *args, **kwargs)
@@ -174,7 +189,7 @@ def runtime_hooks(audit, command):
             raise ValueError('S2UT monitor requires full dev and synchronous complete last checkpoints')
         update = trainer.get_num_updates()
         if update == monitor.update:
-            return [None], monitor.stopped
+            return [None], monitor.stopped or (cfg.optimization.max_update > 0 and update >= cfg.optimization.max_update)
         dev = None
         if monitor.due(update):
             controller.collector = LossSums()
@@ -195,7 +210,7 @@ def runtime_hooks(audit, command):
                        (cfg.optimization.max_update > 0 and update >= cfg.optimization.max_update) or
                        (cfg.optimization.stop_time_hours > 0 and
                         trainer.cumulative_training_time()/3600 > cfg.optimization.stop_time_hours))
-        if dev is not None:
+        if dev is not None and monitor.policy.get('version') != 3:
             print(f'[training-monitor] S2UT update={update} dev_unit_loss={dev["unit_loss"]:.6g} '
                   f'dev_loss={dev["loss"]:.6g} '
                   f'best_update={monitor.best_update} unit_bad_evaluations={monitor.bad_evaluations}/'

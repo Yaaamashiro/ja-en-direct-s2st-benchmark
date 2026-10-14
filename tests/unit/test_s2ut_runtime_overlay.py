@@ -8,7 +8,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/'scripts/colab'))
 from s2ut_runtime_overlay import (AUDIT, PERFORMANCE, RUNTIME, SESSION, CHECKPOINT, PREFLIGHT,
-                                 audit_span, metadata_span, prepare, replacements)
+                                 MONITOR, SHARED_MONITOR, audit_span, metadata_span, main_span, prepare, replacements)
 
 PIN = '2486164f0dbc0851ea035feb783ce44ca9a3d1ea'
 
@@ -20,21 +20,21 @@ def baseline(name, revision=PIN):
 
 def execution(tmp_path, revision=PIN):
     root = tmp_path/'execution'
-    for name in (PERFORMANCE, AUDIT, RUNTIME, SESSION, CHECKPOINT, PREFLIGHT):
+    for name in (PERFORMANCE, AUDIT, RUNTIME, SESSION, CHECKPOINT, PREFLIGHT, MONITOR, SHARED_MONITOR):
         path = root/name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(baseline(name, revision))
     return root
 
 
-@pytest.mark.parametrize('revision', [PIN, 'e56ca1c749a72476f07e8d496e5634b43e12d47c', '39b41c3'])
+@pytest.mark.parametrize('revision', [PIN, 'e56ca1c749a72476f07e8d496e5634b43e12d47c', '39b41c3', '761a87f'])
 def test_repair_only_changes_reviewed_runtime_checkpoint_and_audit_scope(tmp_path, revision):
     root = execution(tmp_path, revision)
     changed = replacements(root, ROOT)
     assert changed.get(PERFORMANCE, baseline(PERFORMANCE, revision)) == (ROOT/PERFORMANCE).read_bytes()
     def without_audit(value):
         lines = value.decode().splitlines(keepends=True)
-        for span in sorted((audit_span, metadata_span), key=lambda f: f(value)[0], reverse=True):
+        for span in sorted((audit_span, metadata_span, main_span), key=lambda f: f(value)[0], reverse=True):
             a, b = span(value)
             lines[a:b] = ['<reviewed-audit-or-recipe-binding>\n']
         return ''.join(lines)
@@ -56,6 +56,8 @@ def test_repair_only_changes_reviewed_runtime_checkpoint_and_audit_scope(tmp_pat
     audit.restore_attempt(state)
     assert audit.loss_count == 0
     assert 'check_audio' in module['prepare_research_metadata'].__wrapped__.__kwdefaults__
+    assert changed[MONITOR] == (ROOT/MONITOR).read_bytes()
+    assert b'any_meaningful_resets_patience' in changed[SHARED_MONITOR]
     for source in changed.values(): ast.parse(source)
     (root/PERFORMANCE).write_bytes(baseline(PERFORMANCE)+b'\n# unreviewed change\n')
     with pytest.raises(ValueError, match='reviewed pinned runtime'):

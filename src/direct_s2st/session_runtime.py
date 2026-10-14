@@ -15,6 +15,12 @@ from .progress import operation
 @operation('training: resident session and asynchronous backup')
 def run_continuous(config, *, work, backup, identity, completed, total, seconds,
                    inspect_checkpoint, publish, popen=subprocess.Popen):
+    from .translatotron2.monitor import absolute_update_limit
+    report = Path(work)/'training-monitor.json'
+    policy = json.loads(report.read_text(encoding='utf-8'))['policy'] if report.is_file() else None
+    total = absolute_update_limit(config['kind'], total, policy)
+    if completed >= total:
+        return dict(status='COMPLETE', durable_updates=completed)
     work.mkdir(parents=True, exist_ok=True)
     settings = config['runtime']
     mapping = dict(python=sys.executable, run_root=str(work),

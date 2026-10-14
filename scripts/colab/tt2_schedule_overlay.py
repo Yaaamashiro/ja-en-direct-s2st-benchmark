@@ -13,6 +13,7 @@ REVIEWED = {
     '7510b3efec45dab148b2f83a108e2e22d07cb07fddb68970756764a01124542d': False,  # 6e311c4
     '6648895bb16a4f102020355f83b930c290050b6442f0b94b81b9a72106cf92fb': False,  # d55102b..41c6ca2
     '70e99bba5091e503a2901fe8521825d45c746d16687e33420fbf75c574af197d': False,  # 334c14b
+    '8685e0fca1261803ca9112374e797bf958898ea6fdf3ab9193336094f683cad2': False,  # 2486164..761a87f
 }
 
 
@@ -20,9 +21,9 @@ def functions(source):
     tree = ast.parse(source)
     monitor = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Monitor')
     nodes = [next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
-             for name in ('resume_schedule', 'validate_policy')]
-    nodes += [next(n for n in monitor.body if isinstance(n, ast.FunctionDef) and n.name == name)
-              for name in ('observe', 'state', 'restore')]
+             for name in ('resume_schedule', 'validate_policy', 'early_stop_result')]
+    nodes += [monitor]
+    nodes += [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'absolute_update_limit']
     return {n.name: (min([n.lineno] + [d.lineno for d in n.decorator_list])-1, n.end_lineno) for n in nodes}
 
 
@@ -31,7 +32,7 @@ def patched_monitor(original, reviewed):
     source, replacement = original.decode(), reviewed.decode()
     old, new = functions(source), functions(replacement)
     lines, replacements = source.splitlines(keepends=True), replacement.splitlines(keepends=True)
-    if all(''.join(lines[a:b]) == ''.join(replacements[new[name][0]:new[name][1]])
+    if set(old) == set(new) and all(''.join(lines[a:b]) == ''.join(replacements[new[name][0]:new[name][1]])
            for name, (a, b) in old.items()):
         return original
     digest = hashlib.sha256(original).hexdigest()
@@ -39,10 +40,9 @@ def patched_monitor(original, reviewed):
         raise ValueError('TT2 schedule migration requires a reviewed monitor implementation; saved trainer preserved')
     for name, (a, b) in sorted(old.items(), key=lambda item: item[1][0], reverse=True):
         value = ''.join(replacements[new[name][0]:new[name][1]])
-        if REVIEWED[digest]:
-            value = value.replace('cls.version', 'VERSION').replace('self.version', 'VERSION')
-            value = value.replace('self.metrics', 'METRICS').replace('self.score_key', "'loss'")
-            value = value.replace('self.metric', "'teacher_forced_dev_loss'")
+        if name == 'validate_policy' and 'absolute_update_limit' not in old:
+            c, d = new['absolute_update_limit']
+            value = ''.join(replacements[c:d])+'\n\n'+value
         lines[a:b] = [value]
     result = ''.join(lines).encode()
     ast.parse(result)
@@ -79,7 +79,7 @@ def prepare(execution, launcher, persistent, name):
             raise ValueError('schedule overlay source verification failed')
     audit = dict(version=1, pinned_execution=str(execution), source_sha256=hashes,
                  overlay=str(root), modified_files=['src/'+MONITOR],
-                 modified_functions=['resume_schedule', 'validate_policy', 'Monitor.observe', 'Monitor.state', 'Monitor.restore'],
+                 modified_functions=['resume_schedule', 'validate_policy', 'Monitor', 'early_stop_result', 'absolute_update_limit'],
                  snapshot_identity_unchanged=True)
     atomic_write_json(persistent/'execution-overlays'/f'{name}-schedule-{identity}.json', audit, resume=True)
     print(f'[training-schedule-overlay] verified={identity} model_optimizer_unchanged=True', flush=True)
