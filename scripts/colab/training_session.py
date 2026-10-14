@@ -171,6 +171,9 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
         if practical_warmup is not None or os.environ.get('S2ST_TT2_PRACTICAL_WARMUP') or os.environ.get('S2ST_TT2_MONITOR_POLICY'):
             from tt2_schedule_overlay import prepare
             execution = prepare(execution, ROOT, persistent, name)
+    if kind == 's2ut':
+        from s2ut_runtime_overlay import prepare
+        execution = prepare(execution, ROOT, persistent, name)
     builder_options = {k: v for k, v in options.items() if k != 'tt2_warmup_updates'}
     os.environ['PYTHONPATH'] = str(execution/'src')+os.pathsep+os.environ.get('PYTHONPATH', '')
     os.environ['S2ST_CONFIG_ROOT'] = str(execution/'configs')

@@ -154,6 +154,12 @@ def test_cell5_resume_retains_config_work_snapshot_and_execution_pin(tmp_path, m
 def test_new_native_run_records_code_and_environment_then_reuses_them(tmp_path, monkeypatch):
     import os
     monkeypatch.setattr(os, 'environ', dict(os.environ))
+    import s2ut_runtime_overlay
+    repaired = []
+    def repair(execution, launcher, persistent, name):
+        repaired.append((execution, name))
+        return execution
+    monkeypatch.setattr(s2ut_runtime_overlay, 'prepare', repair)
     monkeypatch.setattr(session, 'WORK_ROOT', tmp_path/'work')
     monkeypatch.setattr(session, 'RUNTIME_ROOT', tmp_path/'runtime')
     session.RUNTIME_ROOT.mkdir()
@@ -180,16 +186,26 @@ def test_new_native_run_records_code_and_environment_then_reuses_them(tmp_path, 
     session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 's2ut', name, 'fisher',
                    {'s2ut_warmup_updates':400}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
     assert '--auto-resume' in calls[-1]
+    # Initial overflow left a config/route but no optimizer checkpoint. Cell 5
+    # must still apply the reviewed repair and retain their immutable bytes.
+    zero_config = (tmp_path/(name+'.json')).read_bytes()
+    zero_route = (tmp_path/(name+'.launch.json')).read_bytes()
+    session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 's2ut', name, 'fisher',
+                   {'s2ut_warmup_updates':400}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
+    assert '--auto-resume' in calls[-1]
+    assert zero_config == (tmp_path/(name+'.json')).read_bytes()
+    assert zero_route == (tmp_path/(name+'.launch.json')).read_bytes()
     _, path, marker = snapshot(tmp_path, name, kind='s2ut', base=code, expected=expected)
     before = path.read_bytes(), marker.read_bytes()
     session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 's2ut', name, 'fisher',
                    {'s2ut_warmup_updates':400, 'batch_size':999}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
     assert '--resume' in calls[-1]
-    assert restored_environments == [None, expected]
-    assert checked_out == [code, code]
+    assert restored_environments == [None, expected, expected]
+    assert checked_out == [code, code, code]
+    assert len(repaired) == 3
     assert before == (path.read_bytes(), marker.read_bytes())
     with pytest.raises(ValueError, match='warmup differs from saved run'):
         session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 's2ut', name, 'fisher',
                        {'s2ut_warmup_updates':1000}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
-    assert restored_environments == [None, expected]  # Reject before setup/download.
+    assert restored_environments == [None, expected, expected]  # Reject before setup/download.
     assert before == (path.read_bytes(), marker.read_bytes())

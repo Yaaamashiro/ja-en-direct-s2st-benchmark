@@ -36,6 +36,12 @@ RNG/buffer/勾配を戻して同一サンプルを縮小再試行できる。opt
 device-side assertは再試行しない。分割はBatchNorm等の統計を変えるため既定OFFであり、
 混合精度と同様に実験設定へ記録する。GANの2 optimizer更新は分割しない。
 
+常駐S2UTのFP16は、固定fairseqがoptimizer実行前の勾配overflowを検出して
+loss scaleを下げた場合だけ、同じ論理バッチを再試行する。更新数を進めず、
+乱数・model/criterion buffer・勾配・loss/gradient証拠を試行前へ戻す。
+低下したdynamic loss scaleは保持する。バッチ・学習率・精度は変更しない。
+optimizer呼び出し後、原因不明の未更新、最小scale到達、32回の再試行上限では停止する。
+
 通常Colabの全学習targetは、別プロセスの開始前VRAM測定を共通に使用する。
 測定はtrainのみ、試行weights/optimizerを本学習へ持ち込まず、update 0から新規開始する。
 TT2は実効batch1024を維持して物理batchを選び、GANは実batchを選ぶ。

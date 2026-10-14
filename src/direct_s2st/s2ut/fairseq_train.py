@@ -91,6 +91,16 @@ class TrainingAudit:
         self.gradients = {name: 0.0 for name in GROUPS}
         self.loss_count = 0
 
+    def attempt_state(self):
+        return dict(gradients={k: v.detach().clone() if torch.is_tensor(v) else v
+                               for k, v in self.gradients.items()},
+                    losses=[dict(row) for row in self.losses], loss_count=self.loss_count)
+
+    def restore_attempt(self, state):
+        self.gradients = dict(state['gradients'])
+        self.losses = [dict(row) for row in state['losses']]
+        self.loss_count = state['loss_count']
+
     def attach(self, model):
         if id(model) in self.models:
             return

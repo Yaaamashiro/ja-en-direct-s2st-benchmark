@@ -9,6 +9,75 @@ from ..train_runtime import (Microbatches, Timings, cached_file, checkpoint_save
                              enabled, forward_backward_guard, stopping)
 
 
+def completed_step(trainer, samples, step, audit, *, max_retries=32):
+    """Retry only confirmed pre-optimizer FP16 overflow, never skip a batch."""
+    import math
+    import torch
+    from ..translatotron2.engine import capture_rank_state, restore_rank_state
+    optimizer = trainer.optimizer
+    fp16 = bool(getattr(getattr(getattr(trainer, 'cfg', None), 'common', None), 'fp16', False))
+    scaler = getattr(optimizer, 'scaler', None)
+    if fp16 and scaler is None:
+        raise ValueError('FP16 retry requires the pinned dynamic loss scaler')
+    before = trainer.get_num_updates()
+    rng = capture_rank_state(trainer.model) if fp16 else None
+    criterion = getattr(trainer, 'criterion', None)
+    criterion_rng = capture_rank_state(criterion) if fp16 and isinstance(criterion, torch.nn.Module) else None
+    evidence = audit.attempt_state() if audit is not None else None
+    controller = getattr(audit, 'monitor', None)
+    collector = getattr(controller, 'collector', None)
+    entered_optimizer = False
+
+    def attempt(pieces):
+        # Also discard evidence from the existing pre-backward OOM retry path.
+        if evidence is not None:
+            audit.restore_attempt(evidence)
+        if collector is not None:
+            controller.collector, controller.pending = type(collector)(), None
+        return step(pieces)
+
+    original_step = optimizer.step if fp16 else None
+    had_local_step = 'step' in vars(optimizer) if fp16 else False
+    def guarded_step(*args, **kwargs):
+        nonlocal entered_optimizer
+        entered_optimizer = True
+        return original_step(*args, **kwargs)
+
+    if fp16:
+        optimizer.step = guarded_step
+    try:
+        for retry in range(max_retries+1):
+            entered_optimizer = False
+            old_scale = float(scaler.loss_scale) if fp16 else None
+            if fp16 and (not math.isfinite(old_scale) or old_scale <= 0):
+                raise ValueError('invalid FP16 loss scale')
+            result = trainer._s2st_tuning.run(trainer.model, optimizer, samples, attempt)
+            after = trainer.get_num_updates()
+            if after == before+1 and result is not None:
+                return result
+            new_scale = float(scaler.loss_scale) if fp16 else None
+            confirmed = (fp16 and after == before and result is None and not entered_optimizer and
+                         math.isfinite(new_scale) and 0 < new_scale < old_scale)
+            if not confirmed:
+                raise RuntimeError('fairseq did not complete an optimizer update; no confirmed pre-optimizer '
+                                   'FP16 overflow, refusing to skip samples or retry an optimizer step')
+            if retry == max_retries:
+                raise RuntimeError('FP16 overflow retry limit reached; update was not skipped')
+            optimizer.zero_grad()
+            restore_rank_state(trainer.model, rng)
+            if criterion_rng is not None:
+                restore_rank_state(criterion, criterion_rng)
+            print(f'[fp16-retry] update={before+1} retry={retry+1}/{max_retries} '
+                  f'loss_scale={old_scale:g}->{new_scale:g} same_logical_batch=true optimizer_entered=false',
+                  file=sys.stderr, flush=True)
+    finally:
+        if fp16:
+            if had_local_step:
+                optimizer.step = original_step
+            else:
+                del optimizer.step
+
+
 @contextmanager
 def runtime_hooks(audit):
     if not enabled():
@@ -63,7 +132,6 @@ def runtime_hooks(audit):
             self._s2st_tuning, self._s2st_timing = Microbatches(), Timings()
         if not hasattr(self, '_s2st_timing'):
             self._s2st_timing = Timings()
-        before = self.get_num_updates()
         if self.data_parallel_world_size != 1:
             raise ValueError('optimized Colab S2UT runtime supports one GPU/process only')
         if not samples or any(not sample for sample in samples):
@@ -76,10 +144,7 @@ def runtime_hooks(audit):
         if hasattr(self, '_s2st_last_step'):
             self._s2st_timing.seconds['between_updates_including_io_validation_save'] += now-self._s2st_last_step
         with self._s2st_timing.measure('optimization', 'cuda' if self.cuda else None):
-            result = self._s2st_tuning.run(self.model, self.optimizer, samples,
-                                         lambda pieces: original_step(self, pieces, raise_oom=True))
-        if self.get_num_updates() != before + 1:
-            raise RuntimeError('fairseq did not complete an optimizer update (e.g. overflow); refusing to skip samples')
+            result = completed_step(self, samples, lambda pieces: original_step(self, pieces, raise_oom=True), audit)
         cap = self._s2st_tuning.fixed
         physical = max(min(int(s['nsentences']), cap) if cap else int(s['nsentences']) for s in samples)
         # The measured interval is the WHOLE logical optimizer update, not
