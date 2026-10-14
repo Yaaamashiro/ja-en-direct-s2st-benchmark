@@ -55,6 +55,17 @@ fingerprintを検証し、argv[0]以外の引数・学習条件・入力SHAが�
 全件取得より前に、保存状態の復元・recipe・checkpoint内fingerprintを照合する。
 この先行検査だけはWAV存在確認を省き、入力取得後の通常検査・payload SHA検証は維持する。
 
+Early stopping policy v3はTT2の4 Dev lossとS2UTの5 Dev lossすべてに独立anchorを持つ。
+いずれかが自身のanchorから1%以上改善すれば共有patienceを0とし、その指標だけanchorを更新。
+全指標が改善不足の評価が5回連続すれば停止する。全devを10更新ごとに評価し、warmup中は停止せず、
+各指標のwarmup内最小値をanchorとする。TT2/S2UT通常実験はoptimizer更新の絶対上限1000を保持する。
+anchor/counterの改善はこのhard limitを延長しない。1000到達済みの再開では追加更新しない。
+旧v1/v2の履歴・optimizer・bestは先に検証し、v3採用後の未来の停止判定だけを変更する。
+採用時は過去Devの指標別最小値でanchorを構築し、共有counterを0とする。旧policyでの早期終了も
+この明示採用時だけ解除できる。同一v3のresumeは判定状態を完全継承する。policy_historyを保存する。
+checkpoint_bestの選択はTT2=Dev total loss最小、S2UT=Dev unit_loss最小のまま、停止判定から独立である。
+モデル・loss定義/重み・optimizer・scheduler・batch・validation split/間隔は変更しない。
+
 通常Colabの全学習targetは、別プロセスの開始前VRAM測定を共通に使用する。
 測定はtrainのみ、試行weights/optimizerを本学習へ持ち込まず、update 0から新規開始する。
 TT2は実効batch1024を維持して物理batchを選び、GANは実batchを選ぶ。

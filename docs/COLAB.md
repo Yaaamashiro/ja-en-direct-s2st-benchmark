@@ -28,23 +28,57 @@ TT2の`TT2_WARMUP_UPDATES`は既定400（選択肢400/500/1000/10000）。通常
 400は学習の強制終了点ではなく、dev lossによる早期終了判定の開始目安。
 既定は10更新ごと・patience 5・最低改善率1%。400時点では過去へ遡らず、
 ウォームアップ終了後の410/420/430/440/450で十分な改善がなければ450で終了する。
-停止判定の基準はウォームアップ中の最小dev loss。1%未満のbest更新も保存するが、
-停止カウンターはリセットしない。小さな改善の累計が基準から1%以上になればリセットする。
+停止判定の基準はウォームアップ中の各lossの最小Dev値。1%未満のbest更新も保存するが、
+停止カウンターはリセットしない。いずれかのlossの累計改善が自身のanchorから1%以上になれば
+共有カウンターをリセットし、そのlossのanchorだけを現在値へ更新する。
 重み・Adam状態・絶対更新数・過去loss/学習率・best checkpointは維持する。
 新しい学習率は次の更新から適用するため、過去を400設定で学習したことにはしない。
 再開時の10000選択は保存済みスケジュールを継承し、途中で延長はしない。
-旧固定コードへは、検証済みのmonitor実装に対してスケジュール/監視/履歴復元の5関数だけを
+旧固定コードへは、検証済みのmonitor実装に対してスケジュール/監視class/履歴復元の範囲だけを
 変更したローカル実行コピーを作り、全ソース/configのSHAと監査記録を検証する。
 未確認のコード差分や改変済みコピーは拒否し、元コード・snapshotは上書きしない。
 S2UTの通常セルのウォームアップも400に揃える。原論文の設定ファイルは変更しない。
 
-通常セル1はTT2の監視policy v2を明示要求する。旧policyからの再開時は、旧履歴・
+通常セル1はTT2・S2UTの監視policy v3を明示要求する。旧policyからの再開時は、旧履歴・
 旧カウンター・bestのSHAをまず検証し、変更地点と旧/新policyを`policy_history`に記録する。
-過去のlossや学習率、best、モデル/optimizerは変更しない。新条件の停止カウントだけを0にし、
+過去のlossや学習率、best、モデル/optimizerは変更しない。各anchorを過去のDev最小値から構築し、
+新条件の共有停止カウントだけを0にし、
 max(ウォームアップ終了点, policy変更地点)より後の評価から始める。
 例えば400で変更すれば最短450、430で変更すれば最短480（改善がない場合）。
 再開のたびにカウンターをリセットせず、同じpolicyはそのまま継承する。
-評価間隔の変更、policy v1の変更、終了済みrunの停止解除は拒否する。
+評価間隔の変更やpolicyのダウングレードは拒否する。同一policyでの終了状態は継承するが、
+旧v1/v2で早期終了したrunからv3への明示採用時だけ、停止状態を解除して未来の評価へ進める。
+
+### Early stopping v3（全Dev loss・絶対上限1000）
+
+TT2は `loss / mel_loss / phone_loss / duration_loss` の4種類、S2UTは
+`loss / unit_loss / source_letter / target_letter / decoder_target_ctc` の5種類を監視する。
+各指標のanchorを `A_i`、現在値を `L_i` とし、`L_i <= A_i * (1 - 0.01)` なら有意な改善。
+1つでも改善すれば共有 `bad_evaluations=0` とし、改善した指標のanchorのみ更新する。
+どの指標も改善しない評価が5回連続すれば停止する。anchor=0はそれ以上改善できない値として扱う。
+全指標を除外せず監視し、合計lossも含める。評価は従来どおり全devを10更新ごとに行う。
+
+Every monitored validation loss has an independent anchor. Training continues while at least one
+monitored validation loss improves by at least 1%. Early stopping is triggered after five consecutive
+validation evaluations in which none of the monitored losses achieves a 1% improvement.
+
+warmup中は停止せず、各指標のwarmup内最小値をanchorとする。旧policyからの移行時は
+保存済みDev履歴全体の各指標の最小値を使うが、過去の停止判定はv3で再解釈しない。
+`policy_history`に移行更新数・旧policy・新policyを記録し、再開では同じanchor/counterを復元する。
+新しい通常ノートブックで同じ実験名・同じ保存run・同じwarmup400を指定し、必要なlauncher更新の
+完全SHAを`TRAIN_CODE_REVISION`へ指定してセル1→5。4A/4Bやデータの再生成、追加の移行セルは不要。
+
+`training-monitor.json`とlast checkpoint内に `stopping_metrics / anchors / bad_evaluations /
+best_values / best_updates / policy_history` を保存する。既存の `best_value / best_update / best_sha256`
+は推論用bestの意味を維持する。CSV/SVGには従来どおり全lossのtrain/dev履歴を残す。
+評価ログではloss別の改善率、改善した指標（`*`）、共有counter、停止状態をstderrへ表示する。
+checkpoint_bestはTT2=Dev total loss最小、S2UT=Dev unit_loss最小のまま、停止判定とは独立である。
+
+TT2の `TOTAL_UPDATES=1000`、S2UTの `S2UT_TOTAL_UPDATES=1000` を安全上限とする。
+通常セル5およびv3 trainerは1000を超える指定も1000へ制限する。上限はoptimizer更新の絶対値で、
+610からの再開なら最大390更新、1000到達済みなら追加更新しない。改善やcounter resetは上限を延長しない。
+vocoderの既定更新数は独立の `VOCODER_TOTAL_UPDATES=10000` に移して従来値を保つ。
+元論文のscheduler・optimizer・batch・loss重み・validation split/間隔は変更しない。
 
 依存環境の完全なJSONを`.runtime-environments/<SHA256>.json`へatomic保存・readbackする。
 新しいランタイムではその全依存版をconstraintとして構築する。
@@ -67,26 +101,27 @@ S2UTの`S2UT_WARMUP_UPDATES`は既定400更新（選択肢400/500/1000/10000）�
 未対応です。通常セル5は構築/ダウンロード前に不一致を拒否します。
 既存runは元のwarmupで再開し、異なるスケジュールは別実験で開始してください。
 S2UTの`S2UT_MONITOR=True`は全devを10更新ごとに評価し、Unit予測の
-teacher-forced dev lossで最良checkpointを選択します。policy v2ではウォームアップ終了後、
-Unit lossと合計lossが**両方とも**累計1%以上の改善を5回連続で示さなければ早期終了します。
-片方が改善すればその指標のcounterを0に戻し、両方のcounterが5以上になるまで続行します。
+teacher-forced dev lossで最良checkpointを選択します。policy v3ではウォームアップ終了後、
+全5指標のどれも自身のanchorから1%以上改善しない評価が5回連続した場合に停止します。
+いずれかが改善すれば共有counterを0に戻し、改善した指標のanchorだけを更新します。
 400時点の過去5回を遡って停止せず、最短で410/420/430/440/450の評価後に停止します。
 各指標の基準はwarmup中の最小値です。小さなbest更新も保存し、基準から累計1%以上
-改善した時点だけそのcounterをリセットします。合計lossのbest値/更新数も別途記録しますが、
+改善した時点だけ共有counterをリセットします。各lossのbest値/更新数も別途記録しますが、
 checkpoint_bestの選択はUnit lossのままです。設定は
 `S2UT_MONITOR_INTERVAL=10`、`S2UT_MONITOR_PATIENCE=5`、
 `S2UT_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.01`です。
-旧policy v1は従来のUnit-only判定を保持します。同じ実行コードでv2への明示変更時は
-履歴・bestの検証後、変更地点を記録して両counterをリセットします。
+旧policy v1はUnit-only、v2はUnit/totalの別counterという従来判定を保持して読み込みます。
+v3への明示変更時は履歴・bestの検証後、変更地点を記録して共有counterをリセットします。
 同じpolicyでの再開はcounterを継承します。既存runの固定実行コードを自動更新はしません。
 合計loss、Unit loss、source_letter、target_letter、decoder_target_ctcのtrain/dev推移を
 `training-monitor.json`・`.csv`・`.svg`へ記録します。
 lossは各タスクのsample_sizeで重み付き平均を取りbits単位で表示し、合計lossには
-補助lossの重みが入ります。Unit lossの停止判定はBLEUによるモデル選択とは異なります。
+補助lossの重みが入ります。Dev lossによる停止判定はBLEUによるモデル選択とは異なります。
 履歴・判定counter・最良checkpointのSHA256をlast checkpoint内に保持し、Drive snapshotに
 グラフ・最良モデルも含めます。再開はlast、推論・比較は検証済みbestを優先します。
 常駐単一プロセス、固定バッチ、全dev、同期checkpoint保存が必要です。
-VRAM事前測定の間は監視を実行しません。停止後の再開は更新せず`EARLY_STOPPED`を返します。
+VRAM事前測定の間は監視を実行しません。同じpolicyで停止後の再開は更新せず`EARLY_STOPPED`を返します。
+旧v1/v2からv3の採用は未来の判定へ続行でき、1000更新のhard limitは常に維持します。
 Driveの保存先には確認用のグラフとCSVもコピーします。初回有効化以前の履歴は復元しません。
 
 ### S2UTの初回FP16 overflow
@@ -170,7 +205,8 @@ last・bestとDriveの過去snapshotは保持します。fairseqが古いロー�
 OFFにした場合は準備開始前に停止します。
 RUN_TRAININGは初期状態でOFFです。学習する場合だけONにし、
 TOTAL_UPDATES（累計の更新数）とCONFIRM_TRAININGを設定してください。
-通常S2UTは専用のS2UT_TOTAL_UPDATES=400000を使用します。長期学習の自動開始はしません。
+通常TT2/S2UTはそれぞれTOTAL_UPDATES=1000 / S2UT_TOTAL_UPDATES=1000を絶対上限とします。
+vocoderはVOCODER_TOTAL_UPDATES=10000を使用します。長期学習の自動開始はしません。
 旧4Bの補助ラベルは別のfairseq-unigram-allchars-v1へ移行し、S2UTはrecipe-v3の新しい学習runを使用します（TT2はrecipe-v2のまま）。
 既存のMel・Unit・旧checkpointを削除する必要はありません。
 データの全件使用と長期学習の許可は別々に確認します。勝手にfull学習を開始しません。
@@ -428,8 +464,8 @@ TT2/vocoderの試運転ログは最後のoptimizer更新も数えて完了表示
 - `TRAIN_SAVE_INTERVAL=1`: 通常用のoptimizer更新単位の保存間隔。最終更新・時間予算到達時にも保存します。ローカル固定コピーは同期、その後のDriveコピー・SHA-256検証は別スレッドで1件ずつ実行。未確認コピーは最大2件で、遅いDriveには待ち合わせます。
 - `TRAIN_BACKUP_MIN_SECONDS=600`: 常駐学習でDriveへ転送する最短間隔。ローカルの50更新ごとの保存は維持し、最初・最終・時間予算到達時の保存は間隔によらず転送します。強制切断では前の`durable_updates`から再開し、未確認更新を再実行します。
 - `TRAIN_BACKUP_MAX_GB=100`: そのrunのDriveバックアップ総容量上限（100GiB）。旧snapshot・未完コピーも数えます。上限到達時は既存復旧点を削除せず停止します。必要なDrive空き容量を確認したうえで明示的に増やしてください。
-- `TT2_MONITOR=True`: TT2の常駐・単一GPU学習を監視。`TT2_MONITOR_INTERVAL=10`更新ごとに**全devのteacher-forced loss**を評価し、`TT2_MONITOR_PATIENCE=5`回連続で十分な改善がなければ早期終了。`TT2_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.01`は累計1%以上の改善を判定基準とする（絶対最小lossのbest保存とは別）。ウォームアップ以下では停止カウンタをリセットし、過去5回を遡って判定しない。通常セルのTT2 warmup既定は400。monitor自体は学習率・バッチ数・上限更新数を変更しない。
-- TT2監視は`training-monitor.json`（全履歴・policy・カウンタ・条件変更履歴）、CSV、SVGをローカルrunに保存し、確認済み学習snapshotへ同梱。`checkpoints/checkpoint_best.pt`はdev loss最小のモデルとoptimizer、`checkpoint_last.pt`は再開位置。切断後はsnapshotを復元すると履歴・最良モデル・カウンタが戻る。旧checkpointからの明示的な有効化はその更新から履歴を開始し、過去の指標を捏造しない。TT2 policy v2の明示的な採用は将来の評価から適用する。詳細はセル5の統合再開節を参照。
+- `TT2_MONITOR=True`: policy v3で全4指標を監視。`TT2_MONITOR_INTERVAL=10`更新ごとに全devを評価し、いずれかが自身のanchorから1%以上改善すれば共有counterをリセット。全指標が改善不足の評価が`TT2_MONITOR_PATIENCE=5`回連続すれば終了。best保存はDev total lossの絶対最小値で選択。warmup既定400中は停止せず、各指標の最小値をanchorにする。v3の絶対上限は1000更新で、学習率・バッチ・loss定義/重みは変更しない。
+- TT2監視は`training-monitor.json`（全履歴・policy・指標別anchor/best・共有カウンタ・条件変更履歴）、CSV、SVGをローカルrunに保存し、確認済み学習snapshotへ同梱。`checkpoints/checkpoint_best.pt`はDev total loss最小のモデルとoptimizer、`checkpoint_last.pt`は再開位置。切断後はsnapshotを復元すると履歴・最良モデル・カウンタが戻る。旧checkpointからの監視初回有効化はその更新から履歴を開始し、過去の指標を捏造しない。既存v1/v2からv3への明示採用は記録済みDev最小値をanchorとし、将来の評価だけに適用する。詳細はセル5の統合再開節を参照。
 - 確認済みsnapshotの公開後、`PERSISTENT/checkpoints/<実際のrun名>/training-monitor.svg`・CSV・JSONへ閲覧用コピーを保存する。Driveからグラフを開けるため、学習セルの流れるログを追う必要はない。履歴のJSONは最後の永続保存まで、グラフ/CSVは直近の評価時点までを表示する。閲覧用コピーにI/Oエラーが出ても検証済みsnapshotは保持し、監視データはsnapshotから復元可能。
 - TT2推論は既定で検証済みdev-bestを選択し、旧runや初回評価前はlastを使用。`--checkpoint-selection last/best`で明示指定可能。bestが記録されているのに欠落・破損した場合はlastへ黙って戻らない。**これはdev BLEUによるモデル選択や原論文の停止規則の再現ではない**。自由生成の音声・ASR BLEU評価は別途必要。最良モデルもsnapshotへ同梱するためバックアップ容量は増える。古い復旧点は自動削除しない。
 - `TRAIN_ADAPTIVE_BATCH=False`: ONはTT2/S2UT限定。論理バッチ・サンプル順・更新回数を維持して分割を調整します。ただしTT2のBatchNorm統計やdropoutは変わるため、同一学習結果は保証しません。別の実験条件です。vocoderは2 optimizerを一組として扱い、分割・OOM再試行はしません。

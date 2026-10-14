@@ -38,6 +38,8 @@ def _main():
     parser.add_argument('--restore-file', type=Path)
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
+    from .monitor import absolute_update_limit
+    args.max_updates = absolute_update_limit('tt2', args.max_updates)
     from ..recipes import tt2_batch, option, training_metadata, tt2_source_spec
     from ..config import load_config
     repository = Path(__file__).resolve().parents[3]
@@ -196,6 +198,7 @@ def _main():
     requested = policy_from_env()
     monitor = Monitor.restore(requested, state.get('monitor_state') if args.restore_file else None,
                               completed, effective_warmup, args.run_root)
+    args.max_updates = absolute_update_limit('tt2', args.max_updates, monitor.policy if monitor else None)
     if monitor and world_size != 1:
         raise ValueError('TT2 monitor currently supports the single-process Colab trainer only')
     if monitor and args.validation_limit is not None:
@@ -212,10 +215,18 @@ def _main():
             metadata['monitoring'] = dict(policy=monitor.policy, metric='teacher_forced_dev_loss',
                                           warmup_guard=effective_warmup, adopted_at=monitor.origin,
                                           paper_stopping_rule_reproduced=False)
+            metadata['max_updates'] = args.max_updates
+            if monitor.policy.get('version') == 3:
+                metadata['monitoring'].update(stopping_metrics=list(monitor.metrics),
+                    stopping_rule='any_meaningful_resets_patience', absolute_max_update=1000)
         if monitor.stopped:
             monitor.write_reports(args.run_root)
             print('[training-monitor] restored terminal early-stop checkpoint; no optimizer update', file=sys.stderr, flush=True)
             return
+    if completed >= args.max_updates:
+        print(f'[training-limit] completed={completed} absolute_max_update={args.max_updates} optimizer_steps=0',
+              file=sys.stderr, flush=True)
+        return
     dev = PreparedDataset(args.data_root, 'dev') if args.validate_interval and rank == 0 else None
     if paper and dev is not None:
         dev.source_spec = dataset.source_spec
@@ -260,7 +271,7 @@ def _main():
                     torch.distributed.barrier()
             improved = monitor.observe(update, losses, validation, optimizer.param_groups[0]['lr']) if monitor else False
             stop = stopping() or bool(monitor and monitor.stopped)
-            if monitor and validation is not None:
+            if monitor and validation is not None and monitor.policy.get('version') != 3:
                 print(f'[training-monitor] update={update} dev_loss={validation["loss"]:.6g} '
                       f'best_update={monitor.best_update} bad_evaluations={monitor.bad_evaluations}/'
                       f'{monitor.policy["patience"]} warmup_guard={update <= monitor.warmup} '

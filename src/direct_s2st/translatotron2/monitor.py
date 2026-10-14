@@ -67,11 +67,22 @@ def policy_from_env():
     return json.loads(value) if value else None
 
 
+def absolute_update_limit(kind, requested, policy=None):
+    """v3 safety cap is an absolute optimizer count, never extra resume steps."""
+    if kind not in ('tt2', 's2ut'):
+        return requested
+    name = 'S2ST_TT2_MONITOR_POLICY' if kind == 'tt2' else 'S2ST_S2UT_MONITOR_POLICY'
+    configured = json.loads(os.environ[name]) if os.environ.get(name) else None
+    if any(p and p.get('version') == 3 for p in (policy, configured)):
+        return min(requested, 1000)
+    return requested
+
+
 def validate_policy(policy):
     fields = {'interval', 'patience', 'min_relative_improvement'}
     if not isinstance(policy, dict) or set(policy) not in (fields, fields | {'version'}):
         raise ValueError('invalid TT2 monitor policy fields')
-    if 'version' in policy and (type(policy['version']) is not int or policy['version'] != 2):
+    if 'version' in policy and (type(policy['version']) is not int or policy['version'] not in (1, 2, 3)):
         raise ValueError('invalid TT2 monitor policy version')
     for key in ('interval', 'patience'):
         if type(policy[key]) is not int or policy[key] < 1:
@@ -98,6 +109,9 @@ class Monitor:
         self.best_value = self.best_update = self.anchor = self.best_sha256 = None
         self.bad_evaluations = 0
         self.stopped = False
+        self.anchors = {key: None for key in self.metrics}
+        self.best_values = dict(self.anchors)
+        self.best_updates = dict(self.anchors)
 
     @property
     def update(self):
@@ -119,11 +133,18 @@ class Monitor:
                                  learning_rate=lr))
         improved = False
         if dev is not None:
+            for key in self.metrics:
+                score = float(dev[key])
+                if self.best_values[key] is None or score < self.best_values[key]:
+                    self.best_values[key], self.best_updates[key] = score, update
             value = float(dev[self.score_key])
             improved = self.best_value is None or value < self.best_value
             if improved:
                 self.best_value, self.best_update = value, update
                 self.best_sha256 = None  # Caller must publish this exact checkpoint.
+            if self.policy.get('version') == 3:
+                self.observe_all_losses(update, dev)
+                return improved
             modern = self.policy.get('version') == 2 and self.version in (VERSION, 's2ut-dev-unit-monitor-v1')
             meaningful = (self.anchor is None or
                           (value < self.anchor and value <= self.anchor * (1-self.policy['min_relative_improvement']))) if modern else (
@@ -139,11 +160,57 @@ class Monitor:
             self.stopped = update > start and self.bad_evaluations >= self.policy['patience']
         return improved
 
+    def observe_all_losses(self, update, dev):
+        """Independent cumulative anchors; one shared consecutive-miss counter."""
+        delta = self.policy['min_relative_improvement']
+        previous = dict(self.anchors)
+        meaningful = [key for key in self.metrics if previous[key] is not None and previous[key] > 0
+                      and dev[key] < previous[key] and dev[key] <= previous[key]*(1-delta)]
+        baseline = [key for key in self.metrics if previous[key] is None]
+        adoption = getattr(self, '_policy_history', [])
+        guard = max(self.warmup, adoption[-1]['adopted_at'] if adoption else self.origin)
+        if update <= guard:
+            # Every metric keeps its own minimum throughout warmup, including
+            # a worse final warmup observation. No retrospective miss counting.
+            self.anchors = dict(self.best_values)
+            self.bad_evaluations = 0
+        else:
+            self.bad_evaluations = 0 if meaningful or baseline else self.bad_evaluations + 1
+            for key in meaningful + baseline:
+                self.anchors[key] = float(dev[key])
+        self.anchor = self.anchors[self.score_key]  # Existing scalar retains its selection-metric meaning.
+        self.stopped = update > guard and self.bad_evaluations >= self.policy['patience']
+        if not getattr(self, '_replaying', False):
+            details = []
+            for key in self.metrics:
+                anchor = previous[key]
+                relative = (anchor-float(dev[key]))/anchor*100 if anchor is not None and anchor > 0 else None
+                improvement = f'{relative:.3f}%' if relative is not None else 'baseline'
+                details.append(f'{key}={dev[key]:.6g} improvement={improvement}'+(' *' if key in meaningful else ''))
+            print(f'[training-monitor] policy_version=3 update={update} '+ ' | '.join(details)+
+                  f' meaningful_metrics={json.dumps(meaningful)} bad_evaluations={self.bad_evaluations}/'
+                  f'{self.policy["patience"]} warmup_guard={update <= self.warmup} early_stopped={self.stopped}',
+                  file=sys.stderr, flush=True)
+
+    def adopt_stopping_policy(self, policy):
+        """Future-only adoption; raw bests/history/selection checkpoint stay intact."""
+        self.policy = deepcopy(policy)
+        self.anchor, self.bad_evaluations = self.best_value, 0
+        if self.policy.get('version') == 3:
+            self.anchors = dict(self.best_values)
+            self.stopped = False
+        if hasattr(self, 'reset_total_stopping'):
+            self.reset_total_stopping()
+
     def state(self):
         result = dict(version=self.version, metric=self.metric, policy=deepcopy(self.policy),
                     warmup=self.warmup, origin=self.origin, history=deepcopy(self.history),
                     best_value=self.best_value, best_update=self.best_update, best_sha256=self.best_sha256,
                     anchor=self.anchor, bad_evaluations=self.bad_evaluations, stopped=self.stopped)
+        if self.policy.get('version') == 3:
+            result.update(stopping_metrics=list(self.metrics), anchors=deepcopy(self.anchors),
+                          best_values=deepcopy(self.best_values), best_updates=deepcopy(self.best_updates),
+                          stopping_rule='any_meaningful_resets_patience', absolute_max_update=1000)
         if getattr(self, '_warmup_history', None):
             result['warmup_history'] = deepcopy(self._warmup_history)
         if getattr(self, '_policy_history', None):
@@ -158,8 +225,11 @@ class Monitor:
             raise ValueError('monitor version/warmup changed')
         requested = validate_policy(requested) if requested is not None else None
         migrating = requested is not None and requested != saved['policy']
-        if migrating and (cls.version not in (VERSION, 's2ut-dev-unit-monitor-v1') or requested.get('version') != 2 or
-                          requested['interval'] != saved['policy']['interval'] or saved['stopped']):
+        terminal_adoption = (migrating and requested.get('version') == 3 and saved['policy'].get('version', 1) < 3)
+        if migrating and (cls.version not in (VERSION, 's2ut-dev-unit-monitor-v1') or requested.get('version') not in (2, 3) or
+                          requested.get('version') < saved['policy'].get('version', 1) or
+                          requested['interval'] != saved['policy']['interval'] or
+                          (saved['stopped'] and not terminal_adoption)):
             raise ValueError('monitor policy changed; retain the saved policy for this run')
         changes = deepcopy(saved.get('warmup_history', []))
         initial = changes[0]['from'] if changes else saved['warmup']
@@ -168,6 +238,7 @@ class Monitor:
             raise ValueError('invalid monitor policy history')
         original_policy = policies[0]['from'] if policies else saved['policy']
         result = cls(original_policy, initial, origin=saved['origin'])
+        result._replaying = True
         previous_at = result.origin - 1
         for change in changes:
             if (set(change) != {'from', 'to', 'adopted_at'} or
@@ -181,9 +252,10 @@ class Monitor:
         for policy_change in policies:
             if (cls.version not in (VERSION, 's2ut-dev-unit-monitor-v1') or set(policy_change) != {'from', 'to', 'adopted_at'} or
                     type(policy_change['adopted_at']) is not int or
-                    not previous_at < policy_change['adopted_at'] <= completed or
+                    not previous_at <= policy_change['adopted_at'] <= completed or
                     validate_policy(policy_change['from']) != previous_policy or
-                    validate_policy(policy_change['to']).get('version') != 2 or
+                    validate_policy(policy_change['to']).get('version') not in (2, 3) or
+                    policy_change['to'].get('version') < previous_policy.get('version', 1) or
                     policy_change['to']['interval'] != previous_policy['interval'] or
                     policy_change['from'] == policy_change['to']):
                 raise ValueError('invalid monitor policy history')
@@ -201,12 +273,10 @@ class Monitor:
                 result._warmup_history = getattr(result, '_warmup_history', []) + [change]
                 change = next(pending, None)
             while policy_change is not None and policy_change['adopted_at'] == update:
-                if result.policy != policy_change['from'] or result.stopped:
+                terminal_adoption = (policy_change['to'].get('version') == 3 and result.policy.get('version', 1) < 3)
+                if result.policy != policy_change['from'] or (result.stopped and not terminal_adoption):
                     raise ValueError('invalid monitor policy history')
-                result.policy = deepcopy(policy_change['to'])
-                result.anchor, result.bad_evaluations = result.best_value, 0
-                if hasattr(result, 'reset_total_stopping'):
-                    result.reset_total_stopping()
+                result.adopt_stopping_policy(policy_change['to'])
                 result._policy_history = getattr(result, '_policy_history', []) + [policy_change]
                 policy_change = next(policy_pending, None)
         for row in saved['history']:
@@ -232,16 +302,14 @@ class Monitor:
                 {'from': result.warmup, 'to': warmup, 'adopted_at': completed}]
             result.warmup = warmup
         if migrating:
-            # Explicit v2 request changes future decisions only. Keep and first
+            # Explicit versioned request changes future decisions only. First
             # verify all old losses, best bytes, counters and policy timelines.
             result._policy_history = policies + [
                 {'from': deepcopy(result.policy), 'to': deepcopy(requested), 'adopted_at': completed}]
-            result.policy = deepcopy(requested)
-            result.anchor, result.bad_evaluations = result.best_value, 0
-            if hasattr(result, 'reset_total_stopping'):
-                result.reset_total_stopping()
+            result.adopt_stopping_policy(requested)
             print(f'[training-monitor-policy] adopted_at={completed} policy={json.dumps(requested, sort_keys=True)} '
                   'history_best_optimizer_preserved=True stopping_counter_restarted=True', file=sys.stderr, flush=True)
+        result._replaying = False
         return result
 
     def save_best(self, work, save):
@@ -310,12 +378,22 @@ def early_stop_result(work, kind, completed):
         from ..s2ut.monitor import S2UTMonitor, policy_from_env as s2ut_policy
         monitor_class, policy = S2UTMonitor, s2ut_policy()
     monitor = monitor_class.restore(policy, saved, completed, saved['warmup'], work)
+    if not monitor.stopped:
+        # Explicit v1/v2 -> v3 adoption can continue a formerly stopped run.
+        # The trainer will adopt again from the unchanged optimizer checkpoint
+        # and publish the new timeline at its next checkpoint.
+        return None
     result = dict(status='EARLY_STOPPED', durable_updates=completed,
                   best_update=monitor.best_update, best_dev_loss=monitor.best_value,
                   selection_metric=monitor.metric)
     if kind == 's2ut' and monitor.policy.get('version') == 2:
         result.update(stopping_metrics=['unit_loss', 'loss'], stopping_rule='all_plateau',
                       best_total_dev_loss=monitor.best_total_value, best_total_update=monitor.best_total_update)
+    if monitor.policy.get('version') == 3:
+        result.update(stopping_metrics=list(monitor.metrics), stopping_rule='any_meaningful_resets_patience',
+                      bad_evaluations=monitor.bad_evaluations, anchors=deepcopy(monitor.anchors))
+        if kind == 's2ut':
+            result.update(best_total_dev_loss=monitor.best_total_value, best_total_update=monitor.best_total_update)
     return result
 
 
