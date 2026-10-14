@@ -147,6 +147,12 @@ class TrainingAudit:
 
 @operation('s2ut/fairseq_train: main')
 def main():
+    try:
+        import editdistance
+        assert editdistance.eval([1, 2], [1, 3]) == 1
+    except ImportError as error:
+        raise RuntimeError('S2UT dev CTC requires editdistance; use the fixed runtime requirements '
+                           'or normal Colab cell 5 before training') from error
     command, research = prepare_research_metadata(sys.argv)
     sys.argv[:] = command
     from fairseq.criterions.speech_to_speech_criterion import SpeechToUnitMultitaskTaskCriterion as Criterion

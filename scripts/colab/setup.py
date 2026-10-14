@@ -164,6 +164,8 @@ def main():
     build_env.pop('CUDA_HOME', None)
     run(python, '-m', 'pip', 'install', '--no-build-isolation', '-e', copied, env=build_env)
     run(python, '-m', 'pip', 'check')
+    if not restored and (ROOT/'scripts/colab/check_s2ut_runtime.py').is_file():
+        run(python, ROOT/'scripts/colab/check_s2ut_runtime.py')
     espeak = PREFIX / 'espeak-src'
     if not espeak.exists():
         run('git', 'init', espeak)
@@ -186,7 +188,8 @@ def main():
         inference_dependencies=args.inference,
         requirements_sha256=hashlib.sha256((ROOT/'requirements/colab310.txt').read_bytes()).hexdigest(),
         repository=subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip())
-    (PREFIX / 'environment.json').write_text(json.dumps(lock, indent=2), encoding='utf-8')
+    from direct_s2st.io import atomic_write_text
+    atomic_write_text(PREFIX/'environment.json', json.dumps(lock, indent=2), overwrite=True)
     print('Runtime ready:', python)
 
 

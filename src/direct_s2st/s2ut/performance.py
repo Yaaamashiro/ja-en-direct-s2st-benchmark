@@ -176,12 +176,21 @@ def runtime_hooks(audit):
     def publish(cfg, trainer, epoch_itr, val_loss):
         if cfg.write_checkpoints_asynchronously:
             raise ValueError('upstream asynchronous checkpoint writes cannot be frozen safely')
+        # Keep last/best and two local interval checkpoints, rather than filling
+        # the Colab disk with hundreds of full model+Adam copies. Drive recovery
+        # snapshots are immutable and are not touched by fairseq's local cleanup.
+        if getattr(cfg, 'keep_interval_updates', -1) < 0:
+            cfg.keep_interval_updates = 2
+        if getattr(cfg, 'keep_last_epochs', -1) < 0:
+            cfg.keep_last_epochs = 1
         result = original_publish(cfg, trainer, epoch_itr, val_loss)
         checkpoint = Path(cfg.save_dir) / 'checkpoint_last.pt'
         if trainer.should_save_checkpoint_on_current_rank and checkpoint.is_file():
             atomic_write_json(checkpoint.parent.parent / 'gradient-audit-rank-0.json', audit.result(), overwrite=True)
+            monitor = getattr(getattr(audit, 'monitor', None), 'monitor', None)
+            evaluated = monitor is not None and monitor.update == trainer.get_num_updates() and monitor.due(monitor.update)
             checkpoint_saved(checkpoint.parent.parent, checkpoint, trainer.get_num_updates(),
-                             force=stopping() or trainer.get_num_updates() >= trainer.cfg.optimization.max_update)
+                             force=evaluated or stopping() or trainer.get_num_updates() >= trainer.cfg.optimization.max_update)
         return result
 
     def iterator(self, *args, **kwargs):
