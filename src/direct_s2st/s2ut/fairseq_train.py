@@ -11,12 +11,11 @@ GROUPS = ('encoder', 'decoder', 'source_letter_decoder', 'target_letter_decoder'
 
 
 @operation('s2ut: validate and lock paper recipe')
-def prepare_research_metadata(command):
+def prepare_research_metadata(command, *, check_audio=True):
     """Validate before fairseq loads optimizer state; wrapper flags never reach it."""
     from ..recipes import (option, validate_s2ut_paper, validate_s2ut_runtime, training_metadata,
                            prepared_metadata, MODES, S2UT_VOCODERS)
     from ..hashing import sha256_file
-    from ..journal import digest
     command = list(command)
     mode, vocoder = option(command, '--reproduction-mode', 'smoke'), option(command, '--vocoder-mode', 'trained')
     for flag in ('--reproduction-mode', '--vocoder-mode'):
@@ -39,7 +38,8 @@ def prepare_research_metadata(command):
             raise ValueError('this Fisher update_freq=4 recipe simulates four GPUs on one process; use an explicit practical recipe for other world sizes')
     from .preflight import validate_training
     root = Path(command[1])
-    evidence = validate_training(root, command)
+    evidence = (validate_training(root, command) if check_audio else
+                validate_training(root, command, check_audio=False))
     metadata = training_metadata(command, 's2ut', mode, vocoder, world_size=int(os.environ.get('WORLD_SIZE', '1')))
     if int(os.environ.get('S2ST_TRAIN_FIXED_MICROBATCH', '0')):
         metadata['physical_batch_cap'] = int(os.environ['S2ST_TRAIN_FIXED_MICROBATCH'])
@@ -63,17 +63,13 @@ def prepare_research_metadata(command):
         if flag in normalized:
             index = normalized.index(flag)
             del normalized[index:index + 2]
-    identity = dict(recipe=metadata, command=normalized,
+    identity = dict(recipe=dict(metadata), command=normalized,
                     data={str(p.relative_to(root)): sha256_file(p) for p in
                           track(sorted(root.rglob('*')), 's2ut: hash recipe inputs') if p.is_file()})
-    metadata['training_fingerprint'] = digest(identity)
     run_root = Path(option(command, '--save-dir')).parent
     marker = run_root / 's2ut-recipe-lock.json'
-    if '--restore-file' in command:
-        saved = json.loads(marker.read_text(encoding='utf-8')) if marker.is_file() else None
-        if saved != identity:
-            raise ValueError('S2UT recipe identity mismatch or legacy checkpoint; use a new run')
-    atomic_write_json(marker, identity, resume=True)
+    from .recipe_identity import bind_recipe
+    metadata['training_fingerprint'] = bind_recipe(marker, identity, restoring='--restore-file' in command)
     import subprocess
     repository = Path(__file__).resolve().parents[3]
     metadata['repository_revision'] = subprocess.check_output(['git', '-C', str(repository), 'rev-parse', 'HEAD'], text=True).strip()

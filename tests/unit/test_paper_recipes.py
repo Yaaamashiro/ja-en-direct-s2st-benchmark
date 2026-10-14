@@ -140,6 +140,14 @@ def test_s2ut_colab_metadata_and_recipe_resume_guard(tmp_path, monkeypatch, warm
     _, (short_run, short_meta) = prepare_research_metadata(short_command)
     _, (_, short_resume) = prepare_research_metadata(short_command + ['--restore-file', str(short_run/'checkpoints/checkpoint_last.pt')])
     assert short_resume['training_fingerprint'] == short_meta['training_fingerprint']
+    # A real `python -m` invocation uses the module file as argv[0]. Reviewed
+    # runtime copies change that path, without changing any optimizer arguments.
+    lock_bytes = (short_run/'s2ut-recipe-lock.json').read_bytes()
+    relocated = short_command + ['--restore-file', str(short_run/'checkpoints/checkpoint_last.pt')]
+    relocated[0] = '/content/s2st-execution/' + 'a'*40 + '/.fp16-overlays/' + 'b'*64 + '/src/direct_s2st/s2ut/fairseq_train.py'
+    _, (_, relocated_meta) = prepare_research_metadata(relocated)
+    assert relocated_meta['training_fingerprint'] == short_meta['training_fingerprint']
+    assert (short_run/'s2ut-recipe-lock.json').read_bytes() == lock_bytes
     changed_warmup = short_command + ['--restore-file', str(short_run/'checkpoints/checkpoint_last.pt')]
     changed_warmup[changed_warmup.index('--warmup-updates')+1] = '10000'
     with pytest.raises(ValueError, match='identity mismatch'):

@@ -17,7 +17,7 @@ from direct_s2st.s2ut.monitor import S2UTMonitor
 def fixture(tmp_path, monkeypatch):
     from direct_s2st.s2ut import fairseq_train
     monkeypatch.setattr(fairseq_train, 'prepare_research_metadata',
-                        lambda command: (command, (tmp_path/'work', {'training_fingerprint':'synthetic-reviewed'})))
+                        lambda command, **kw: (command, (tmp_path/'work', {'training_fingerprint':'synthetic-reviewed'})))
     work = tmp_path/'work'
     (work/'checkpoints').mkdir(parents=True)
     lock = tmp_path/'input.json'

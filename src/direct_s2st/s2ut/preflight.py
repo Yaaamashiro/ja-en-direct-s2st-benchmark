@@ -4,14 +4,14 @@ import yaml
 from .multitask import validate_prepared, read_tsv
 
 
-def validate_training(root: Path, command: list[str]) -> dict:
+def validate_training(root: Path, command: list[str], *, check_audio: bool = True) -> dict:
     def option(name: str, default=None):
         return command[command.index(name) + 1] if name in command else default
     if option("--multitask-config-yaml") != "config_multitask.yaml":
         raise ValueError("main S2UT baseline requires --multitask-config-yaml config_multitask.yaml")
     if option("--train-subset") != "train" or option("--valid-subset") != "dev":
         raise ValueError("S2UT training must use train, validation must use dev")
-    result = validate_prepared(root, clusters=int(option("--target-code-size", 100)))
+    result = validate_prepared(root, clusters=int(option("--target-code-size", 100)), check_audio=check_audio)
     from fairseq.models import ARCH_CONFIG_REGISTRY
     from argparse import Namespace
     architecture = option("--arch")
