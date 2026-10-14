@@ -100,14 +100,43 @@ optimizer.step未呼び出し・更新数不変・scaleの正常な低下をす�
 OOMやoptimizer実行後の失敗はこの処理では再試行せず、最小scale到達や上限32回でも停止します。
 FP32/BF16へ黙って切り替えず、token予算・蓄積回数・warmup・Adam設定は維持します。
 
-2486164で固定済みのrunは、新launcherの通常セル5で検証済みFP16 runtimeと
-TrainingAuditだけを差し替えた実行コピーを作ります。元checkout・config・依存環境・
+2486164/e56ca1cで固定済みのrunは、新launcherの通常セル5で検証済みFP16 runtime、
+TrainingAudit、checkpoint検証・保存・異常終了時退避を差し替えた実行コピーを作ります。元checkout・config・基礎依存環境・
 recipe fingerprint・snapshotは保持し、全source/configのSHAを`execution-overlays/`へ記録します。
 未レビューの旧コードや改変されたコピーは拒否します。初回overflowで更新0・snapshotなしの
 場合も、同じ実験名・設定でセル1→5を再実行できます。4A/4Bの再生成は不要です。
 launcherの固定SHAは自動更新しないため、反映時はセル1の`TRAIN_CODE_REVISION`に
 修正を含む公開済みSHAを指定してください。CPUの制御フロー/Adamテストで確認済みですが、
 実A100のFP16オーバーフロー再試行は未検証です。
+
+### 初回dev評価と未公開checkpointの復旧
+
+S2UTのCTCはdev評価時に`editdistance`を必要とします。新規Colab/Docker環境は
+`editdistance==0.8.1`を固定導入します。通常セル5はデータ取得の前に、実際のCTC
+train forward/backwardとdev forward（文字/単語編集距離を含む）を小さなCPU入力で実行します。
+これは実験の学習ではなく、モデル重み・optimizer・データsplitを使用/変更しないランタイム確認です。
+
+旧環境を復元する場合は保存済みpip freezeとenvironment.jsonをそのまま検証・維持し、
+公式PyPIのCPython3.10/Linux-x86_64 wheelをSHA256検証して評価用パッケージを別置きします。
+配布wheel/manifestは保持し、import用パッケージだけをPYTHONPATHへ追加します。
+基礎venvへ追加インストールせず、追加依存のversion・wheel/hash・基礎環境SHAを
+`.runtime-extras/`へ記録します。CER/WERを省略したり、未知文字へ置換したりはしません。
+
+Driveへ未公開の新しいS2UT `checkpoint_last.pt`が同じVMにある場合、通常セル5が
+先に入力hash、checkpointの有限なmodel/Adam状態、recipe fingerprint、監視履歴/カウンター、
+bestのSHAとreportの一致を検証します。すべて一致する場合だけ別の不変コピーをDriveへ公開し、
+その地点から再開します。元ローカルと旧Drive snapshotは残します。VMを削除済みなら
+ローカル状態は回収できず、最後の検証済みDrive地点から再開します。4A/4Bの再生成は不要です。
+
+通常の10分間隔に加えて、S2UTはdev評価後と早期終了/完了時にもbackupを強制します。
+trainerがエラー終了した場合も、終了後に最後のローカルcheckpointを検証して退避します。
+Driveへ公開できない場合はローカルの`.pending-recovery-*`等を保持し、保存成功とは表示しません。
+ColabがVMを強制削除すると退避コード自体を実行できないため、毎更新の永続化保証ではありません。
+`learned_at_least`はローカル保存済み進捗も反映し、`durable_updates`はDrive公開済みだけを示します。
+
+デフォルトの無制限ローカル保存は、直近2個のinterval checkpointと直近1epochへ制限します。
+last・bestとDriveの過去snapshotは保持します。fairseqが古いローカル中間checkpointを整理しますが、
+実験データ・コーパス・Driveの復旧地点は削除しません。学習のbatch/精度/LR/warmupは変えません。
 
 ## 使うノートブック
 

@@ -66,6 +66,7 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
                 from .translatotron2.monitor import mirror_reports
                 mirror_reports(directory/'files', backup)
             return update
+        failure = None
         try:
             with ThreadPoolExecutor(max_workers=1) as uploader:
                 while True:
@@ -78,6 +79,14 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
                         future = None
                         print(f'[recovery] learned_at_least={learned} durable_updates={completed}', file=sys.stderr, flush=True)
                     ready = sorted(staging.glob('*/ready.json'))
+                    local_progress = work/'training-local-progress.json'
+                    if local_progress.is_file():
+                        try:
+                            value = json.loads(local_progress.read_text())
+                            if type(value.get('updates')) is int and completed <= value['updates'] <= total:
+                                learned = max(learned, value['updates'])
+                        except (ValueError, OSError):
+                            pass  # A progress display is not a trusted resume checkpoint.
                     if ready:
                         learned = max(learned, *(int(json.loads(p.read_text())['updates']) for p in ready))
                     if future is None and ready:
@@ -97,6 +106,8 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
                     if process.poll() is not None and future is None and not ready:
                         break
                     time.sleep(.25)
+        except BaseException as error:
+            failure = error
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -105,7 +116,35 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+        if failure is not None:
+            # Do not let TemporaryDirectory discard acknowledged immutable
+            # copies when Drive/upload verification failed. The writer is stopped.
+            ready = list(staging.glob('*/ready.json'))
+            if ready:
+                retained = Path(tempfile.mkdtemp(prefix='.pending-upload-', dir=work.parent))
+                for marker in ready:
+                    source = marker.parent.resolve()
+                    if source.parent != staging.resolve() or not source.is_relative_to(temporary):
+                        raise ValueError('unsafe pending backup retention')
+                    source.rename(retained/source.name)
+                print(f'[recovery] unpublished_immutable_copies_preserved={retained}', file=sys.stderr, flush=True)
+            raise failure
         if process.returncode and not forced:
+            # The writer has exited. Verify and freeze its last saved update,
+            # even when the normal ten-minute Drive upload interval deferred it.
+            checkpoint = work/config['checkpoint']
+            if checkpoint.is_file():
+                local = inspect_checkpoint(checkpoint, config['kind'])
+                if completed < local <= total:
+                    from .recovery import freeze_files
+                    retained = Path(tempfile.mkdtemp(prefix='.pending-recovery-', dir=work.parent))
+                    freeze_files(work, checkpoint, retained/'files')
+                    print(f'[recovery] trainer_failed local_update={local} force_backup=true retained={retained}',
+                          file=sys.stderr, flush=True)
+                    publish(retained/'files', backup, identity, local)
+                    completed = local
+                    print(f'[recovery] error_exit durable_updates={completed} local_copy_preserved={retained}',
+                          file=sys.stderr, flush=True)
             raise RuntimeError(f'training failed ({process.returncode}); durable update {completed} retained')
         if not forced:
             from .translatotron2.monitor import early_stop_result

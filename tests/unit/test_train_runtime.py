@@ -153,6 +153,50 @@ def test_continuous_session_single_process_and_verified_snapshots(tmp_path):
     assert not list(tmp_path.glob('.s2st-training-*'))
 
 
+@pytest.mark.parametrize('drive_fails', [False, True])
+def test_error_exit_verifies_and_backs_up_latest_local_checkpoint_even_when_upload_deferred(tmp_path, drive_fails):
+    from direct_s2st.session_runtime import run_continuous
+    from direct_s2st.colab import publish, latest
+    work, backup = tmp_path/'work', tmp_path/'drive'
+    work.mkdir()
+    (work/'checkpoint.pt').write_text('1')
+    identity = {'synthetic_fixture':True}
+    publish(work, backup, identity, 1)
+    class Process:
+        returncode = 1
+        def __init__(self, *a, **k): (work/'checkpoint.pt').write_text('9')
+        def poll(self): return self.returncode
+    def upload(*args):
+        if drive_fails: raise OSError('Drive offline')
+        return publish(*args)
+    config = dict(kind='tt2', checkpoint='checkpoint.pt', command=['fixture'], resume_args=['--resume'],
+                  runtime=dict(cache_gb=0, readers=1, precision='default', adaptive_batch=False))
+    with pytest.raises((OSError, RuntimeError), match='Drive offline|durable update 9'):
+        run_continuous(config, work=work, backup=backup, identity=identity, completed=1, total=1000,
+                       seconds=0, inspect_checkpoint=lambda p,k:int(p.read_text()), publish=upload, popen=Process)
+    assert latest(backup, identity)[1]['updates'] == (1 if drive_fails else 9)
+    assert (work/'checkpoint.pt').read_text() == '9'
+    assert next(tmp_path.glob('.pending-recovery-*/files/checkpoint.pt')).read_text() == '9'
+
+
+def test_local_progress_advances_while_drive_upload_is_deferred(tmp_path, monkeypatch):
+    from direct_s2st import train_runtime
+    monkeypatch.setattr(train_runtime, '_last_frozen', None)
+    monkeypatch.setattr(train_runtime, '_last_frozen_time', None)
+    monkeypatch.setenv('S2ST_TRAIN_STAGING', str(tmp_path/'staging'))
+    monkeypatch.setenv('S2ST_BACKUP_MIN_SECONDS', '600')
+    work = tmp_path/'work'
+    work.mkdir()
+    (tmp_path/'staging').mkdir()
+    path = work/'checkpoint.pt'
+    path.write_text('1')
+    checkpoint_saved(work, path, 1)
+    path.write_text('9')
+    checkpoint_saved(work, path, 9)
+    assert json.loads((work/'training-local-progress.json').read_text())['updates'] == 9
+    assert len(list((tmp_path/'staging').glob('*/ready.json'))) == 1
+
+
 def test_failed_upload_retains_previous_verified_checkpoint(tmp_path):
     from direct_s2st.session_runtime import run_continuous
     from direct_s2st.colab import publish, latest
@@ -180,6 +224,7 @@ def test_failed_upload_retains_previous_verified_checkpoint(tmp_path):
             completed=1, total=2, seconds=10, inspect_checkpoint=lambda p,k: int(p.read_text()),
             publish=failed, popen=Process)
     assert latest(backup, identity)[1]['updates'] == 1
+    assert next(tmp_path.glob('.pending-upload-*/2/files/checkpoint.pt')).read_text() == '2'
 
 
 def test_optimized_config_is_explicit_and_gan_split_rejected(tmp_path):

@@ -172,11 +172,16 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
             from tt2_schedule_overlay import prepare
             execution = prepare(execution, ROOT, persistent, name)
     if kind == 's2ut':
+        from validation_dependencies import ensure
+        ensure(python, RUNTIME_ROOT, persistent, run)
         from s2ut_runtime_overlay import prepare
         execution = prepare(execution, ROOT, persistent, name)
     builder_options = {k: v for k, v in options.items() if k != 'tt2_warmup_updates'}
     os.environ['PYTHONPATH'] = str(execution/'src')+os.pathsep+os.environ.get('PYTHONPATH', '')
     os.environ['S2ST_CONFIG_ROOT'] = str(execution/'configs')
+    if kind == 's2ut' and snapshot and (work/'checkpoints/checkpoint_last.pt').is_file():
+        run(python, ROOT/'scripts/colab/rescue_local_s2ut.py', '--config', config_path,
+            '--work', work, '--backup', backup, '--total', str(total))
     if snapshot:
         print('[cell5-recovery] saved config/batch retained; cell-1 throughput options do not replace them', flush=True)
     else:

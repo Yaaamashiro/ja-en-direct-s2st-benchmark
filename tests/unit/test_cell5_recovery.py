@@ -155,6 +155,8 @@ def test_new_native_run_records_code_and_environment_then_reuses_them(tmp_path, 
     import os
     monkeypatch.setattr(os, 'environ', dict(os.environ))
     import s2ut_runtime_overlay
+    import validation_dependencies
+    monkeypatch.setattr(validation_dependencies, 'ensure', lambda *a: None)
     repaired = []
     def repair(execution, launcher, persistent, name):
         repaired.append((execution, name))

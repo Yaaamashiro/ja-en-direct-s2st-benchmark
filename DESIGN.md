@@ -42,6 +42,13 @@ loss scaleを下げた場合だけ、同じ論理バッチを再試行する。�
 低下したdynamic loss scaleは保持する。バッチ・学習率・精度は変更しない。
 optimizer呼び出し後、原因不明の未更新、最小scale到達、32回の再試行上限では停止する。
 
+S2UTはデータ取得前に実CTCのtrain/backward/dev経路を確認し、評価だけで使う依存不足を
+最初のdevまで持ち越さない。旧環境の不足したeditdistanceはSHA固定wheelの別置きとし、
+元venv/環境ロックを偽装・上書きしない。追加依存は別manifestで版・SHA・基礎環境を記録する。
+通常セル5は新しい未公開ローカルS2UT状態を入力/recipe/optimizer/monitorまで検証し、
+Driveへ救済してから復元する。dev後・異常終了後もbackupし、VM強制削除時の未保存分は保証しない。
+ローカルの中間checkpointは有界に保持し、last/best・不変Drive snapshotを残す。
+
 通常Colabの全学習targetは、別プロセスの開始前VRAM測定を共通に使用する。
 測定はtrainのみ、試行weights/optimizerを本学習へ持ち込まず、update 0から新規開始する。
 TT2は実効batch1024を維持して物理batchを選び、GANは実batchを選ぶ。

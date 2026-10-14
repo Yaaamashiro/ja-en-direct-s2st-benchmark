@@ -7,27 +7,28 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/'scripts/colab'))
-from s2ut_runtime_overlay import AUDIT, PERFORMANCE, audit_span, prepare, replacements
+from s2ut_runtime_overlay import AUDIT, PERFORMANCE, RUNTIME, SESSION, CHECKPOINT, audit_span, prepare, replacements
 
 PIN = '2486164f0dbc0851ea035feb783ce44ca9a3d1ea'
 
 
-def baseline(name):
+def baseline(name, revision=PIN):
     return subprocess.check_output(['git', '-c', 'safe.directory='+ROOT.as_posix(),
-                                   '-C', str(ROOT), 'show', PIN+':'+name])
+                                   '-C', str(ROOT), 'show', revision+':'+name])
 
 
-def execution(tmp_path):
+def execution(tmp_path, revision=PIN):
     root = tmp_path/'execution'
-    for name in (PERFORMANCE, AUDIT):
+    for name in (PERFORMANCE, AUDIT, RUNTIME, SESSION, CHECKPOINT):
         path = root/name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(baseline(name))
+        path.write_bytes(baseline(name, revision))
     return root
 
 
-def test_repair_only_changes_performance_hook_and_audit_class(tmp_path):
-    root = execution(tmp_path)
+@pytest.mark.parametrize('revision', [PIN, 'e56ca1c749a72476f07e8d496e5634b43e12d47c'])
+def test_repair_only_changes_reviewed_runtime_checkpoint_and_audit_scope(tmp_path, revision):
+    root = execution(tmp_path, revision)
     changed = replacements(root, ROOT)
     assert changed[PERFORMANCE] == (ROOT/PERFORMANCE).read_bytes()
     def without_audit(value):
@@ -35,9 +36,18 @@ def test_repair_only_changes_performance_hook_and_audit_class(tmp_path):
         a, b = audit_span(value)
         lines[a:b] = ['<audit-only>\n']
         return ''.join(lines)
-    assert without_audit(changed[AUDIT]) == without_audit(baseline(AUDIT))
+    repaired_audit = changed.get(AUDIT, baseline(AUDIT, revision))
+    assert without_audit(repaired_audit) == without_audit(baseline(AUDIT, revision))
+    def without_freeze(value):
+        tree = ast.parse(value)
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'checkpoint_saved')
+        a, b = min([node.lineno]+[d.lineno for d in node.decorator_list])-1, node.end_lineno
+        lines = value.decode().splitlines(keepends=True)
+        lines[a:b] = ['<freeze-only>\n']
+        return ''.join(lines)
+    assert without_freeze(changed[RUNTIME]) == without_freeze(baseline(RUNTIME, revision))
     module = {'__name__': 'direct_s2st.s2ut.reviewed_fixture', '__package__': 'direct_s2st.s2ut'}
-    exec(compile(changed[AUDIT], 'reviewed-audit', 'exec'), module)
+    exec(compile(repaired_audit, 'reviewed-audit', 'exec'), module)
     audit = module['TrainingAudit']()
     state = audit.attempt_state()
     audit.loss_count = 100

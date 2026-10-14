@@ -350,6 +350,15 @@ def checkpoint_saved(work, checkpoint, updates, *, force=False):
     staging = os.environ.get('S2ST_TRAIN_STAGING')
     if not staging:
         return
+    work, checkpoint = Path(work).resolve(), Path(checkpoint).resolve()
+    relative = checkpoint.relative_to(work)
+    if checkpoint.is_symlink() or not checkpoint.is_file():
+        raise ValueError('local progress requires a real checkpoint in the work directory')
+    from .io import atomic_write_json
+    stamp = checkpoint.stat()
+    atomic_write_json(work/'training-local-progress.json',
+        dict(version=1, updates=updates, checkpoint=relative.as_posix(), bytes=stamp.st_size,
+             mtime_ns=stamp.st_mtime_ns), overwrite=True)
     global _last_frozen, _last_frozen_time
     if _last_frozen == (staging, updates):
         return
@@ -361,23 +370,14 @@ def checkpoint_saved(work, checkpoint, updates, *, force=False):
         print(f'[recovery] local_update={updates} upload_deferred=true min_seconds={interval}',
               file=sys.stderr, flush=True)
         return
-    from .io import atomic_write_json
     work, checkpoint, root = Path(work).resolve(), Path(checkpoint).resolve(), Path(staging).resolve()
     relative = checkpoint.relative_to(work)
     # Bounded queue: at most two local snapshots, including one being uploaded.
     while len(list(root.glob('*/ready.json'))) >= 2:
         time.sleep(.25)
     directory = Path(tempfile.mkdtemp(prefix=f'{updates:012d}-', dir=root))
-    target = directory / 'files' / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(checkpoint, target)
-    for name in ('config.json', 'gradient-audit-rank-0.json', 'batch-calibration.json',
-                 'research-metadata.json', 'session-research-metadata.json', 's2ut-recipe-lock.json',
-                 'training-monitor.json', 'training-monitor.csv', 'training-monitor.svg',
-                 'checkpoints/checkpoint_best.pt'):
-        if (work / name).is_file():
-            (directory / 'files' / name).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(work / name, directory / 'files' / name)
+    from .recovery import freeze_files
+    freeze_files(work, checkpoint, directory/'files')
     atomic_write_json(directory / 'ready.json', dict(updates=updates))
     _last_frozen = (staging, updates)
     _last_frozen_time = time.monotonic()
