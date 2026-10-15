@@ -58,8 +58,9 @@ fingerprintを検証し、argv[0]以外の引数・学習条件・入力SHAが�
 Early stopping policy v3はTT2の4 Dev lossとS2UTの5 Dev lossすべてに独立anchorを持つ。
 いずれかが自身のanchorから1%以上改善すれば共有patienceを0とし、その指標だけanchorを更新。
 全指標が改善不足の評価が5回連続すれば停止する。全devを10更新ごとに評価し、warmup中は停止せず、
-各指標のwarmup内最小値をanchorとする。TT2/S2UT通常実験はoptimizer更新の絶対上限1000を保持する。
-anchor/counterの改善はこのhard limitを延長しない。1000到達済みの再開では追加更新しない。
+各指標のwarmup内最小値をanchorとする。通常実験のoptimizer更新の絶対上限はTT2=1000、S2UT=3000とする。
+anchor/counterの改善はこのhard limitを延長しない。各モデルの上限到達済みの再開では追加更新しない。
+旧v3 S2UTの上限1000の保存状態も検証して読み込み、停止policy・anchor・counterは変更せず上限metadataのみ更新する。
 旧v1/v2の履歴・optimizer・bestは先に検証し、v3採用後の未来の停止判定だけを変更する。
 採用時は過去Devの指標別最小値でanchorを構築し、共有counterを0とする。旧policyでの早期終了も
 この明示採用時だけ解除できる。同一v3のresumeは判定状態を完全継承する。policy_historyを保存する。

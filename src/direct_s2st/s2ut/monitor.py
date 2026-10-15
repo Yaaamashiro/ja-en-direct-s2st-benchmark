@@ -17,6 +17,7 @@ class S2UTMonitor(Monitor):
     version = 's2ut-dev-unit-monitor-v1'
     metric = 'teacher_forced_dev_unit_loss'
     score_key = 'unit_loss'
+    absolute_max_update = 3000
     title = 'S2UT: train / teacher-forced dev losses (bits; not BLEU)'
 
     def __init__(self, *args, **kwargs):
@@ -110,7 +111,7 @@ class Controller:
                                           trainer.get_num_updates(), self.warmup, self.work)
         from ..translatotron2.monitor import absolute_update_limit
         if self.monitor and self.monitor.policy.get('version') == 3:
-            configured = trainer.cfg.optimization.max_update or 1000
+            configured = trainer.cfg.optimization.max_update or self.monitor.absolute_max_update
             trainer.cfg.optimization.max_update = absolute_update_limit('s2ut', configured, self.monitor.policy)
 
 

@@ -1,5 +1,9 @@
 # Early stopping v3 実装報告
 
+後続変更（2026-10-15）: S2UTのみ絶対上限を3000へ変更。TT2は1000、早期終了条件は維持。
+旧v3の上限1000を記録したS2UT checkpointも停止状態を含めて復元し、anchor/counter/best/historyはリセットしない。
+以下はv3初回実装時の報告（当時のS2UT上限は1000）。現在の運用手順はCOLAB.mdを参照。
+
 ## 判定・選択・上限
 
 | モデル | early stoppingの監視指標 | checkpoint_bestの選択指標 |

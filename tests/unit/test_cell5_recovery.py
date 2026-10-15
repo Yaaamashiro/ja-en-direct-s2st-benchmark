@@ -200,10 +200,12 @@ def test_new_native_run_records_code_and_environment_then_reuses_them(tmp_path, 
     _, path, marker = snapshot(tmp_path, name, kind='s2ut', base=code, expected=expected)
     before = path.read_bytes(), marker.read_bytes()
     session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 's2ut', name, 'fisher',
-                   {'s2ut_warmup_updates':400, 'batch_size':999}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
+                   {'s2ut_warmup_updates':400, 'batch_size':999}, 5000, 0, confirm=True, run=lambda *a: calls.append(a))
     assert '--resume' in calls[-1]
+    assert calls[-1][calls[-1].index('--total-updates')+1] == '3000'
     preflight_calls = [c for c in calls if 'preflight_s2ut_resume.py' in str(c)]
     assert len(preflight_calls) == 1
+    assert preflight_calls[0][preflight_calls[0].index('--total')+1] == '3000'
     assert calls.index(preflight_calls[0]) < len(calls)-1  # Before the payload-staging session.
     assert restored_environments == [None, expected, expected]
     assert checked_out == [code, code, code]

@@ -74,7 +74,7 @@ def absolute_update_limit(kind, requested, policy=None):
     name = 'S2ST_TT2_MONITOR_POLICY' if kind == 'tt2' else 'S2ST_S2UT_MONITOR_POLICY'
     configured = json.loads(os.environ[name]) if os.environ.get(name) else None
     if any(p and p.get('version') == 3 for p in (policy, configured)):
-        return min(requested, 1000)
+        return min(requested, 3000 if kind == 's2ut' else 1000)
     return requested
 
 
@@ -98,6 +98,7 @@ class Monitor:
     version = VERSION
     metric = 'teacher_forced_dev_loss'
     score_key = 'loss'
+    absolute_max_update = 1000
     title = 'TT2: train / teacher-forced dev loss (not BLEU)'
 
     def __init__(self, policy, warmup, *, origin=0):
@@ -210,7 +211,7 @@ class Monitor:
         if self.policy.get('version') == 3:
             result.update(stopping_metrics=list(self.metrics), anchors=deepcopy(self.anchors),
                           best_values=deepcopy(self.best_values), best_updates=deepcopy(self.best_updates),
-                          stopping_rule='any_meaningful_resets_patience', absolute_max_update=1000)
+                          stopping_rule='any_meaningful_resets_patience', absolute_max_update=self.absolute_max_update)
         if getattr(self, '_warmup_history', None):
             result['warmup_history'] = deepcopy(self._warmup_history)
         if getattr(self, '_policy_history', None):
@@ -284,7 +285,15 @@ class Monitor:
             result.observe(row['update'], row['train'], row['dev'], row['learning_rate'])
         apply_changes(result.update)
         result.best_sha256 = saved['best_sha256']
-        if result.update != completed or result.state() != saved:
+        expected = result.state()
+        legacy_s2ut_limit = (cls.version == 's2ut-dev-unit-monitor-v1' and
+                            saved['policy'].get('version') == 3 and saved.get('absolute_max_update') == 1000)
+        if legacy_s2ut_limit:
+            # The cap is execution metadata, not a stopping-policy change.
+            # Validate the entire old state before publishing the raised cap;
+            # anchors, patience, history and terminal status must not reset.
+            expected['absolute_max_update'] = 1000
+        if result.update != completed or expected != saved:
             raise ValueError('monitor history/counters do not match checkpoint')
         if result.best_update is not None:
             from ..drive_staging import raw_sha
@@ -310,6 +319,9 @@ class Monitor:
             print(f'[training-monitor-policy] adopted_at={completed} policy={json.dumps(requested, sort_keys=True)} '
                   'history_best_optimizer_preserved=True stopping_counter_restarted=True', file=sys.stderr, flush=True)
         result._replaying = False
+        if legacy_s2ut_limit:
+            print(f'[training-limit] S2UT absolute_max_update=1000->{result.absolute_max_update} '
+                  'monitor_state_preserved=True', file=sys.stderr, flush=True)
         return result
 
     def save_best(self, work, save):

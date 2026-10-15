@@ -166,7 +166,7 @@ def main():
         from .monitor import policy_from_env
         requested_policy = policy_from_env()
         if (requested_policy and requested_policy.get('version') == 3) or (saved_policy and saved_policy.get('version') == 3):
-            limit = absolute_update_limit('s2ut', int(option(command, '--max-update', '0')) or 1000, saved_policy)
+            limit = absolute_update_limit('s2ut', int(option(command, '--max-update', '0')) or 3000, saved_policy)
             if '--max-update' in command:
                 command[command.index('--max-update')+1] = str(limit)
             else:
@@ -223,7 +223,7 @@ def main():
                     warmup_guard=monitor.warmup, adopted_at=monitor.origin,
                     paper_stopping_rule_reproduced=False)
                 if monitor.policy.get('version') == 3:
-                    research[1]['monitoring']['absolute_max_update'] = 1000
+                    research[1]['monitoring']['absolute_max_update'] = monitor.absolute_max_update
             atomic_write_json(research[0] / 'research-metadata.json',
                               dict(research[1], completed_updates=self.get_num_updates()), overwrite=True)
         return original_save(self, filename, extra_state)

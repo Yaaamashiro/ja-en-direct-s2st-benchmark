@@ -88,7 +88,7 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     if total < 1 or seconds < 0 or (total > 10 and not confirm):
         raise ValueError('long training requires CONFIRM_TRAINING=True')
     if kind in ('tt2', 's2ut'):
-        total = min(total, 1000)
+        total = min(total, 3000 if kind == 's2ut' else 1000)
     practical_warmup = options.get('tt2_warmup_updates') if kind == 'tt2' else None
     if practical_warmup is not None and (type(practical_warmup) is not int or practical_warmup not in (400, 500, 1000, 10000)):
         raise ValueError('TT2 warmup must be 400, 500, 1000 or 10000')
