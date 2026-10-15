@@ -189,19 +189,19 @@ def test_csv_svg_preserve_all_train_dev_metrics(cls, tmp_path):
         assert 'train_'+key in csv and 'dev_'+key in csv and key in svg
 
 
-@pytest.mark.parametrize('kind', ['tt2', 's2ut'])
-def test_cap_is_absolute_and_does_not_affect_vocoder_or_legacy_policy(kind, monkeypatch):
+@pytest.mark.parametrize('kind,cap', [('tt2',1000), ('s2ut',3000)])
+def test_cap_is_absolute_and_does_not_affect_vocoder_or_legacy_policy(kind, cap, monkeypatch):
     variable = 'S2ST_TT2_MONITOR_POLICY' if kind == 'tt2' else 'S2ST_S2UT_MONITOR_POLICY'
     monkeypatch.setenv(variable, json.dumps(POLICY))
-    assert absolute_update_limit(kind, 400000) == 1000
+    assert absolute_update_limit(kind, 400000) == cap
     assert absolute_update_limit(kind, 900) == 900
     assert absolute_update_limit('vocoder', 10000) == 10000
     monkeypatch.delenv(variable)
-    assert absolute_update_limit(kind, 400000, POLICY) == 1000
+    assert absolute_update_limit(kind, 400000, POLICY) == cap
     assert absolute_update_limit(kind, 400000, dict(POLICY, version=2)) == 400000
 
 
-def test_s2ut_real_adam_policy_adoption_preserves_optimizer_and_best_then_cap_prevents_update_1001(tmp_path, monkeypatch):
+def test_s2ut_real_adam_policy_adoption_preserves_optimizer_and_best_then_cap_prevents_update_3001(tmp_path, monkeypatch):
     from test_s2ut_monitor import install_trainer
     Trainer, loop, _ = install_trainer(monkeypatch)
     for key in ('S2ST_BATCH_PROBE', 'S2ST_TRAIN_ADAPTIVE_BATCH', 'S2ST_TRAIN_DEADLINE'):
@@ -235,23 +235,23 @@ def test_s2ut_real_adam_policy_adoption_preserves_optimizer_and_best_then_cap_pr
         assert audit.monitor.monitor.history == old['extra_state']['s2st_monitor']['history']
         assert audit.monitor.monitor.bad_evaluations == 0
         assert not audit.monitor.monitor.stopped
-        assert trainer.cfg.optimization.max_update == 1000
+        assert trainer.cfg.optimization.max_update == 3000
         trainer.train_step(audit)
         loop.validate_and_save(trainer.cfg, trainer, audit, iterator, ['dev'], False)
     assert (work/'checkpoints/checkpoint_best.pt').read_bytes() == best_bytes
-    # Synthetic late-position fixture with real Adam tensors, avoiding 1000 test steps.
+    # Synthetic late-position fixture with real Adam tensors, avoiding 3000 test steps.
     trainer = Trainer(work)
-    trainer.updates = 999
+    trainer.updates = 2999
     trainer.cfg.optimization.max_update = 5000
     with runtime_hooks(audit, command):
         trainer.load_checkpoint(None)
         trainer.train_step(audit)
         _, stop = loop.validate_and_save(trainer.cfg, trainer, audit, iterator, ['dev'], False)
-        assert stop and trainer.updates == 1000
+        assert stop and trainer.updates == 3000
         state = deepcopy(trainer.optimizer.state_dict())
         assert trainer.train_step(audit) is None
         assert loop.validate_and_save(trainer.cfg, trainer, audit, iterator, ['dev'], False)[1]
-        assert trainer.updates == 1000
+        assert trainer.updates == 3000
         for key, fields in state['state'].items():
             for field,value in fields.items():
                 torch.testing.assert_close(value, trainer.optimizer.state_dict()['state'][key][field],rtol=0,atol=0)
@@ -323,8 +323,8 @@ def test_tt2_real_checkpoint_migration_keeps_optimizer_best_and_absolute_limit(t
     monkeypatch.setattr(torch.optim.Adam, 'step', original_step)
 
 
-@pytest.mark.parametrize('kind,cls', [('tt2',Monitor),('s2ut',S2UTMonitor)])
-def test_completed_cap_restores_without_launching_any_trainer(kind, cls, tmp_path, monkeypatch):
+@pytest.mark.parametrize('kind,cls,cap', [('tt2',Monitor,1000),('s2ut',S2UTMonitor,3000)])
+def test_completed_cap_restores_without_launching_any_trainer(kind, cls, cap, tmp_path, monkeypatch):
     from direct_s2st.colab import run_session, publish
     from direct_s2st.session_runtime import run_continuous
     from direct_s2st.hashing import sha256_file
@@ -336,15 +336,15 @@ def test_completed_cap_restores_without_launching_any_trainer(kind, cls, tmp_pat
                   identity_files=[str(tmp_path/'input')])
     (tmp_path/'input').write_text('same dataset')
     identity = dict(config=config,work=str(work),inputs={str(tmp_path/'input'):sha256_file(tmp_path/'input')})
-    (work/'checkpoint.pt').write_text('1000')
-    cls(dict(POLICY,interval=10),400,origin=1000).write_reports(work)
-    publish(work,backup,identity,1000)
+    (work/'checkpoint.pt').write_text(str(cap))
+    cls(dict(POLICY,interval=10),400,origin=cap).write_reports(work)
+    publish(work,backup,identity,cap)
     assert run_session(config,work=work,backup=backup,total=5000,resume=True,confirm_training=True,
                        inspect_checkpoint=lambda p,k:int(p.read_text()),
-                       runner=lambda *a,**kw:pytest.fail('trainer launched at cap')) == dict(status='COMPLETE',durable_updates=1000)
-    assert run_continuous(config,work=work,backup=backup,identity=identity,completed=1000,total=5000,
+                       runner=lambda *a,**kw:pytest.fail('trainer launched at cap')) == dict(status='COMPLETE',durable_updates=cap)
+    assert run_continuous(config,work=work,backup=backup,identity=identity,completed=cap,total=5000,
                           seconds=0,inspect_checkpoint=None,publish=None,
-                          popen=lambda *a,**kw:pytest.fail('resident trainer launched at cap')) == dict(status='COMPLETE',durable_updates=1000)
+                          popen=lambda *a,**kw:pytest.fail('resident trainer launched at cap')) == dict(status='COMPLETE',durable_updates=cap)
 
 
 @pytest.mark.parametrize('cls', [Monitor,S2UTMonitor])
@@ -372,12 +372,12 @@ def test_repeated_auxiliary_improvement_never_extends_hard_limit(cls, tmp_path):
     metric = 'phone_loss' if cls is Monitor else 'source_letter'
     current = baseline(cls)
     limit = absolute_update_limit('tt2' if cls is Monitor else 's2ut',5000,policy)
-    assert limit == 1000
+    assert limit == (1000 if cls is Monitor else 3000)
     for update in range(381,limit+1):
         if update > 400 and monitor.due(update): current[metric] *= .98
         observe(monitor,update,current if monitor.due(update) else None,tmp_path)
         assert not monitor.stopped
-    assert monitor.update == 1000 and monitor.bad_evaluations == 0
+    assert monitor.update == limit and monitor.bad_evaluations == 0
 
 
 def test_s2ut_native_cap_returns_before_model_optimizer_and_empty_gradient_audit(tmp_path, monkeypatch, capsys):
@@ -393,8 +393,8 @@ def test_s2ut_native_cap_returns_before_model_optimizer_and_empty_gradient_audit
     # Explicit synthetic fairseq-shaped tensors; the cap guard is real.
     state = dict(model={name+'.weight':torch.ones(1) for name in
         ('encoder','source_letter_decoder','target_letter_decoder','decoder_target_ctc_decoder')},
-        optimizer_history=[dict(num_updates=1000)], last_optimizer_state={'state':{0:{'exp_avg':torch.zeros(1)}}},
-        extra_state=dict(s2st_recipe_fingerprint='synthetic',s2st_monitor=S2UTMonitor(policy,400,origin=1000).state()))
+        optimizer_history=[dict(num_updates=3000)], last_optimizer_state={'state':{0:{'exp_avg':torch.zeros(1)}}},
+        extra_state=dict(s2st_recipe_fingerprint='synthetic',s2st_monitor=S2UTMonitor(policy,400,origin=3000).state()))
     torch.save(state,path)
     before = path.read_bytes()
     command = ['wrapper','fixture','--max-update','5000','--save-dir',str(path.parent),'--restore-file',str(path)]
@@ -403,4 +403,67 @@ def test_s2ut_native_cap_returns_before_model_optimizer_and_empty_gradient_audit
     monkeypatch.setattr('sys.argv',command)
     fairseq_train.main()
     assert path.read_bytes() == before
-    assert 'completed=1000 absolute_max_update=1000 optimizer_steps=0' in capsys.readouterr().err
+    assert 'completed=3000 absolute_max_update=3000 optimizer_steps=0' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('stopped', [False, True])
+def test_s2ut_old_v3_cap_metadata_resume_preserves_all_stopping_state(stopped, tmp_path, monkeypatch):
+    monitor = seeded(S2UTMonitor, tmp_path)
+    for update in range(2, 7 if stopped else 4):
+        observe(monitor, update, baseline(S2UTMonitor), tmp_path)
+    assert monitor.stopped == stopped
+    saved = monitor.state()
+    saved['absolute_max_update'] = 1000  # Metadata emitted by the initial v3 implementation.
+    original = deepcopy(saved)
+    restored = S2UTMonitor.restore(POLICY, saved, monitor.update, 1, tmp_path)
+    assert saved == original  # Never rewrite the source checkpoint/report.
+    assert restored.state() == dict(original, absolute_max_update=3000)
+    assert restored.stopped == stopped
+    assert restored.bad_evaluations == monitor.bad_evaluations
+    assert not restored.state().get('policy_history')  # No adoption/reset for a limit-only change.
+    monkeypatch.setenv('S2ST_S2UT_MONITOR_POLICY', json.dumps(POLICY))
+    (tmp_path/'training-monitor.json').write_text(json.dumps(saved), encoding='utf-8')
+    result = early_stop_result(tmp_path, 's2ut', monitor.update)
+    assert (result is not None) == stopped
+    if stopped:
+        assert result['status'] == 'EARLY_STOPPED'
+        assert result['bad_evaluations'] == 5
+    assert S2UTMonitor.restore(None, restored.state(), monitor.update, 1, tmp_path).state() == restored.state()
+    for cap in (999, 2000, 3001):
+        with pytest.raises(ValueError, match='history/counters'):
+            S2UTMonitor.restore(POLICY, dict(saved, absolute_max_update=cap), monitor.update, 1, tmp_path)
+
+
+def test_s2ut_v3_restore_at_old_cap_can_take_update_1001_without_optimizer_reset(tmp_path, monkeypatch):
+    from test_s2ut_monitor import install_trainer
+    Trainer, loop, _ = install_trainer(monkeypatch)
+    for key in ('S2ST_BATCH_PROBE', 'S2ST_TRAIN_ADAPTIVE_BATCH', 'S2ST_TRAIN_DEADLINE'):
+        monkeypatch.delenv(key, raising=False)
+    policy = dict(POLICY, interval=10)
+    monkeypatch.setenv('S2ST_S2UT_MONITOR_POLICY', json.dumps(policy))
+    trainer, audit = Trainer(tmp_path), NS()
+    trainer.updates = 1000  # Synthetic position; optimizer tensors below come from real Adam.
+    saved = S2UTMonitor(policy, 400, origin=1000).state()
+    saved['absolute_max_update'] = 1000
+    parameter = next(iter(trainer.optimizer.param_groups[0]['params']))
+    parameter.grad = torch.ones_like(parameter)
+    trainer.optimizer.step()
+    optimizer_before = deepcopy(trainer.optimizer.state_dict())
+    path = tmp_path/'checkpoints/checkpoint_last.pt'
+    path.parent.mkdir()
+    torch.save(dict(updates=1000, model=trainer.model.state_dict(), optimizer=optimizer_before,
+                    extra_state=dict(s2st_monitor=saved)), path)
+    trainer = Trainer(tmp_path)
+    trainer.cfg.optimization.max_update = 5000
+    command = ['wrapper', '--save-dir', str(path.parent), '--warmup-updates', '400', '--restore-file', str(path)]
+    with runtime_hooks(audit, command):
+        trainer.load_checkpoint(path)
+        assert trainer.cfg.optimization.max_update == 3000
+        assert audit.monitor.monitor.state() == dict(saved, absolute_max_update=3000)
+        for key,fields in optimizer_before['state'].items():
+            for field,value in fields.items():
+                torch.testing.assert_close(value, trainer.optimizer.state_dict()['state'][key][field], rtol=0, atol=0)
+        trainer.train_step(audit)
+        assert trainer.get_num_updates() == 1001
+        iterator = NS(state_dict=lambda:dict(iterations=trainer.updates))
+        assert not loop.validate_and_save(trainer.cfg, trainer, audit, iterator, ['dev'], False)[1]

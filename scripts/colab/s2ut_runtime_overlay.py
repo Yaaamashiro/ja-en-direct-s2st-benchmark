@@ -26,6 +26,8 @@ REVIEWED = {  # 2486164: the reported run's immutable execution code.
      '0a6cb3ea1cf20906637eafd5adcc53e6beb7e50a886bdcd956724de691403863'),  # 39b41c3
     ('ee51261415ccdbd26b7f609212eb60199d40f20b4309e33194abfab9fad501a7',
      '4c2d4e610a631054c3069aa1782eb74ec4cbfac34270b55b3f00b9d182f3c1a1'),  # 761a87f
+    ('ee51261415ccdbd26b7f609212eb60199d40f20b4309e33194abfab9fad501a7',
+     '90aaf2300c18ded5899f9d6ba1fb22d0b26fbbba1c3f5ea826fe82eb40ae441b'),  # f9cbe6d
 }
 
 EXTRA_REVIEWED = {
@@ -34,7 +36,8 @@ EXTRA_REVIEWED = {
               '32072cd96da2a6e81ec1275f5cf11b71a20ed42da1c35a72f3d091b59b9d743a'),
     CHECKPOINT: 'd9672003743cd110e215eeabddfb6140e0a806d26a1e005f88e9f6b92c487496',
     PREFLIGHT: '6a14765746c3b871a80fc0be869b892d9d81ec2d7da224191c7d48fa4d706ece',
-    MONITOR: '85fffccf90b5b9173c15695d96b9303c174bdcb18dc9490f845b185d915d2c1b',
+    MONITOR: ('85fffccf90b5b9173c15695d96b9303c174bdcb18dc9490f845b185d915d2c1b',
+              '4e3f91b025aacfdc166261a0106c1d0833eeb9c27881a8e8b9c5f1a2c000a3fc'),
 }
 
 
@@ -129,7 +132,7 @@ def prepare(execution, launcher, persistent, name):
                  'checkpoint validation/freezing', 'resident error-exit backup',
                  'recipe argv[0] canonical comparison; original saved fingerprint retained',
                  'metadata-only predownload validation; training audio checks unchanged',
-                 'future-only all-loss stopping v3; selection metrics unchanged; absolute update cap 1000'],
+                 'future-only all-loss stopping v3; selection metrics unchanged; S2UT absolute update cap 3000'],
              snapshot_identity_unchanged=True, model_optimizer_recipe_unchanged=True), resume=True)
     print(f'[s2ut-fp16-overlay] verified={identity} config_environment_checkpoint_identity_unchanged=true', flush=True)
     return root

@@ -27,7 +27,7 @@ def execution(tmp_path, revision=PIN):
     return root
 
 
-@pytest.mark.parametrize('revision', [PIN, 'e56ca1c749a72476f07e8d496e5634b43e12d47c', '39b41c3', '761a87f'])
+@pytest.mark.parametrize('revision', [PIN, 'e56ca1c749a72476f07e8d496e5634b43e12d47c', '39b41c3', '761a87f', 'f9cbe6d'])
 def test_repair_only_changes_reviewed_runtime_checkpoint_and_audit_scope(tmp_path, revision):
     root = execution(tmp_path, revision)
     changed = replacements(root, ROOT)

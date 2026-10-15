@@ -49,7 +49,7 @@ max(ウォームアップ終了点, policy変更地点)より後の評価から�
 評価間隔の変更やpolicyのダウングレードは拒否する。同一policyでの終了状態は継承するが、
 旧v1/v2で早期終了したrunからv3への明示採用時だけ、停止状態を解除して未来の評価へ進める。
 
-### Early stopping v3（全Dev loss・絶対上限1000）
+### Early stopping v3（全Dev loss・絶対上限TT2=1000 / S2UT=3000）
 
 TT2は `loss / mel_loss / phone_loss / duration_loss` の4種類、S2UTは
 `loss / unit_loss / source_letter / target_letter / decoder_target_ctc` の5種類を監視する。
@@ -74,9 +74,11 @@ best_values / best_updates / policy_history` を保存する。既存の `best_v
 評価ログではloss別の改善率、改善した指標（`*`）、共有counter、停止状態をstderrへ表示する。
 checkpoint_bestはTT2=Dev total loss最小、S2UT=Dev unit_loss最小のまま、停止判定とは独立である。
 
-TT2の `TOTAL_UPDATES=1000`、S2UTの `S2UT_TOTAL_UPDATES=1000` を安全上限とする。
-通常セル5およびv3 trainerは1000を超える指定も1000へ制限する。上限はoptimizer更新の絶対値で、
-610からの再開なら最大390更新、1000到達済みなら追加更新しない。改善やcounter resetは上限を延長しない。
+TT2の `TOTAL_UPDATES=1000`、S2UTの `S2UT_TOTAL_UPDATES=3000` を安全上限とする。
+通常セル5およびv3 trainerは指定をモデル別上限へ制限する。上限はoptimizer更新の絶対値で、
+S2UTの610からの再開なら最大2390更新、3000到達済みなら追加更新しない。TT2は1000のまま。
+旧v3 S2UTの上限1000を記録したcheckpointも復元し、anchor・counter・best・履歴はリセットしない。
+上限変更だけで早期終了済みのrunを再開することはない。改善やcounter resetは上限を延長しない。
 vocoderの既定更新数は独立の `VOCODER_TOTAL_UPDATES=10000` に移して従来値を保つ。
 元論文のscheduler・optimizer・batch・loss重み・validation split/間隔は変更しない。
 
@@ -121,7 +123,7 @@ lossは各タスクのsample_sizeで重み付き平均を取りbits単位で表�
 グラフ・最良モデルも含めます。再開はlast、推論・比較は検証済みbestを優先します。
 常駐単一プロセス、固定バッチ、全dev、同期checkpoint保存が必要です。
 VRAM事前測定の間は監視を実行しません。同じpolicyで停止後の再開は更新せず`EARLY_STOPPED`を返します。
-旧v1/v2からv3の採用は未来の判定へ続行でき、1000更新のhard limitは常に維持します。
+旧v1/v2からv3の採用は未来の判定へ続行でき、モデル別のhard limit（TT2=1000、S2UT=3000）は常に維持します。
 Driveの保存先には確認用のグラフとCSVもコピーします。初回有効化以前の履歴は復元しません。
 
 ### S2UTの初回FP16 overflow
@@ -205,7 +207,7 @@ last・bestとDriveの過去snapshotは保持します。fairseqが古いロー�
 OFFにした場合は準備開始前に停止します。
 RUN_TRAININGは初期状態でOFFです。学習する場合だけONにし、
 TOTAL_UPDATES（累計の更新数）とCONFIRM_TRAININGを設定してください。
-通常TT2/S2UTはそれぞれTOTAL_UPDATES=1000 / S2UT_TOTAL_UPDATES=1000を絶対上限とします。
+通常TT2/S2UTはそれぞれTOTAL_UPDATES=1000 / S2UT_TOTAL_UPDATES=3000を絶対上限とします。
 vocoderはVOCODER_TOTAL_UPDATES=10000を使用します。長期学習の自動開始はしません。
 旧4Bの補助ラベルは別のfairseq-unigram-allchars-v1へ移行し、S2UTはrecipe-v3の新しい学習runを使用します（TT2はrecipe-v2のまま）。
 既存のMel・Unit・旧checkpointを削除する必要はありません。

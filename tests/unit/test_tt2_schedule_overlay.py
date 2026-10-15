@@ -17,7 +17,7 @@ def baseline(revision):
 
 @pytest.mark.parametrize('revision', ['d70516a221199262a0fbd26637c6c5a8b86f73df', '6e311c45b1fe95f8646e41172e9dda878f53e570',
                                     '41c6ca22a7c45bd19374999bf10945d3e7ce3804',
-                                    '334c14bb9681efd3d6d73b8ab4419c4f5301d7ae', '761a87f'])
+                                    '334c14bb9681efd3d6d73b8ab4419c4f5301d7ae', '761a87f', 'f9cbe6d'])
 def test_reviewed_overlay_changes_only_five_functions_and_supports_v1(revision, tmp_path):
     original = baseline(revision)
     current = (ROOT/'src'/MONITOR).read_bytes()
@@ -55,6 +55,7 @@ def test_reviewed_overlay_changes_only_five_functions_and_supports_v1(revision, 
     assert v3.state()['stopping_metrics'] == ['loss', 'mel_loss', 'phone_loss', 'duration_loss']
     assert module['Monitor'].restore(None, v3.state(), 134, 500, tmp_path).state() == v3.state()
     assert module['absolute_update_limit']('tt2', 10000, v3.policy) == 1000
+    assert module['absolute_update_limit']('s2ut', 10000, v3.policy) == 3000
 
 
 def test_overlay_is_resumable_and_never_overwrites_changed_copies(tmp_path):
