@@ -513,6 +513,17 @@ JSON/CSV/SVGは確認済みsnapshotに含め、通常のDriveダッシュボー�
 以後は通常セル1→5で再開できます。追加セルは不要です。
 `VOCODER_TOTAL_UPDATES=10000`の絶対上限は独立して維持します（再開後に10000追加ではありません）。
 
+#### VRAM測定後に`ExistingOutputError`になった場合
+
+93b04bf以前では、launcherが保存した`batch-calibration.json`だけでも初回の
+ボコーダーが「既存の学習出力」と誤判定する場合がありました。修正版は通常セル5の
+private preflight receiptで保存先・許可済み準備ファイル名・SHA-256を照合してから開始します。
+generator/checkpoint・監視履歴・未知ファイルがあれば従来どおり保護し、
+`--overwrite`を自動追加したり、チェックを丸ごと無効化したりしません。
+更新済みlauncherを選び、同じ実験名でセル1→5を再実行してください。
+保存済みVRAM測定と入力ZIP/検証cacheは再利用します。未完のローカル出力は通常の
+auto-resumeが`.interrupted-...`に保持します。Driveのデータや既存checkpointの削除は不要です。
+
 ### セル5の常駐学習・開始前VRAM測定
 
 通常ノートブックの `TRAIN_OPTIMIZE=True` は、1 GPU・1学習プロセスをセッション中
