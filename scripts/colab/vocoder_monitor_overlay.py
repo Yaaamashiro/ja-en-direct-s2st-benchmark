@@ -13,8 +13,12 @@ from direct_s2st.progress import operation, track
 
 MODULES = {
     'src/direct_s2st/session_runtime.py': '6ba54624e2bd4f9529fb887eb452ad242f2245a802dd1e17a3b7d0dd484e46f0',
-    'src/direct_s2st/vocoders/train.py': '785c463f26bb41a51e7924f6316bd2f981d3da92349ed6c6e7746785d411bb0a',
-    'src/direct_s2st/vocoders/verification.py': '11e7694b46ae4cf07e247686102272a08ad3d6b37156083816be7997b5626649',
+    'src/direct_s2st/vocoders/train.py': (
+        '785c463f26bb41a51e7924f6316bd2f981d3da92349ed6c6e7746785d411bb0a',
+        '1afe05951bb8d5465d3dad598ed9ebd9d69deb6452523be47f4b135e8adcce5f'),  # 93b04bf
+    'src/direct_s2st/vocoders/verification.py': (
+        '11e7694b46ae4cf07e247686102272a08ad3d6b37156083816be7997b5626649',
+        '2c7abfd83b17c65efc2b569ff2c078afabe59379458ac83c3ca50a5eaeb380b8'),  # 93b04bf
 }
 FUNCTIONS = {
     'src/direct_s2st/colab.py': {
@@ -34,7 +38,7 @@ def replacements(execution, launcher):
     for name, expected in MODULES.items():
         original, new = (execution/name).read_bytes(), (launcher/name).read_bytes()
         if original != new:
-            if sha(original) != expected:
+            if sha(original) not in (expected if isinstance(expected, tuple) else (expected,)):
                 raise ValueError('unreviewed vocoder resume implementation: '+name)
             changed[name] = new
     for name, functions in FUNCTIONS.items():

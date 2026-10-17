@@ -118,6 +118,12 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     work = WORK_ROOT/name
     route_path = persistent/(name+'.launch.json')
     config = json.loads(config_path.read_text()) if config_path.is_file() else None
+    pending_vocoder = kind in ('unit', 'mel') and config is not None and snapshot is None
+    if pending_vocoder:
+        from direct_s2st.recipes import option
+        if (config.get('kind') != 'vocoder' or config.get('checkpoint') != 'generator.pt'
+                or option(config.get('command', []), '--kind') != kind):
+            raise ValueError('saved pending vocoder config belongs to another trainer; retained without overwriting')
     if snapshot and s2ut_warmup is not None:
         from direct_s2st.recipes import option
         saved_warmup = (config or {}).get('research_metadata', {}).get('warmup_updates')
@@ -211,8 +217,14 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     if kind == 's2ut' and snapshot:
         run(python, ROOT/'scripts/colab/preflight_s2ut_resume.py', '--config', config_path,
             '--work', work, '--backup', backup, '--total', str(total))
-    if snapshot:
+    if snapshot or pending_vocoder:
         print('[cell5-recovery] saved config/batch retained; cell-1 throughput options do not replace them', flush=True)
+        if pending_vocoder:
+            # A reviewed execution overlay changes PYTHONPATH, not scientific
+            # command/config paths. Rebuilding here would invalidate the saved
+            # calibration request even though no optimizer step has run yet.
+            print('[cell5-recovery] pending_startup=true candidate_updates=0; '
+                  'retaining original config and calibration for initial training', flush=True)
     else:
         if kind == 's2ut':
             run(python, '-m', 'direct_s2st.s2ut.migrate_labels', '--common-root', data/'common', '--data-root', data/'s2ut/fairseq')

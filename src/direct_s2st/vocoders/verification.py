@@ -9,13 +9,59 @@ from pathlib import Path
 import subprocess
 
 from ..hashing import sha256_file
-from ..io import atomic_write_json
+from ..io import ExistingOutputError, atomic_write_json
 from ..journal import digest
 from ..manifests.reader import read_common_manifest
 from ..preparation import Checkpoints, checkpoint_map, file_stamp
 from ..progress import operation
 from ..s2ut.extract_units import load_unit_file
 from ..s2ut.unit_storage import records, sequence, stamp
+
+
+INITIAL_METADATA = frozenset(('batch-calibration.json', 'session-research-metadata.json'))
+
+
+def initial_output_files(output):
+    """Only launcher metadata may preexist at optimizer update zero.
+
+    Never treat a checkpoint, report, directory, symlink or arbitrary JSON as
+    disposable setup state. No files are deleted, renamed or overwritten here.
+    """
+    output = Path(output)
+    if output.is_symlink():
+        raise ExistingOutputError(f'vocoder output is a symlink: {output}')
+    if not output.exists():
+        return {}
+    if not output.is_dir():
+        raise ExistingOutputError(f'vocoder output is not a directory: {output}')
+    files = {}
+    for path in sorted(output.iterdir()):
+        if path.name not in INITIAL_METADATA or path.is_symlink() or not path.is_file():
+            raise ExistingOutputError(f'non-bootstrap vocoder output exists: {path}; resume its checkpoint or retain and inspect it')
+        before = sha256_file(path)
+        if not isinstance(json.loads(path.read_text(encoding='utf-8')), dict) or sha256_file(path) != before:
+            raise ValueError(f'vocoder startup metadata changed or is invalid: {path}')
+        files[path.name] = before
+    return files
+
+
+def check_output(output, *, resume=False, overwrite=False, initial_receipt=None):
+    """An explicit private preflight receipt permits metadata, never models."""
+    if resume or overwrite:
+        return
+    output = Path(output)
+    if output.is_symlink():
+        raise ExistingOutputError(f'vocoder output is a symlink: {output}')
+    if initial_receipt is None:
+        if output.exists() and (not output.is_dir() or any(output.iterdir())):
+            raise ExistingOutputError(str(output))
+        return
+    document = json.loads(Path(initial_receipt).read_text(encoding='utf-8'))
+    body = document['body']
+    if (document.get('sha256') != digest(body) or body.get('version') != 1
+            or body.get('output') != str(output.resolve())
+            or body.get('files') != initial_output_files(output)):
+        raise ExistingOutputError('vocoder initial-output receipt mismatch; existing output preserved')
 
 
 @operation('vocoder: resumable input verification')
@@ -112,10 +158,21 @@ def load_receipt(path, common_root, kind, units_root=None, *, split='train'):
 def preflight_command(command, directory, *, runner=None):
     if '-m' not in command or command[command.index('-m') + 1] != 'direct_s2st.vocoders.train':
         return command
+    initial = None
+    if '--output-root' in command and '--resume' not in command and '--overwrite' not in command:
+        output = Path(command[command.index('--output-root') + 1])
+        # The nonresident wrapper appends resume after preflight. A present
+        # generator must never receive permission to start from zero.
+        if not (output/'generator.pt').exists():
+            files = initial_output_files(output)
+            body = dict(version=1, output=str(output.resolve()), files=files)
+            initial = Path(directory)/'vocoder-initial-output.json'
+            atomic_write_json(initial, dict(body=body, sha256=digest(body)))
     receipt = Path(directory) / 'vocoder-inputs.json'
     (runner or subprocess.run)(command + ['--verify-only', '--verification-result', str(receipt)], check=True)
     if not receipt.is_file():
         raise RuntimeError('vocoder preflight did not publish its verified input receipt')
     dev_receipt = receipt.with_suffix('.dev.json')
     return command + ['--verified-inputs', str(receipt)] + (
-        ['--verified-dev-inputs', str(dev_receipt)] if dev_receipt.is_file() else [])
+        ['--verified-dev-inputs', str(dev_receipt)] if dev_receipt.is_file() else []) + (
+        ['--initial-output-receipt', str(initial)] if initial is not None else [])

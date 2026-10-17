@@ -12,7 +12,7 @@ import time
 import torch
 from torch.nn import functional as F
 
-from ..io import ExistingOutputError, atomic_write_json
+from ..io import atomic_write_json
 from ..s2ut.reduce_units import validate_units
 from .discriminators import (MultiPeriodDiscriminator, MultiScaleDiscriminator,
                              discriminator_loss, generator_loss, feature_loss)
@@ -245,6 +245,8 @@ def main():
     parser.add_argument('--verification-result', type=Path)
     parser.add_argument('--verified-inputs', type=Path)
     parser.add_argument('--verified-dev-inputs', type=Path)
+    parser.add_argument('--initial-output-receipt', type=Path,
+                        help='private launcher receipt for metadata-only startup; never permits replacing a checkpoint')
     args = parser.parse_args()
     if min(args.max_updates, args.segment_frames, args.batch_size, args.prefetch_factor, args.save_interval_updates) < 1 or args.num_workers < 0 or args.learning_rate <= 0:
         parser.error('updates, segment frames and learning rate must be positive')
@@ -257,7 +259,7 @@ def main():
     validate_config(args.kind, config, sample_rate=spec['sample_rate'], mel=spec)
     if spec['normalize_volume'] or spec['normalization'] != 'none' or spec['log_transform'] != 'natural_log_clamp_eps':
         raise ValueError('fitting requires unnormalized natural-log mel')
-    from .verification import verify_inputs, save_receipt, load_receipt
+    from .verification import verify_inputs, save_receipt, load_receipt, check_output
     from .monitor import settings_from_env, restore_monitor, validation_identity, reject_overlap
     policy, guard = settings_from_env()
     checkpoint = args.output_root / 'generator.pt'
@@ -272,8 +274,8 @@ def main():
             save_receipt(args.verification_result.with_suffix('.dev.json'), dev_inputs)
         save_receipt(args.verification_result, training_inputs)
         return
-    if args.output_root.exists() and any(args.output_root.iterdir()) and not (args.resume or args.overwrite):
-        raise ExistingOutputError(str(args.output_root))
+    check_output(args.output_root, resume=args.resume, overwrite=args.overwrite,
+                 initial_receipt=args.initial_output_receipt)
     if args.resume and not checkpoint.is_file():
         raise FileNotFoundError(checkpoint)
     verified = (load_receipt(args.verified_inputs, args.common_root, args.kind, args.units_root)

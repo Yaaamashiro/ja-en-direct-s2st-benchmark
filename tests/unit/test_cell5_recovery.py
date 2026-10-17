@@ -216,3 +216,49 @@ def test_new_native_run_records_code_and_environment_then_reuses_them(tmp_path, 
                        {'s2ut_warmup_updates':1000}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
     assert restored_environments == [None, expected, expected]  # Reject before setup/download.
     assert before == (path.read_bytes(), marker.read_bytes())
+
+
+@pytest.mark.parametrize('kind', ['unit', 'mel'])
+def test_failed_vocoder_startup_retains_config_calibration_and_route_across_overlay(tmp_path, monkeypatch, kind):
+    import os
+    monkeypatch.setattr(os, 'environ', dict(os.environ))
+    import vocoder_monitor_overlay
+    monkeypatch.setattr(session, 'WORK_ROOT', tmp_path/'work')
+    monkeypatch.setattr(session, 'RUNTIME_ROOT', tmp_path/'runtime')
+    session.RUNTIME_ROOT.mkdir()
+    environment = session.RUNTIME_ROOT/'environment.json'
+    environment.write_text('{"packages":"fixture==1"}')
+    code = 'b'*40
+    monkeypatch.setattr(session, 'git', lambda repo, *args: code)
+    execution = tmp_path/'execution'/code
+    monkeypatch.setattr(session, 'checkout', lambda *a: execution)
+    monkeypatch.setattr(session, 'ensure_environment', lambda *a, **k: tmp_path/'python')
+    monkeypatch.setattr(vocoder_monitor_overlay, 'prepare', lambda path, *a: path)
+    cfg = dict(kind='vocoder', checkpoint='generator.pt', runtime={'cache_gb':8},
+        command=['{python}', '-m', 'direct_s2st.vocoders.train', '--kind', kind,
+                 '--config', str(execution/'configs/vocoder'/f'{kind}-generator.json')],
+        identity_files=['/content/s2st-runtime/environment.json'])
+    builds = []
+    def build(*a, **kw):
+        builds.append(a)
+        return json.dumps(cfg)
+    monkeypatch.setattr(session.subprocess, 'check_output', build)
+    calls = []
+    name = kind+'-training-experiment-001'
+    session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', kind, name,
+        'fisher', {}, 10000, 0, confirm=True, run=lambda *a: calls.append(a))
+    config_path, route_path = tmp_path/(name+'.json'), tmp_path/(name+'.launch.json')
+    calibration = tmp_path/'checkpoints'/name/'batch-calibration.json'
+    calibration.parent.mkdir(parents=True)
+    calibration.write_text('{"selected":16,"completed_measurements_preserved":true}')
+    before = config_path.read_bytes(), route_path.read_bytes(), calibration.read_bytes()
+    # New reviewed launcher overlays the old trainer after its initial failure.
+    overlay = execution/'.vocoder-overlays/new-reviewed-runtime'
+    monkeypatch.setattr(vocoder_monitor_overlay, 'prepare', lambda *a: overlay)
+    session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', kind, name,
+        'fisher', {'batch_size':999}, 10000, 0, confirm=True, run=lambda *a: calls.append(a))
+    assert len(builds) == 1
+    assert before == (config_path.read_bytes(), route_path.read_bytes(), calibration.read_bytes())
+    assert str(overlay/'src') in os.environ['PYTHONPATH']
+    assert all('--auto-resume' in c and '--overwrite' not in c for c in calls)
+    assert not list((tmp_path/'checkpoints'/name).glob('*/snapshot.json'))

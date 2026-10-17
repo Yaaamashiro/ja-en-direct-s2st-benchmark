@@ -194,12 +194,13 @@ def test_notebook_defaults_and_normal_training_hook():
     assert 'from vocoder_monitor_overlay import prepare' in (ROOT/'scripts/colab/training_session.py').read_text(encoding='utf-8')
 
 
-def test_reviewed_overlay_changes_only_reviewed_sources(tmp_path):
+@pytest.mark.parametrize('baseline', ['6716b700bb80832d4cfc2f5d323f6af4133be868',
+                                     '93b04bf75e9096af869aa204e3efa43c42cf6d9a'])
+def test_reviewed_overlay_changes_only_reviewed_sources(tmp_path, baseline):
     spec = importlib.util.spec_from_file_location('vocoder_monitor_overlay', ROOT/'scripts/colab/vocoder_monitor_overlay.py')
     overlay = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(overlay)
     # Fixture source from an immutable pre-feature commit (not moving HEAD).
-    baseline = '6716b700bb80832d4cfc2f5d323f6af4133be868'
     git = ['git', '-c', 'safe.directory='+ROOT.as_posix()]
     if subprocess.run(git+['cat-file', '-e', baseline+'^{commit}'], cwd=ROOT, capture_output=True).returncode:
         pytest.skip('reviewed baseline is unavailable in this shallow/archive checkout')
@@ -302,16 +303,33 @@ def test_trainer_cold_resume_is_bitwise_and_stopped_checkpoint_no_more_steps(tmp
     config = tmp_path/'generator.json'
     config.write_text(json.dumps(dict(upsample_rates=[320], mel=dict(sample_rate=16000,
         n_fft=8, normalize_volume=False, normalization='none', log_transform='natural_log_clamp_eps'))))
-    def run(work, limit, resume=False):
-        monkeypatch.setattr(sys, 'argv', ['train', '--kind', kind, '--config', str(config),
+    def run(work, limit, resume=False, calibrated=False):
+        command = ['train', '--kind', kind, '--config', str(config),
             '--common-root', str(common), '--units-root', str(units), '--output-root', str(work),
-            '--device', 'cpu', '--max-updates', str(limit), '--segment-frames', '4']+(['--resume'] if resume else []))
+            '--device', 'cpu', '--max-updates', str(limit), '--segment-frames', '4']+(['--resume'] if resume else [])
+        if calibrated:
+            # Real startup sequence: calibration metadata -> verify-only child
+            # -> private bootstrap receipt -> fresh trainer, with no --overwrite.
+            from direct_s2st.vocoders.verification import preflight_command
+            work.mkdir(parents=True)
+            metadata = work/'batch-calibration.json'
+            metadata.write_text('{"selected":1,"fixture":true}')
+            before = metadata.read_bytes()
+            def preflight(arguments, **kwargs):
+                monkeypatch.setattr(sys, 'argv', ['train']+arguments[3:])
+                train.main()
+            command = ['train']+preflight_command(['python', '-m', 'direct_s2st.vocoders.train']+command[1:],
+                tmp_path/(work.name+'-preflight'), runner=preflight)[3:]
+            assert metadata.read_bytes() == before
+        monkeypatch.setattr(sys, 'argv', command)
         train.main()
+        if calibrated:
+            assert metadata.read_bytes() == before
         return torch.load(work/'generator.pt', weights_only=True)
     continuous, resumed = tmp_path/'continuous', tmp_path/'resumed'
-    a = run(continuous, 20)
+    a = run(continuous, 20, calibrated=True)
     assert a['updates'] == 3 and a['monitor']['stopped']
-    run(resumed, 2)
+    run(resumed, 2, calibrated=True)
     at_cap = len(steps)
     assert run(resumed, 2, resume=True)['updates'] == 2
     assert len(steps) == at_cap  # Absolute max, not two additional updates.
