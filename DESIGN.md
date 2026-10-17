@@ -182,6 +182,32 @@ generation batch wall timeのサンプル平均をS2UTのruntimeに保存する�
 
 実行・未実行の境界と残課題は [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) に記載する。
 
+## TT2の実験的安定化recipe（2026-10-15）
+
+ユーザーの診断・修正承認に基づき、`stabilized_seconds_v1`を新規TT2 run限定の
+paper_practical条件として追加する。duration head/発話長MSEを秒単位とし、target hopで
+frame座標へ換算、80ms/tokenで初期化する。LR上限0.0003/warmup400を最初から固定する。
+Fisher寸法、loss係数1/10/1、Adam/L2、実効batch1024、監視/best/上限1000は維持する。
+これは公式TT2の未公開実装との一致や日英翻訳品質の改善を保証しない。
+旧frames方式を既定に残し、旧checkpointの新設定への自動移植・再解釈を禁止する。
+prepare成果物は再利用、通常セル5のrun選択・環境/optimizer/RNG復元・VRAM測定を使用する。
+S2UTとvocoderは変更しない。検証範囲と数値は別途実測結果として区別して報告する。
+
+### 評価専用postnet較正（2026-10-17）
+
+`stabilized_pooled_v2`は別の新規paper_practical runに限定する。v1の学習objective・
+optimizer・logical batchを保持し、検証前にtrain IDのSHA256順で固定128件（不足時は全train）を
+batch 4でteacher-forced eval実行する。raw MelをCPUへ一時保存してpostnetのみを再生し、
+5層を順にvalid frameのpooled平均・不偏分散で較正する。dev/testによるfitは禁止。
+較正と検証の終了/例外時に全学習buffer・RNG・module modeを復元する。
+較正値は更新数・parameter SHA・train IDと共にnative checkpoint内へ格納する。
+optimizer再開は従来のnative bufferを使い、推論のみ対応する較正値を厳密照合して適用する。
+較正のない中間lastは推論を拒否し、検証済みbestを使用する。最終updateでも較正するが、
+監視の評価間隔（通常10）は変更しない。
+旧recipeへの自動適用や過去dev履歴の変更は禁止。通常セル5で新規/再開を選択する。
+初版はsingle process/FP32限定。少数の実例による局所試験であり、128件や全コーパスでの
+翻訳品質・汎化・原論文との一致を保証するものではない。
+
 ## S2T→TTS baseline
 
 `system_id=s2t_tts`。Whisper large-v3のJapanese→English translationを使い、

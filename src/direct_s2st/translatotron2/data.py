@@ -92,6 +92,7 @@ def source_features(path, spec):
 class PreparedDataset:
     def __init__(self, root, split='train'):
         self.root = Path(root)
+        self.split = split
         self.rows = read_table(self.root / f'{split}.tsv')
         labels = read_table(self.root / f'target_phoneme/{split}.tsv')
         self.labels = {row['id']: row['tgt_text'] for row in labels}

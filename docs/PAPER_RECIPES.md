@@ -7,6 +7,12 @@ TT2は公開された実効バッチ、S2UTはGPUごとのtoken予算も維持�
 コーパスは変更せず、既存16 kHz/80-bin target MelとUnit抽出結果を再利用する。
 smokeは小型TT2・2更新の配線確認で、品質の証拠ではない。
 
+TT2の追加選択肢`TT2_RECIPE=stabilized_seconds_v1`は明示的な安定化実験。
+秒単位duration MSE・80ms/token初期化・peak LR0.0003/warmup400を使う新規practical runで、
+実効batch1024を維持する。原論文のduration単位・初期化との一致は未確認。
+旧frame recipeやcheckpointを再解釈せず、通常セル1→5で別名保存する。
+詳細・再開手順は[COLAB.md](COLAB.md#tt2の安定化試験recipe新規run限定)。
+
 ## 選択項目
 
 | 設定 | 通常値 | 変更時の扱い |
@@ -35,7 +41,8 @@ practicalでも通常はFisherモデル・LR・warmup・L2を保持する。
 例外としてS2UTの明示的な`S2UT_WARMUP_UPDATES=400/500/1000`を許可し、論文の10,000との差を記録する。
 ノートブックではこの短縮を既定にして新しい学習名を使う。TT2の既存checkpoint向け短縮はRESUME.md参照。
 通常セルの既定は両モデルとも400 warmup・10更新ごとのdev評価・patience 5・最低改善率1%。
-TT2の停止判定は合計dev loss、S2UTはUnit/合計dev lossの両方の改善不足を使う。
+policy v3ではTT2の全4種、S2UTの全5種のDev lossを独立anchorで監視する。
+いずれも自身のanchorから1%以上改善しない評価が5回連続すれば停止する。
 これらは独自の短縮/早期終了条件であり、原論文の学習量やBLEUでのモデル選択の再現ではない。
 
 ## 共通の開始前VRAM測定（Colabセル5）
@@ -205,6 +212,15 @@ run(sys.executable, REPO / 'scripts/colab/use_paper_recipe.py',
 データ、旧config、旧checkpointは削除しない。旧checkpointからの学習再開はしない。
 
 ## 根拠と検証範囲
+
+`stabilized_pooled_v2` is another explicitly experimental fresh practical TT2
+recipe, not a correction claimed by the paper. It inherits seconds-v1 training
+and substitutes train-only pooled postnet running statistics for evaluation and
+inference. Native optimizer/model buffers are retained for exact training resume;
+the checkpoint embeds separately bound evaluation statistics. Train subset128,
+batch4, five layerwise valid-frame pooled moments, single-process FP32, hard
+cap1000. No old run's history, best selection metric or paper-exact defaults are
+reinterpreted. Small local evidence is not a full-corpus translation-quality result.
 
 [TT2 Appendix A・§5](https://arxiv.org/html/2107.08661v5)、
 [S2UT Appendix A・Table 4](https://aclanthology.org/2022.acl-long.235.pdf#page=12)、

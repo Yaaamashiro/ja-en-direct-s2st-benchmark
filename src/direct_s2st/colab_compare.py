@@ -62,7 +62,10 @@ def stage_direct_artifacts(runs_root, experiment, trained_runs, vocoder_roots,
         if (system == 's2ut' and s2ut_vocoder_mode == 'paper') or (system == 'translatotron2' and tt2_vocoder_mode == 'griffin_lim'):
             continue
         for name in ('generator.pt', 'config.json'):
-            stage_file(Path(vocoder_roots[kind])/name, output/f'vocoder-{kind}'/name)
+            root = Path(vocoder_roots[kind])
+            from .vocoders.monitor import select_generator
+            source = select_generator(root) if name == 'generator.pt' else root/name
+            stage_file(source, output/f'vocoder-{kind}'/name)
 
 
 def _validate_modes(tt2, s2ut):

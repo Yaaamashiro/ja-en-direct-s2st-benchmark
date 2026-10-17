@@ -379,6 +379,9 @@ class Monitor:
 
 def early_stop_result(work, kind, completed):
     """Accept termination only with a published checkpoint-aligned monitor record."""
+    if kind == 'vocoder':
+        from ..vocoders.monitor import early_stop_result as vocoder_result
+        return vocoder_result(work, completed)
     path = Path(work)/'training-monitor.json'
     if kind not in ('tt2', 's2ut') or not path.is_file():
         return None

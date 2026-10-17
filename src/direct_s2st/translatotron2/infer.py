@@ -45,6 +45,8 @@ def main():
     started = time.perf_counter()
     model, state = load_checkpoint(checkpoint, device=args.device)
     model.eval()
+    from .postnet_calibration import apply_checkpoint
+    apply_checkpoint(model, state)
     spec_path = args.data_root / 'mel-spec.json'
     if state['data_fingerprint'].get('mel-spec.json') != sha256_file(spec_path):
         raise ValueError('checkpoint mel specification mismatch')
