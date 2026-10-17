@@ -1,5 +1,67 @@
 # Google Colab：テストと通常実験
 
+## TT2の安定化試験recipe（新規run限定）
+
+`TT2_RECIPE='stabilized_seconds_v1'` をセル1で明示選択すると、通常セル5から
+新しいTT2 runを開始する。既定の`legacy_frames`は旧checkpointの意味を維持する。
+新recipeは自動的に`paper_practical`として記録され、論文完全再現とは扱わない。
+
+- duration headの出力・発話長MSEを秒単位に統一。初期値は音素列の各音響tokenあたり80ms。
+  upsampling・Gaussian幅・推論のmax_framesはフレーム単位で、実際のtarget hopから換算する。
+- peak LR=0.0003、warmup=400を初回から固定。`TT2_WARMUP_UPDATES=400`を使用し、
+  途中短縮のoverlayは適用しない。再開時のLR/warmup/objective変更は拒否する。
+- Fisherのモデル寸法、Adam/L2、loss係数1/10/1、実効batch1024、10更新ごとの全dev評価、
+  policy v3、best=Dev total loss、絶対上限1000は維持する。
+- 開始前VRAM測定は新recipeそのものを使い、同時処理数×蓄積回数=1024を維持する。
+  VRAM上限まで埋めることや最大速度を保証するものではない。
+
+使用順序は、更新版ノートブックのセル1で`TRAIN_TARGET='tt2'`、
+`TT2_RECIPE='stabilized_seconds_v1'`、`TT2_WARMUP_UPDATES=400`、
+`TRAIN_RUN_NAME=''`、`RUN_TRAINING=True`、`CONFIRM_TRAINING=True`を設定してセル5。
+既存のlauncher pinがある場合は、**push後に確定した対応40桁SHA**を
+`TRAIN_CODE_REVISION`へ指定する（未pushの変更はColabから取得できない）。
+
+保存名は`tt2-training-実験名-paper_practical-stabilized-seconds-v1`。
+自動選択は同じTT2 recipe内でのみ行い、旧frame runを誤って再開しない。
+旧run名を明示指定すると不一致で停止する。切断後は同じ設定でセル1→5。
+4A/4B・音声・Mel・音素の再作成、旧runの削除、追加の再開セルは不要。
+duration/total lossの単位・尺度が旧runと違うため、異なるrecipeのloss値を直接比較しない。
+旧runを再開する場合は`legacy_frames`と元の設定・run名を使う。
+S2UTおよびvocoderの学習条件は変更しない。
+
+これはPC診断に基づく実験的な安定化案。TT2論文はdurationの単位・初期化の詳細を
+確定できるほど記述していないため、秒単位を「公式実装の修正」とは主張しない。
+実データ2件の短いCPU検証は、全コーパスの収束・翻訳品質やA100上の性能の証明ではない。
+
+## 任意：評価専用のpostnet較正を使う新規TT2
+
+セル1の`TT2_RECIPE='stabilized_pooled_v2'`は、上記v1と同じ学習objective・初期化・
+LR/warmup・実効batch1024を使い、**検証・推論時だけ**postnetの統計を較正する別recipe。
+既定は変更しない。モデルの重みを修復したり、phone_lossを直接改善する処理ではない。
+
+- train IDのSHA256順で最大128件を固定選択し、batch4でteacher-forced evalのraw Melを取得。
+  5層を順に、paddingを除く全frameの平均・不偏分散で較正する。dev/testはfitに使わない。
+  最初のraw MelだけCPUに一時保持し、encoder/decoderを5回実行する方式にはしない。
+- 検証後は学習用buffer・RNG・module modeを復元する。optimizer・勾配は変更しない。
+  較正値は更新数・parameter SHA・固定train IDと共にcheckpoint内へ保存するため、
+  通常のsnapshot/セル5の再開に含まれる。学習再開にはnativeのbufferを使用する。
+- single-process、FP32限定。`TT2_WARMUP_UPDATES=400`、`TRAIN_PRECISION='default'`を維持。
+  bestは較正後のDev total lossの最小値で選ぶ。評価は10更新ごと、停止policy v3、
+  上限1000は変更しない。最終updateは較正を保存するが評価間隔外にdev評価を追加しない。
+- 推論は選択checkpointに埋め込まれた較正値を照合して使用する。未較正の途中lastや
+  別の重みの較正値は拒否する。通常は検証済み`checkpoint_best.pt`を選ぶ。
+
+セル1で`TRAIN_TARGET='tt2'`、`TT2_RECIPE='stabilized_pooled_v2'`、`TRAIN_RUN_NAME=''`を選択し、
+通常セル5を実行する。保存名は`tt2-training-実験名-paper_practical-stabilized-pooled-v2`。
+切断後は**同じ設定でセル1→5**。既存v1/legacy runの自動移植はせず、過去lossも書き換えない。
+対応コードが未pushの間はColabでは利用できない。push後の対応40桁SHAを`TRAIN_CODE_REVISION`へ指定する。
+4A/4Bの成果物はそのまま使い、旧runは保存する。S2UTは変更しない。
+
+少数の実例によるCPU試験ではMelの改善と学習更新への非干渉を確認したが、
+128件較正・Fisher寸法・全コーパス・A100・翻訳品質は未検証。論文再現ではなく実験条件の変更である。
+較正によってDev lossの測定条件が変わるため、旧runの未較正Dev値との大小を
+そのままモデル重みの品質改善とは解釈しない。旧history・anchor・bestの書換えは行わない。
+
 ## セル5の統合再開
 
 更新済みノートブックでは、切断後は同じ実験名でセル1（設定）→セル5を実行する。
@@ -421,6 +483,36 @@ HuBERTの実バッチ数・次の上限・空きVRAM、終了時のcheckpoint保
 CLIでは対応する環境変数`S2ST_PREP_WORKERS`、`S2ST_HUBERT_BATCH_MAX`、
 `S2ST_PREP_RECHECK=1`を指定できます。`S2ST_PREP_ADAPTIVE=0`はCPUワーカーを上限に固定します。
 
+### Unit / Mel ボコーダーの早期終了
+
+通常セル1→5で`VOCODER_MONITOR=True`（既定）を使用します。
+`VOCODER_MONITOR_INTERVAL=10`、`VOCODER_MONITOR_PATIENCE=5`、
+`VOCODER_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.01`です。
+MelはdevのMel再構成L1、Unitはそれに加えてduration MSE（log1p run length）を監視します。
+各指標の独立anchorからいずれか1%以上改善すればカウンターを0に戻し、
+全指標が5評価連続で改善しなければ停止します。GANのdiscriminator/adversarial/feature/total
+lossは敵対学習で単調減少を期待できないため停止指標には使いません。従来のtrain lossログは維持します。
+
+`VOCODER_MONITOR_START_UPDATES=400`までは停止せず、各dev lossの最小値をanchorにします。
+これは停止判定のguardであり、**学習率warmupを新設する設定ではありません**。
+dev全件から固定の中央segment（既定32 frames）を評価し、発話ごとの平均を取ります。
+Unitのdurationは発話全体のoriginal Unitを使用します。testは使用せず、devでoptimizer更新しません。
+乱数・モデルbuffer・train/eval状態を評価前後で復元します。
+音声の自然さ、翻訳精度、MOSを直接測る指標ではありません。
+
+再開用は従来どおり`generator.pt`（generator/discriminatorと両optimizer、乱数）です。
+監視状態・dev入力identityも同梱し、切断再開でanchor/patience/historyをリセットしません。
+最良のdev Mel L1のfull checkpointを`checkpoints/checkpoint_best.pt`へ別保存し、比較用音声生成は
+SHA確認済みbestを使用します。best未作成の旧runはlastを使用します。
+JSON/CSV/SVGは確認済みsnapshotに含め、通常のDriveダッシュボードにも公開します。
+
+監視なしの既存ボコーダーrunには、対応する新launcherが検証済み旧コードへ監視のみをoverlayし、
+保存済みoptimizer/configを維持して、再開した更新以降から記録します。過去lossは捏造しません。
+未知の旧実装や監視開始後のpolicy/guard/dev入力変更は拒否します。設定OFFでも保存済み監視は継承します。
+初回に最新launcherを明示選択する必要がある場合は`TRAIN_CODE_REVISION`へ対応する完全SHAを指定します。
+以後は通常セル1→5で再開できます。追加セルは不要です。
+`VOCODER_TOTAL_UPDATES=10000`の絶対上限は独立して維持します（再開後に10000追加ではありません）。
+
 ### セル5の常駐学習・開始前VRAM測定
 
 通常ノートブックの `TRAIN_OPTIMIZE=True` は、1 GPU・1学習プロセスをセッション中
@@ -465,7 +557,7 @@ TT2/vocoderの試運転ログは最後のoptimizer更新も数えて完了表示
 - `TRAIN_CACHE_GB=8`: 旧方式のローカルLRUキャッシュ上限。新しいDrive安全モードでは必要な音声とMel ZIPを先に全てローカルへ取り込むため、全データを8GiBに制限する設定ではありません。ローカル容量不足時は学習開始前に停止し、Driveへの読込みに黙って戻りません。
 - `TRAIN_SAVE_INTERVAL=1`: 通常用のoptimizer更新単位の保存間隔。最終更新・時間予算到達時にも保存します。ローカル固定コピーは同期、その後のDriveコピー・SHA-256検証は別スレッドで1件ずつ実行。未確認コピーは最大2件で、遅いDriveには待ち合わせます。
 - `TRAIN_BACKUP_MIN_SECONDS=600`: 常駐学習でDriveへ転送する最短間隔。ローカルの50更新ごとの保存は維持し、最初・最終・時間予算到達時の保存は間隔によらず転送します。強制切断では前の`durable_updates`から再開し、未確認更新を再実行します。
-- `TRAIN_BACKUP_MAX_GB=100`: そのrunのDriveバックアップ総容量上限（100GiB）。旧snapshot・未完コピーも数えます。上限到達時は既存復旧点を削除せず停止します。必要なDrive空き容量を確認したうえで明示的に増やしてください。
+- `TRAIN_BACKUP_MAX_GB=1024`: そのrunのDriveバックアップ総容量上限（1024GiB = 1TiB）。旧snapshot・未完コピーも数えます。予約容量ではなく上限です。上限到達時は既存復旧点を削除せず停止します。Drive全体の空き容量も別に必要です。明示的に設定済みの値は自動変更しません。
 - `TT2_MONITOR=True`: policy v3で全4指標を監視。`TT2_MONITOR_INTERVAL=10`更新ごとに全devを評価し、いずれかが自身のanchorから1%以上改善すれば共有counterをリセット。全指標が改善不足の評価が`TT2_MONITOR_PATIENCE=5`回連続すれば終了。best保存はDev total lossの絶対最小値で選択。warmup既定400中は停止せず、各指標の最小値をanchorにする。v3の絶対上限は1000更新で、学習率・バッチ・loss定義/重みは変更しない。
 - TT2監視は`training-monitor.json`（全履歴・policy・指標別anchor/best・共有カウンタ・条件変更履歴）、CSV、SVGをローカルrunに保存し、確認済み学習snapshotへ同梱。`checkpoints/checkpoint_best.pt`はDev total loss最小のモデルとoptimizer、`checkpoint_last.pt`は再開位置。切断後はsnapshotを復元すると履歴・最良モデル・カウンタが戻る。旧checkpointからの監視初回有効化はその更新から履歴を開始し、過去の指標を捏造しない。既存v1/v2からv3への明示採用は記録済みDev最小値をanchorとし、将来の評価だけに適用する。詳細はセル5の統合再開節を参照。
 - 確認済みsnapshotの公開後、`PERSISTENT/checkpoints/<実際のrun名>/training-monitor.svg`・CSV・JSONへ閲覧用コピーを保存する。Driveからグラフを開けるため、学習セルの流れるログを追う必要はない。履歴のJSONは最後の永続保存まで、グラフ/CSVは直近の評価時点までを表示する。閲覧用コピーにI/Oエラーが出ても検証済みsnapshotは保持し、監視データはsnapshotから復元可能。

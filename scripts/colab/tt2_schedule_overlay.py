@@ -9,6 +9,7 @@ from direct_s2st.progress import operation, track
 
 MONITOR = 'direct_s2st/translatotron2/monitor.py'
 REVIEWED = {
+    'aa321ce681dc526ef7d79d1a8f64cba6d39b89350a7722c9ea97d76b69cb6186': False,  # v3 before vocoder dispatch
     '97b631236281ba33b8a5520736e80ba0c6031f4cfe20ac676a839d4072a95a79': True,  # d70516a
     '7510b3efec45dab148b2f83a108e2e22d07cb07fddb68970756764a01124542d': False,  # 6e311c4
     '6648895bb16a4f102020355f83b930c290050b6442f0b94b81b9a72106cf92fb': False,  # d55102b..41c6ca2

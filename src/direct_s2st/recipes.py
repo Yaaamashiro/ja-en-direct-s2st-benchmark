@@ -112,6 +112,16 @@ def training_metadata(command, system, mode, vocoder_mode, *, world_size=1):
         fairseq_revision=FAIRSEQ_REVISION)
     if system == 's2ut' and result['warmup_updates'] != 10000:
         result['deviations'].append(f"S2UT warmup shortened from paper 10000 to {result['warmup_updates']} optimizer updates")
+    if tt2:
+        from .translatotron2.recipe import LEGACY, POOLED, STABILIZED_RECIPES, recipe_metadata
+        recipe = value('--tt2-recipe', LEGACY)
+        result.update(recipe_metadata(recipe))
+        if recipe in STABILIZED_RECIPES:
+            result['deviations'].extend([
+                'Experimental stabilized_seconds_v1: seconds duration objective and 80-ms per-phone initialization; not specified by the TT2 paper',
+                'Practical peak LR 0.0003 and fixed warmup 400 instead of Fisher 0.0042/10000; requires fresh training'])
+        if recipe == POOLED:
+            result['deviations'].append('Experimental eval-only postnet pooled statistics fitted to a fixed train-only subset; not a paper recipe; no demonstrated translation-quality gain')
     return result
 
 

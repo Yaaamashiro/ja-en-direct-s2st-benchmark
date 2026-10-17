@@ -32,6 +32,8 @@ def _main():
     parser.add_argument('--update-freq', type=int)
     parser.add_argument('--l2-regularization', type=float)
     parser.add_argument('--reproduction-mode', choices=['smoke', 'paper_exact', 'paper_practical'])
+    from .recipe import RECIPES, LEGACY, POOLED, STABILIZED_RECIPES, STABILIZED_LR, STABILIZED_WARMUP
+    parser.add_argument('--tt2-recipe', choices=RECIPES, default=LEGACY)
     parser.add_argument('--vocoder-mode', choices=['griffin_lim', 'hifigan'], default='griffin_lim')
     parser.add_argument('--validate-interval', type=int, default=0)
     parser.add_argument('--validation-limit', type=int)
@@ -46,21 +48,34 @@ def _main():
     fisher = args.model_size in ('fisher', 'reference')
     args.reproduction_mode = args.reproduction_mode or ('paper_exact' if fisher else 'smoke')
     paper = args.reproduction_mode != 'smoke'
+    from .recipe import validate_recipe, recipe_model
+    validate_recipe(args.tt2_recipe, args.reproduction_mode)
+    if args.tt2_recipe == POOLED:
+        args.max_updates = min(args.max_updates, 1000)
     if paper and not fisher:
         parser.error('paper recipe requires model-size fisher (reference is its alias)')
     recipe = load_config(repository / 'configs/translatotron2/train-fisher.yaml')['training']['command'] if fisher else []
     for field, flag, fallback, convert in [('learning_rate', '--learning-rate', 1e-4, float),
         ('warmup_updates', '--warmup-updates', 0, int), ('l2_regularization', '--l2-regularization', 0.0, float)]:
         expected = convert(option(recipe, flag, fallback))
+        if args.tt2_recipe in STABILIZED_RECIPES:
+            expected = dict(learning_rate=STABILIZED_LR, warmup_updates=STABILIZED_WARMUP,
+                            l2_regularization=1e-6)[field]
         if getattr(args, field) is None:
             setattr(args, field, expected)
         elif paper and getattr(args, field) != expected:
             parser.error('paper recipe cannot change Fisher optimizer settings: ' + flag)
     world_size, rank = int(os.environ.get('WORLD_SIZE', '1')), int(os.environ.get('RANK', '0'))
-    args.update_freq = tt2_batch(args.reproduction_mode, args.batch_size, args.update_freq, world_size)
+    # Practical objective, but stabilized retains the logical batch 1024.
+    args.update_freq = tt2_batch('paper_exact' if args.tt2_recipe in STABILIZED_RECIPES
+                                else args.reproduction_mode,
+                                args.batch_size, args.update_freq, world_size)
     if args.reproduction_mode == 'paper_exact' and (os.environ.get('S2ST_TRAIN_ADAPTIVE_BATCH') == '1' or
             os.environ.get('S2ST_TRAIN_PRECISION', 'default') not in ('default', 'fp32')):
         parser.error('paper_exact forbids adaptive batch-statistics/mixed-precision changes')
+    if args.tt2_recipe == POOLED and (world_size != 1 or
+            os.environ.get('S2ST_TRAIN_PRECISION', 'default') not in ('default', 'fp32')):
+        parser.error('pooled postnet recipe requires single-process FP32')
     if args.num_workers < 0 or args.prefetch_factor < 1:
         parser.error('num-workers must be nonnegative and prefetch-factor positive')
     if args.validation_limit is not None and args.validation_limit < 1:
@@ -94,6 +109,11 @@ def _main():
         identity['training'].update(reproduction_mode=args.reproduction_mode, architecture_preset='fisher',
             vocoder_mode=args.vocoder_mode, source_feature_config=dataset.source_spec,
             target_feature_config=dataset.spec, effective_batch_size=args.batch_size*args.update_freq*world_size)
+    if args.tt2_recipe != LEGACY:
+        identity['training']['tt2_recipe'] = args.tt2_recipe
+    if args.tt2_recipe == POOLED:
+        from .postnet_calibration import contract
+        identity['training']['postnet_calibration'] = contract(dataset)
     from ..train_runtime import Timings, Microbatches, enabled, pin_batch, stopping, checkpoint_saved
     if os.environ.get('S2ST_TRAIN_PRECISION', 'default') != 'default':
         identity['training']['precision'] = os.environ['S2ST_TRAIN_PRECISION']
@@ -104,11 +124,24 @@ def _main():
     config = getattr(ModelConfig, preset)()
     config.input_dim = getattr(dataset, 'source_spec', dataset.spec)['n_mels']
     config.mel_dim = dataset.spec['n_mels']
+    config = recipe_model(config, args.tt2_recipe, dataset.spec)
+    if args.tt2_recipe in STABILIZED_RECIPES:
+        print(f'[training-recipe] recipe={args.tt2_recipe} mode=paper_practical '
+              f'duration_unit=seconds hop_seconds={config.duration_hop_seconds} '
+              f'initial_duration_seconds={config.duration_initial_value} '
+              f'peak_lr={args.learning_rate} fixed_warmup={args.warmup_updates} '
+              f'effective_batch={args.batch_size*args.update_freq*world_size} '
+              'legacy_checkpoint_migration=False', file=sys.stderr, flush=True)
     completed = 0
     if args.restore_file:
         model, state = load_checkpoint(args.restore_file, device=args.device,
                                         expected_fingerprint=identity, restore_rng=True)
-        if state['model_config'] != asdict(config) or state['tokens'] != dataset.tokens:
+        # Canonical defaults load old checkpoints without changing their frame
+        # semantics. A seconds objective is a different fingerprint/new run.
+        saved_config = dict(state['model_config'])
+        if state['format'] == 'direct-s2st-tt2-v1':
+            saved_config['architecture_revision'] = 1
+        if ModelConfig(**saved_config) != config or state['tokens'] != dataset.tokens:
             raise ValueError('resume configuration/vocabulary mismatch')
         completed = state['updates']
     else:
@@ -118,6 +151,12 @@ def _main():
         optimizer.load_state_dict(state['optimizer'])
     from .monitor import resume_schedule
     requested_warmup = os.environ.get('S2ST_TT2_PRACTICAL_WARMUP')
+    if args.tt2_recipe in STABILIZED_RECIPES:
+        if requested_warmup is not None and int(requested_warmup) != args.warmup_updates:
+            raise ValueError('stabilized recipe schedule is immutable; start a new run to change warmup')
+        if args.restore_file and state.get('schedule_transition'):
+            raise ValueError('stabilized recipe cannot inherit a legacy schedule transition')
+        requested_warmup = None
     effective_warmup, schedule_transition = resume_schedule(
         args.warmup_updates, completed, state if args.restore_file else None,
         int(requested_warmup) if requested_warmup is not None else None)
@@ -132,6 +171,8 @@ def _main():
         command = ['--model-size', 'fisher', '--learning-rate', str(args.learning_rate),
                    '--warmup-updates', str(args.warmup_updates), '--l2-regularization', str(args.l2_regularization),
                    '--batch-size', str(args.batch_size), '--update-freq', str(args.update_freq)]
+        if args.tt2_recipe != LEGACY:
+            command += ['--tt2-recipe', args.tt2_recipe]
         metadata = training_metadata(command, 'tt2', args.reproduction_mode, args.vocoder_mode, world_size=world_size)
         metadata['precision'] = os.environ.get('S2ST_TRAIN_PRECISION', 'default')
         if metadata['precision'] == 'default':
@@ -227,6 +268,8 @@ def _main():
         print(f'[training-limit] completed={completed} absolute_max_update={args.max_updates} optimizer_steps=0',
               file=sys.stderr, flush=True)
         return
+    if args.tt2_recipe == POOLED and not args.validate_interval:
+        raise ValueError('pooled recipe requires validation and checkpoint-bound evaluation statistics')
     dev = PreparedDataset(args.data_root, 'dev') if args.validate_interval and rank == 0 else None
     if paper and dev is not None:
         dev.source_spec = dataset.source_spec
@@ -260,17 +303,28 @@ def _main():
             if rank == 0:
                 atomic_write_json(args.run_root / 'losses' / f'{update:08d}.json',
                                   dict(update=update, **losses), overwrite=args.overwrite or bool(args.restore_file))
-            validation = None
-            if args.validate_interval and update % args.validate_interval == 0:
+            validation, eval_calibration = None, None
+            requested_stop = stopping()
+            validation_due = args.validate_interval and update % args.validate_interval == 0
+            calibration_due = args.tt2_recipe == POOLED and (validation_due or update == args.max_updates or requested_stop)
+            if validation_due or calibration_due:
                 if rank == 0:
                     from .validation import validate
-                    validation = validate(core, dev, args.device, args.validation_limit)
-                    atomic_write_json(args.run_root / 'validation' / f'{update:08d}.json', validation,
-                                      overwrite=args.overwrite or bool(args.restore_file))
+                    if calibration_due:
+                        from .postnet_calibration import temporary_eval, fit
+                        with temporary_eval(core):
+                            eval_calibration = fit(core, dataset, update)
+                            if validation_due:
+                                validation = validate(core, dev, args.device, args.validation_limit)
+                    else:
+                        validation = validate(core, dev, args.device, args.validation_limit)
+                    if validation is not None:
+                        atomic_write_json(args.run_root / 'validation' / f'{update:08d}.json', validation,
+                                          overwrite=args.overwrite or bool(args.restore_file))
                 if world_size > 1:
                     torch.distributed.barrier()
             improved = monitor.observe(update, losses, validation, optimizer.param_groups[0]['lr']) if monitor else False
-            stop = stopping() or bool(monitor and monitor.stopped)
+            stop = requested_stop or stopping() or bool(monitor and monitor.stopped)
             if monitor and validation is not None and monitor.policy.get('version') != 3:
                 print(f'[training-monitor] update={update} dev_loss={validation["loss"]:.6g} '
                       f'best_update={monitor.best_update} bad_evaluations={monitor.bad_evaluations}/'
@@ -288,12 +342,13 @@ def _main():
                         if monitor and improved:
                             monitor.save_best(args.run_root, lambda path: save_checkpoint(
                                 path, model, optimizer, update, dataset.tokens, identity, overwrite=True,
-                                rank_states=states, performance_state=tuning.state(), schedule_transition=schedule_transition))
+                                rank_states=states, performance_state=tuning.state(), schedule_transition=schedule_transition,
+                                eval_calibration=eval_calibration))
                         save_checkpoint(checkpoint, model, optimizer, update, dataset.tokens, identity,
                                         overwrite=args.overwrite or bool(args.restore_file) or update > 1,
                                         rank_states=states, performance_state=tuning.state(),
                                         monitor_state=monitor.state() if monitor else None,
-                                        schedule_transition=schedule_transition)
+                                        schedule_transition=schedule_transition, eval_calibration=eval_calibration)
                         if monitor:
                             monitor.write_reports(args.run_root, render=validation is not None or stop or update == args.max_updates)
                         if metadata is not None:

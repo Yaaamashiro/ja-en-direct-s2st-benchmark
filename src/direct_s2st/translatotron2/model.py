@@ -4,6 +4,7 @@ No text is fed to the acoustic encoder. The linguistic LSTM drives a shared
 attention; both its hidden state and acoustic context condition the synthesizer.
 """
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import nn
@@ -39,6 +40,22 @@ class ModelConfig:
     phone_weight: float = 10.0
     duration_weight: float = 1.0
     label_smoothing: float = 0.1
+    # Missing fields in v1/v2 checkpoints keep the original frame objective.
+    duration_unit: str = 'frames'
+    duration_hop_seconds: float = 0.01
+    duration_output_scale: float = 1.0
+    duration_initial_value: float | None = None
+
+    def __post_init__(self):
+        if self.duration_unit not in ('frames', 'seconds'):
+            raise ValueError('invalid duration unit')
+        if (not math.isfinite(self.duration_hop_seconds) or not 0 < self.duration_hop_seconds < 1
+                or not math.isfinite(self.duration_output_scale) or self.duration_output_scale <= 0):
+            raise ValueError('invalid duration scale/hop')
+        if self.duration_initial_value is not None and (
+                not math.isfinite(self.duration_initial_value) or
+                not 1e-4 < self.duration_initial_value / self.duration_output_scale < 100):
+            raise ValueError('invalid duration initial value')
 
     @property
     def context_dim(self):
@@ -160,6 +177,12 @@ class Translatotron2(nn.Module):
         conditioning_dim = c.linguistic_dim + c.context_dim
         self.phone_projection = nn.Linear(conditioning_dim, vocabulary_size)
         self.duration = PackedPredictor(conditioning_dim, c.duration_dim)
+        if c.duration_initial_value is not None:
+            # Only duration is initialized/calibrated. Gaussian range prediction
+            # remains in frame units, with its original initialization.
+            nn.init.zeros_(self.duration.projection.weight)
+            nn.init.constant_(self.duration.projection.bias,
+                math.log(math.expm1(c.duration_initial_value / c.duration_output_scale - 1e-4)))
         self.range_predictor = PackedPredictor(conditioning_dim + 1, c.duration_dim)
         self.prenet = nn.Sequential(nn.Linear(c.mel_dim, c.prenet_dim), nn.ReLU(), nn.Dropout(0.5),
                                     nn.Linear(c.prenet_dim, c.prenet_dim), nn.ReLU(), nn.Dropout(0.5))
@@ -216,7 +239,11 @@ class Translatotron2(nn.Module):
         return self.phone_projection(conditioning), conditioning, context, state, attention
 
     def synthesize(self, conditioning, phone_lengths, frame_lengths=None, target=None, max_frames=3000):
-        durations = self.duration(conditioning, phone_lengths)
+        prediction = self.duration(conditioning, phone_lengths) * self.config.duration_output_scale
+        # Public synthesis/upsampling API, range predictor input and inference
+        # limits always use frames. The new head/loss use physical seconds.
+        durations = (prediction / self.config.duration_hop_seconds
+                     if self.config.duration_unit == 'seconds' else prediction)
         ranges = self.range_predictor(torch.cat([conditioning, durations[:, :, None]], -1), phone_lengths)
         if not torch.isfinite(durations).all() or not torch.isfinite(ranges).all():
             raise ValueError('nonfinite duration/range prediction')
@@ -270,7 +297,10 @@ class Translatotron2(nn.Module):
         labels = phones[:, :logits.size(1)].masked_fill(~sequence_mask(phone_lengths, logits.size(1)), self.PAD)
         phone_loss = F.cross_entropy(logits.transpose(1, 2), labels, ignore_index=self.PAD,
                                      label_smoothing=self.config.label_smoothing)
-        duration_loss = (result['durations'].sum(1) - target_lengths).square().mean()
+        duration_error = result['durations'].sum(1) - target_lengths
+        if self.config.duration_unit == 'seconds':
+            duration_error = duration_error * self.config.duration_hop_seconds
+        duration_loss = duration_error.square().mean()
         mask = sequence_mask(target_lengths, result['mel'].size(1))[:, :, None]
         reference = target[:, :mask.size(1)].masked_fill(~mask, 0)
         mel_loss = sum(((result[key] - reference).abs() * mask).sum() /

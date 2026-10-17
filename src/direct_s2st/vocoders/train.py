@@ -124,7 +124,7 @@ def load_wave(row, sample_rate, kind):
     return wave
 
 
-def segment_batch(samples, *, spec, hop, segment_frames, mel, device):
+def segment_batch(samples, *, spec, hop, segment_frames, mel, device, deterministic=False):
     """Crop equal-length real segments without padding synthetic audio."""
     available = []
     for wave, units in samples:
@@ -138,11 +138,76 @@ def segment_batch(samples, *, spec, hop, segment_frames, mel, device):
     real, conditioning = [], []
     for (wave, units), length in zip(samples, available):
         wave = wave.to(device, non_blocking=True)
-        offset = int(torch.randint(0, length - frames + 1, (1,)))
+        offset = (length - frames) // 2 if deterministic else int(torch.randint(0, length - frames + 1, (1,)))
         real.append(wave[:, offset * hop:(offset + frames) * hop, None].transpose(1, 2))
         conditioning.append(torch.tensor([units[offset:offset + frames]], device=device) if units is not None
                             else mel(wave)[:, :, offset:offset + frames].detach())
     return torch.cat(conditioning), torch.cat(real)
+
+
+def checked_sample(row, kind, sample_rate, units_root, unit_records, sequences):
+    from ..preparation import file_stamp
+    from ..s2ut.unit_storage import stamp
+    def check():
+        if file_stamp(row['en_audio']) != row['_verified_audio_stamp']:
+            raise ValueError(f"{row['pair_id']}: audio changed after verification")
+        if kind == 'unit':
+            path = units_root / row['split'] / 'original' / (row['pair_id'] + '.units')
+            record = unit_records.get(row['pair_id'])
+            current = stamp(record, 'original') if record else file_stamp(path)
+            if current != row['_verified_unit_stamp']:
+                raise ValueError(f"{row['pair_id']}: units changed after verification")
+    check()
+    wave = load_wave(row, sample_rate, kind)
+    check()
+    return wave, sequences.get(row['pair_id'])
+
+
+@operation('vocoder: fixed dev reconstruction validation')
+def validate_dev(generator, verified, *, spec, config, segment_frames, mel, device,
+                 units_root=None, unit_records=None, num_workers=0):
+    from ..prefetch import ordered_samples
+    from ..train_runtime import precision_context
+    kind, rows = verified['kind'], verified['rows']
+    flags = [(module, module.training) for module in generator.modules()]
+    cpu_rng = torch.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    buffers = {name: value.clone() for name, value in generator.named_buffers()}
+    totals = dict(mel_loss=0.)
+    if kind == 'unit':
+        totals['duration_loss'] = 0.
+    def load(index):
+        return checked_sample(rows[index], kind, spec['sample_rate'], units_root,
+                              unit_records or {}, verified['sequences'])
+    try:
+        generator.eval()
+        with torch.inference_mode(), ordered_samples(load, range(len(rows)), num_workers) as samples:
+            for wave, units in track(samples, 'vocoder: validate dev segments', total=len(rows)):
+                conditioning, real = segment_batch([(wave, units)], spec=spec,
+                    hop=math.prod(config['upsample_rates']), segment_frames=segment_frames,
+                    mel=mel, device=device, deterministic=True)
+                with precision_context(device):
+                    fake = (generator(code=conditioning, dur_prediction=False) if kind == 'unit'
+                            else generator(conditioning))
+                if fake.shape != real.shape or not torch.isfinite(fake).all():
+                    raise ValueError('invalid dev waveform or unit/wave alignment')
+                values = dict(mel_loss=F.l1_loss(mel(fake.squeeze(1).float()), mel(real.squeeze(1).float())))
+                if kind == 'unit':
+                    values['duration_loss'] = duration_objective(generator, units)
+                for key, value in values.items():
+                    if not torch.isfinite(value) or value < 0:
+                        raise ValueError('nonfinite/negative vocoder validation loss')
+                    totals[key] += float(value)
+        return {key: value / len(rows) for key, value in totals.items()}
+    finally:
+        with torch.no_grad():
+            for name, value in generator.named_buffers():
+                value.copy_(buffers[name])
+        for module, flag in flags:
+            module.training = flag
+        torch.set_rng_state(cpu_rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state_all(cuda_rng)
 
 
 def save_state(path, payload):
@@ -179,6 +244,7 @@ def main():
     parser.add_argument('--verify-only', action='store_true')
     parser.add_argument('--verification-result', type=Path)
     parser.add_argument('--verified-inputs', type=Path)
+    parser.add_argument('--verified-dev-inputs', type=Path)
     args = parser.parse_args()
     if min(args.max_updates, args.segment_frames, args.batch_size, args.prefetch_factor, args.save_interval_updates) < 1 or args.num_workers < 0 or args.learning_rate <= 0:
         parser.error('updates, segment frames and learning rate must be positive')
@@ -192,12 +258,20 @@ def main():
     if spec['normalize_volume'] or spec['normalization'] != 'none' or spec['log_transform'] != 'natural_log_clamp_eps':
         raise ValueError('fitting requires unnormalized natural-log mel')
     from .verification import verify_inputs, save_receipt, load_receipt
+    from .monitor import settings_from_env, restore_monitor, validation_identity, reject_overlap
+    policy, guard = settings_from_env()
+    checkpoint = args.output_root / 'generator.pt'
+    state = torch.load(checkpoint, map_location='cpu', weights_only=True) if args.resume else None
     if args.verify_only:
         if args.verification_result is None or args.verified_inputs is not None:
             parser.error('verify-only requires a verification-result and no verified-inputs')
-        save_receipt(args.verification_result, verify_inputs(args.common_root, args.kind, args.units_root))
+        training_inputs = verify_inputs(args.common_root, args.kind, args.units_root)
+        if (policy is not None or (state and state.get('monitor'))) and not os.environ.get('S2ST_BATCH_PROBE'):
+            dev_inputs = verify_inputs(args.common_root, args.kind, args.units_root, split='dev')
+            reject_overlap(training_inputs, dev_inputs)
+            save_receipt(args.verification_result.with_suffix('.dev.json'), dev_inputs)
+        save_receipt(args.verification_result, training_inputs)
         return
-    checkpoint = args.output_root / 'generator.pt'
     if args.output_root.exists() and any(args.output_root.iterdir()) and not (args.resume or args.overwrite):
         raise ExistingOutputError(str(args.output_root))
     if args.resume and not checkpoint.is_file():
@@ -205,6 +279,14 @@ def main():
     verified = (load_receipt(args.verified_inputs, args.common_root, args.kind, args.units_root)
                 if args.verified_inputs else verify_inputs(args.common_root, args.kind, args.units_root))
     rows = verified['rows']
+    monitor_enabled = not os.environ.get('S2ST_BATCH_PROBE') and (policy is not None or (state and state.get('monitor')))
+    dev_inputs = None
+    validation = None
+    if monitor_enabled:
+        dev_inputs = (load_receipt(args.verified_dev_inputs, args.common_root, args.kind, args.units_root, split='dev')
+                      if args.verified_dev_inputs else verify_inputs(args.common_root, args.kind, args.units_root, split='dev'))
+        reject_overlap(verified, dev_inputs)
+        validation = validation_identity(dev_inputs, args.segment_frames)
     identity = {'common': verified['common'],
                 'config': config, 'learning_rate': args.learning_rate,
                 'segment_frames': args.segment_frames, 'kind': args.kind,
@@ -235,7 +317,6 @@ def main():
     optim_d = torch.optim.AdamW(discriminators.parameters(), lr=args.learning_rate, betas=(0.8, 0.99))
     start = 0
     if args.resume:
-        state = torch.load(checkpoint, map_location='cpu', weights_only=True)
         if state.get('format') != 'direct-s2st-vocoder-v1' or state['identity'] != identity or state['updates'] < 1:
             raise ValueError('vocoder resume identity mismatch')
         generator.load_state_dict(state['generator'], strict=True)
@@ -246,32 +327,35 @@ def main():
         if state['cuda_rng'] and torch.cuda.is_available():
             torch.cuda.set_rng_state_all(state['cuda_rng'])
         start = state['updates']
+    monitor = restore_monitor(args.kind, state, start, args.output_root, validation) if monitor_enabled else None
+    if monitor is not None:
+        monitor.write_reports(args.output_root)
+        if monitor.stopped or start >= args.max_updates:
+            return
     atomic_write_json(args.output_root / 'config.json', config, resume=args.resume, overwrite=args.overwrite)
     from ..prefetch import ordered_samples
     from ..train_runtime import Timings, enabled, stopping, checkpoint_saved
     from ..batch_probe import Probe
     probe = Probe()
     timing = Timings()
-    from ..s2ut.unit_storage import records, stamp
+    from ..s2ut.unit_storage import records
     unit_records = records(args.units_root) if args.kind == 'unit' else {}
     def load(index):
         row = rows[probe_longest if probe.path else index % len(rows)]
-        from ..preparation import file_stamp
-        if file_stamp(row['en_audio']) != row['_verified_audio_stamp']:
-            raise ValueError(f"{row['pair_id']}: audio changed after verification")
-        if args.kind == 'unit':
-            path = args.units_root / 'train/original' / (row['pair_id'] + '.units')
-            record = unit_records.get(row['pair_id'])
-            current = stamp(record, 'original') if record else file_stamp(path)
-            if current != row['_verified_unit_stamp']:
-                raise ValueError(f"{row['pair_id']}: units changed after verification")
-        wave = load_wave(row, spec['sample_rate'], args.kind)
-        if file_stamp(row['en_audio']) != row['_verified_audio_stamp']:
-            raise ValueError(f"{row['pair_id']}: audio changed while loading")
+        wave, units = checked_sample(row, args.kind, spec['sample_rate'], args.units_root,
+                                     unit_records, all_units)
         if enabled() and args.device.startswith('cuda'):
             wave = wave.pin_memory()
-        return wave, all_units.get(row['pair_id'])
+        return wave, units
     probe_longest = max(range(len(rows)), key=lambda i: float(rows[i]['en_duration'])) if probe.path else None
+    def payload(update):
+        result = dict(format='direct-s2st-vocoder-v1', generator=generator.state_dict(),
+            discriminators=discriminators.state_dict(), optimizer_g=optim_g.state_dict(),
+            optimizer_d=optim_d.state_dict(), updates=update, identity=identity,
+            rng=torch.get_rng_state(), cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [])
+        if monitor is not None:
+            result.update(monitor=monitor.state(), monitor_validation=validation)
+        return result
     indices = range(start * args.batch_size, args.max_updates * args.batch_size)
     with ordered_samples(load, indices, args.num_workers, args.prefetch_factor) as loaded, \
             (Progress('vocoder: disposable stress batches', total=probe.limit, counted=True)
@@ -294,12 +378,22 @@ def main():
                 probe_progress.count += 1
                 probe_progress.advanced = time.monotonic()
             probe.finish(args.batch_size)
-            stop = stopping()
-            if update % args.save_interval_updates == 0 or update == args.max_updates or stop:
-                save_state(checkpoint, dict(format='direct-s2st-vocoder-v1', generator=generator.state_dict(),
-                           discriminators=discriminators.state_dict(), optimizer_g=optim_g.state_dict(),
-                           optimizer_d=optim_d.state_dict(), updates=update, identity=identity,
-                           rng=torch.get_rng_state(), cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []))
+            evaluated = monitor is not None and monitor.due(update)
+            if monitor is not None:
+                dev = validate_dev(generator, dev_inputs, spec=spec, config=config,
+                    segment_frames=args.segment_frames, mel=mel, device=args.device,
+                    units_root=args.units_root, unit_records=unit_records,
+                    num_workers=args.num_workers) if evaluated else None
+                train_values = dict(mel_loss=losses['mel'])
+                if args.kind == 'unit':
+                    train_values['duration_loss'] = losses['duration']
+                if monitor.observe(update, train_values, dev, optim_g.param_groups[0]['lr']):
+                    monitor.save_best(args.output_root, lambda path: save_state(path, payload(update)))
+            stop = stopping() or (monitor is not None and monitor.stopped)
+            if update % args.save_interval_updates == 0 or update == args.max_updates or stop or evaluated:
+                save_state(checkpoint, payload(update))
+                if monitor is not None:
+                    monitor.write_reports(args.output_root)
                 with timing.measure('local_freeze'):
                     checkpoint_saved(args.output_root, checkpoint, update,
                                      force=stop or update == args.max_updates)

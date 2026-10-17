@@ -86,7 +86,7 @@ def restore_rank_state(model, state):
         torch.cuda.set_rng_state_all(state['cuda_rng'])
 
 
-def save_checkpoint(path, model, optimizer, updates, tokens, data_fingerprint, *, overwrite=False, rank_states=None, performance_state=None, monitor_state=None, schedule_transition=None):
+def save_checkpoint(path, model, optimizer, updates, tokens, data_fingerprint, *, overwrite=False, rank_states=None, performance_state=None, monitor_state=None, schedule_transition=None, eval_calibration=None):
     model = model.module if hasattr(model, 'module') else model
     path = Path(path)
     if updates < 1 or not optimizer.state:
@@ -102,6 +102,10 @@ def save_checkpoint(path, model, optimizer, updates, tokens, data_fingerprint, *
         payload['monitor_state'] = monitor_state
     if schedule_transition is not None:
         payload['schedule_transition'] = schedule_transition
+    if eval_calibration is not None:
+        if eval_calibration.get('updates') != updates:
+            raise ValueError('cannot save stale evaluation calibration')
+        payload['eval_calibration'] = eval_calibration
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, suffix='.pt.tmp')
     os.close(descriptor)
     try:

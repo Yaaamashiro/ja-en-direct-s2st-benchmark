@@ -30,7 +30,7 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
                 calibrate_batch=False, calibration_max_batch=1024, calibration_steps=3,
                 calibration_reserve_ratio=.1, calibration_trial_seconds=1800, calibration_objective='throughput',
                 reproduction_mode=None, tt2_vocoder_mode='griffin_lim', s2ut_vocoder_mode='trained',
-                s2ut_warmup_updates=None):
+                s2ut_warmup_updates=None, tt2_recipe='legacy_frames'):
     """Explicit throughput knobs; gpu80 is a starting point, not a VRAM guarantee."""
     from .config import load_config
     from .recipes import (MODES, TT2_VOCODERS, S2UT_VOCODERS, replace_option,
@@ -40,6 +40,13 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
     if reproduction_mode not in MODES or tt2_vocoder_mode not in TT2_VOCODERS or s2ut_vocoder_mode not in S2UT_VOCODERS:
         raise ValueError('invalid reproduction/vocoder mode')
     paper = reproduction_mode != 'smoke' and kind in ('tt2', 's2ut')
+    from .translatotron2.recipe import validate_recipe, LEGACY, POOLED, STABILIZED_RECIPES, STABILIZED_LR, STABILIZED_WARMUP
+    if kind == 'tt2':
+        validate_recipe(tt2_recipe, reproduction_mode)
+        if tt2_recipe == POOLED and precision not in ('default', 'fp32'):
+            raise ValueError('pooled postnet recipe requires FP32')
+    elif tt2_recipe != LEGACY:
+        raise ValueError('TT2 recipe is only valid for TT2')
     if s2ut_warmup_updates is not None:
         if kind != 's2ut' or type(s2ut_warmup_updates) is not int or s2ut_warmup_updates not in (400, 500, 1000, 10000):
             raise ValueError('S2UT warmup must be 400, 500, 1000 or 10000')
@@ -72,7 +79,8 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
     num_workers = num_workers if num_workers is not None else (4 if large else 0)
     max_tokens = max_tokens if max_tokens is not None else (20000 if large or (paper and kind == 's2ut') else 2000)
     if kind == 'tt2':
-        update_freq = tt2_batch(reproduction_mode, batch_size, update_freq)
+        update_freq = tt2_batch('paper_exact' if tt2_recipe in STABILIZED_RECIPES else reproduction_mode,
+                                batch_size, update_freq)
     elif update_freq is None:
         update_freq = 4 if paper and kind == 's2ut' else 1
     save_interval = save_interval if save_interval is not None else (1 if paper and kind == 'tt2' else 50 if large else 1)
@@ -98,6 +106,10 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
                                 ('--num-workers', num_workers), ('--prefetch-factor', prefetch_factor),
                                 ('--reproduction-mode', reproduction_mode), ('--vocoder-mode', tt2_vocoder_mode)]:
                 replace_option(command, name, value)
+            if tt2_recipe in STABILIZED_RECIPES:
+                for name, value in [('--tt2-recipe', tt2_recipe), ('--learning-rate', STABILIZED_LR),
+                                    ('--warmup-updates', STABILIZED_WARMUP)]:
+                    replace_option(command, name, value)
         checkpoint = 'checkpoints/checkpoint_last.pt'
     elif kind == 's2ut':
         from .s2ut.migrate_labels import paper_data_root
@@ -207,13 +219,14 @@ def stage_training(config, work):
         unit_rows = records(unit_root)
         if unit_rows:
             files += [Path(row['units_original_path']) for row in unit_rows.values()
-                      if row['split'] == 'train' and row.get('units_storage') != 'inline-v1']
+                      if row['split'] in ('train', 'dev') and row.get('units_storage') != 'inline-v1']
         else:
             from .io import read_jsonl
-            files += [unit_root / 'train/original' / (row['pair_id'] + '.units')
-                      for row in read_jsonl(common / 'train.jsonl')]
+            files += [unit_root / split / 'original' / (row['pair_id'] + '.units')
+                      for split in ('train', 'dev') if (common / f'{split}.jsonl').is_file()
+                      for row in read_jsonl(common / f'{split}.jsonl')]
     rows = stage_audio(common, common.parent / '.drive-audio-packs', local / 'audio',
-                       splits=('train',) if vocoder else ('train', 'dev', 'test'),
+                       splits=tuple(s for s in ('train', 'dev') if (common / f'{s}.jsonl').is_file()) if vocoder else ('train', 'dev', 'test'),
                        languages=('en',) if vocoder else ('ja',))
     for source in track(files, 'training: stage metadata and whole Mel ZIPs'):
         if source.is_symlink():
@@ -269,7 +282,7 @@ def publish(work, destination, identity, updates):
 @operation('backup: one verified ZIP with capacity budget')
 def publish_packed(work, destination, identity, updates):
     from .drive_staging import raw_sha, capacity
-    maximum = float(os.environ.get('S2ST_BACKUP_MAX_GB', '100')) * 1024**3
+    maximum = float(os.environ.get('S2ST_BACKUP_MAX_GB', '1024')) * 1024**3
     if not math.isfinite(maximum) or maximum <= 0:
         raise ValueError('backup budget must be finite and positive')
     target = destination / f'{updates:012d}-{uuid.uuid4().hex}'

@@ -68,7 +68,7 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
             if not completed < update <= total or actual != update:
                 raise ValueError('invalid immutable checkpoint update count')
             publish(directory / 'files', backup, identity, update)
-            if config['kind'] in ('tt2', 's2ut') and (directory/'files/training-monitor.json').is_file():
+            if config['kind'] in ('tt2', 's2ut', 'vocoder') and (directory/'files/training-monitor.json').is_file():
                 from .translatotron2.monitor import mirror_reports
                 mirror_reports(directory/'files', backup)
             return update

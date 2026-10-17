@@ -246,8 +246,8 @@ def test_packed_snapshots_restore_and_fallback_and_capacity_budget(tmp_path, mon
     assert latest(backup, identity)[0] == first
 
 
-@pytest.mark.parametrize('limit,blocked', [(None, False), ('20', True), ('100', False)])
-def test_backup_default_is_100_gib_and_explicit_limit_is_respected(tmp_path, monkeypatch, limit, blocked):
+@pytest.mark.parametrize('limit,blocked', [(None, False), ('100', True), ('1024', False)])
+def test_backup_default_is_1024_gib_and_explicit_limit_is_respected(tmp_path, monkeypatch, limit, blocked):
     import os
     from direct_s2st.colab import publish_packed
     work, backup = tmp_path/'work', tmp_path/'backup'
@@ -265,7 +265,7 @@ def test_backup_default_is_100_gib_and_explicit_limit_is_respected(tmp_path, mon
         result = original_stat(path, *args, **kwargs)
         if path == old:
             values = list(result)
-            values[6] = 50 * 1024**3  # Simulate usage without allocating large files.
+            values[6] = 512 * 1024**3  # Simulate usage without allocating large files.
             return os.stat_result(values)
         return result
     monkeypatch.setattr(Path, 'stat', stat)

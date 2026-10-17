@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/'src'))
 from direct_s2st.io import atomic_write_json
 from direct_s2st.progress import operation, track
+from direct_s2st.translatotron2.recipe import LEGACY, STABILIZED_RECIPES, validate_recipe, STABILIZED_WARMUP
 from environment_recovery import ensure_environment
 import resume_streaming_training as legacy
 
@@ -25,7 +26,7 @@ def git(repo, *args):
 
 
 @operation('cell 5: inspect saved training runs')
-def choose_run(persistent, kind, default_name, requested=''):
+def choose_run(persistent, kind, default_name, requested='', *, tt2_recipe=LEGACY):
     persistent = Path(persistent)
     if requested and not re.fullmatch('[A-Za-z0-9_-]+', requested):
         raise ValueError('invalid TRAIN_RUN_NAME')
@@ -36,6 +37,14 @@ def choose_run(persistent, kind, default_name, requested=''):
         config = json.loads(path.read_text(encoding='utf-8'))
         if config.get('kind') != ('vocoder' if kind in ('unit', 'mel') else kind):
             continue
+        if kind == 'tt2':
+            from direct_s2st.recipes import option
+            saved_recipe = option(config.get('command', []), '--tt2-recipe', LEGACY)
+            if saved_recipe != tt2_recipe:
+                if path.stem == requested:
+                    raise ValueError(f'TT2 recipe differs from saved run ({saved_recipe} vs {tt2_recipe}); '
+                                     'old checkpoints preserved; select a separate new recipe run')
+                continue
         backup = persistent/'checkpoints'/path.stem
         markers = sorted(backup.glob('*/snapshot.json'), reverse=True)
         # These are candidates, not verified checkpoints. run_session verifies
@@ -90,6 +99,11 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     if kind in ('tt2', 's2ut'):
         total = min(total, 3000 if kind == 's2ut' else 1000)
     practical_warmup = options.get('tt2_warmup_updates') if kind == 'tt2' else None
+    tt2_recipe = options.get('tt2_recipe', LEGACY) if kind == 'tt2' else LEGACY
+    if kind == 'tt2':
+        validate_recipe(tt2_recipe, options.get('reproduction_mode', 'paper_exact'))
+        if tt2_recipe in STABILIZED_RECIPES and practical_warmup not in (None, STABILIZED_WARMUP):
+            raise ValueError('stabilized recipe requires fixed warmup 400 in a new run')
     if practical_warmup is not None and (type(practical_warmup) is not int or practical_warmup not in (400, 500, 1000, 10000)):
         raise ValueError('TT2 warmup must be 400, 500, 1000 or 10000')
     s2ut_warmup = options.get('s2ut_warmup_updates') if kind == 's2ut' else None
@@ -98,7 +112,7 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     corpus = os.environ.get('CORPUS_ROOT')
     if corpus and any(p.resolve().is_relative_to(Path(corpus).resolve()) for p in (persistent, data)):
         raise ValueError('training outputs must stay outside CORPUS_ROOT')
-    name, snapshot = choose_run(persistent, kind, default_name, requested)
+    name, snapshot = choose_run(persistent, kind, default_name, requested, tt2_recipe=tt2_recipe)
     config_path = persistent/(name+'.json')
     backup = persistent/'checkpoints'/name
     work = WORK_ROOT/name
@@ -163,7 +177,11 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
         # schedule/monitor state is inherited and checked by the trainer.
         if practical_warmup is None and os.environ.get('S2ST_TT2_MONITOR_POLICY'):
             os.environ.setdefault('S2ST_TT2_PRACTICAL_WARMUP', '1000')
-    if kind == 'tt2':
+    if kind == 'tt2' and tt2_recipe in STABILIZED_RECIPES:
+        # This recipe stores its schedule in the immutable command/fingerprint;
+        # never apply a historical mid-run warmup overlay to it.
+        os.environ.pop('S2ST_TT2_PRACTICAL_WARMUP', None)
+    elif kind == 'tt2':
         if practical_warmup is not None:
             # 10000 selects the saved schedule on resume, never lengthens it.
             if practical_warmup == 10000:
@@ -178,7 +196,13 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
         ensure(python, RUNTIME_ROOT, persistent, run)
         from s2ut_runtime_overlay import prepare
         execution = prepare(execution, ROOT, persistent, name)
+    if kind in ('unit', 'mel'):
+        from vocoder_monitor_overlay import prepare
+        execution = prepare(execution, ROOT, persistent, name)
     builder_options = {k: v for k, v in options.items() if k != 'tt2_warmup_updates'}
+    if tt2_recipe == LEGACY:
+        # Older pinned builders do not accept this newly introduced option.
+        builder_options.pop('tt2_recipe', None)
     os.environ['PYTHONPATH'] = str(execution/'src')+os.pathsep+os.environ.get('PYTHONPATH', '')
     os.environ['S2ST_CONFIG_ROOT'] = str(execution/'configs')
     if kind == 's2ut' and snapshot and (work/'checkpoints/checkpoint_last.pt').is_file():
