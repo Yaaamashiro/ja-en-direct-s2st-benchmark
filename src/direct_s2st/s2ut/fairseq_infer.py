@@ -104,6 +104,8 @@ def generate_shards(command, generated, split, ids, identity, *, resume=False, o
 
 @operation('s2ut/fairseq_infer: main')
 def main() -> None:
+    from ..inference_logging import configure_logging
+    configure_logging()
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--run-root", type=Path, required=True)

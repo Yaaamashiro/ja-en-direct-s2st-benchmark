@@ -200,6 +200,8 @@ def publish(plan):
 
 
 def main():
+    from .inference_logging import configure_logging
+    configure_logging()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--plan', type=Path, required=True)
     parser.add_argument('--kind', choices=('tt2', 's2ut', 'unit', 'mel'), required=True)

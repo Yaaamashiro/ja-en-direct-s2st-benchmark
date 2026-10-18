@@ -283,6 +283,8 @@ def execute(repo, persistent, invoke, *, tt2_vocoder_mode=None, s2ut_vocoder_mod
 
 
 def main():
+    from direct_s2st.inference_logging import configure_logging
+    configure_logging()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--action', choices=('prepare', 'run'), required=True)
     for key in ('repo', 'persistent', 'data'):
