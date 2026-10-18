@@ -39,7 +39,7 @@ def fixture_run(persistent, kind, data, *, suffix='', update=100):
     backup = persistent/'checkpoints'/name
     marker = backup/f'{update:012d}-fixture'
     checksums = {p: raw_sha(write(marker/'files'/p, body)) for p,body in files.items()}
-    bound = {str(p): raw_sha(p) for p in data.rglob('*') if p.is_file() and p.suffix in ('.tsv','.jsonl')}
+    bound = {str(p): raw_sha(p) for p in data.rglob('*') if p.is_file() and p.suffix in ('.tsv','.jsonl','.json')}
     if kind in ('unit','mel'):
         bound[str(config)] = raw_sha(config)
     identity = dict(config=cfg, work='/content/s2st-work/'+name,
@@ -266,8 +266,9 @@ def test_fixed_generation_does_not_reuse_partial_legacy_shard_cache(tmp_path):
     assert old_path.is_dir()  # retained for inspection, never overwritten/deleted
 
 
-def test_publish_keeps_failures_and_separates_preview_from_test_results(tmp_path):
-    from direct_s2st.preview import publish
+@pytest.mark.parametrize('modes', [None, ('griffin_lim', 'paper')])
+def test_publish_keeps_failures_and_separates_preview_from_test_results(tmp_path, modes):
+    from direct_s2st.preview import publish, vocoder_settings, listening_labels
     local, output = tmp_path/'local', tmp_path/'drive/preview/identity'
     row = dict(pair_id='pair', ja_text='日本語', en_text='English')
     for language in ('ja','en'):
@@ -282,7 +283,11 @@ def test_publish_keeps_failures_and_separates_preview_from_test_results(tmp_path
     plan = dict(local=str(local), output=str(output), purpose='dev_listening_only_not_benchmark',
                 execution_revision='a'*40, rows=[row], ids=['pair'],
                 runs={'tt2':dict(name='actual-probe-fix-v1',updates=580,snapshot='retained')})
+    if modes:
+        plan['vocoders'] = vocoder_settings(*modes)
     result = publish(plan)
+    assert result['labels'] == listening_labels(plan)
+    assert result['vocoders'] == (vocoder_settings(*modes) if modes else vocoder_settings())
     assert result['split'] == 'dev' and len(result['samples']) == 1
     assert result['samples'][0]['audio']['mel-translated'] == dict(status='failed', error='phone EOS not reached')
     assert len(list((output/'audio').rglob('*.wav'))) == 5
@@ -419,3 +424,169 @@ def test_normal_cells_are_opt_in_bounded_and_full_test_guards_remain():
     assert "'--action', 'run'" in cell7 and 'display(Audio' in cell7
     assert 'all common/test IDs' in cell6 and "elif RUN_BENCHMARK:" in cell8
     assert '正式評価に使用しません' in cell8
+    for code in (cell6, cell7):
+        assert "'--tt2-vocoder-mode', TT2_VOCODER_MODE" in code
+        assert "'--s2ut-vocoder-mode', S2UT_VOCODER_MODE" in code
+    assert "labels = result['labels']" in cell7
+
+
+def backend_fixture(tmp_path, *, mel='griffin_lim', unit='paper'):
+    from direct_s2st.vocoders.reference import UNIT_CONFIGURATION
+    persistent, data, local = tmp_path/'drive', tmp_path/'data', tmp_path/'local'
+    persistent.mkdir()
+    row = dict(pair_id='p', split='dev', ja_text='日本語', en_text='English')
+    for language in ('ja', 'en'):
+        path = write(tmp_path/'corpus'/(language+'.wav'), language)
+        row[language+'_audio'], row[language+'_sha256'] = str(path), raw_sha(path)
+    atomic_write_jsonl(data/'common/dev.jsonl', [row])
+    for system in ('translatotron2', 's2ut'):
+        write(data/system/'fairseq/dev.tsv',
+              'id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames\n'
+              + f'p\t{row["ja_audio"]}\t100\t3 5 2\t3\n')
+    spec = json.loads((ROOT/'configs/vocoder/mel-generator.json').read_text())['mel']
+    atomic_write_json(data/'translatotron2/fairseq/mel-spec.json', spec)
+    atomic_write_json(data/'s2ut/fairseq/data-lock.json', dict(unit_configuration=UNIT_CONFIGURATION))
+    needed = ['tt2', 's2ut'] + (['mel'] if mel == 'hifigan' else []) + (['unit'] if unit == 'trained' else [])
+    for kind in needed:
+        fixture_run(persistent, kind, data)
+    return persistent, data, local, needed
+
+
+@pytest.mark.parametrize('mel,unit', [('griffin_lim','paper'), ('griffin_lim','trained'),
+                                    ('hifigan','paper'), ('hifigan','trained')])
+def test_prepare_restores_only_selected_backend_runs_and_binds_settings(tmp_path, mel, unit):
+    persistent, data, local, needed = backend_fixture(tmp_path, mel=mel, unit=unit)
+    # Names for unused vocoders are ignored, not used to trigger old restoration.
+    requested = {k: 'unused-do-not-restore' for k in ('unit','mel') if k not in needed}
+    plan = session.prepare(persistent, data, local, requested, 1, 'c'*40,
+                           tt2_vocoder_mode=mel, s2ut_vocoder_mode=unit)
+    assert set(plan['runs']) == set(needed)
+    assert plan['vocoders']['mel']['mode'] == mel and plan['vocoders']['unit']['mode'] == unit
+    assert {p.name for p in (local/'models').glob('*/*')} == {k+'-training-original' for k in needed}
+    assert len(list((Path(plan['local'])/'originals').glob('*.wav'))) == 2
+    assert session.prepare(persistent, data, local, requested, 1, 'c'*40,
+                           tt2_vocoder_mode=mel, s2ut_vocoder_mode=unit) == plan
+
+
+@pytest.mark.parametrize('key,value', [('hubert_layer',9), ('hubert_revision','a'*40),
+                                      ('kmeans_clusters',200), ('kmeans_sha256','a'*64)])
+def test_official_mode_rejects_incompatible_unit_ids_before_copy(tmp_path, monkeypatch, key, value):
+    persistent, data, local, _ = backend_fixture(tmp_path)
+    lock_path = data/'s2ut/fairseq/data-lock.json'
+    lock = json.loads(lock_path.read_text())
+    lock['unit_configuration'][key] = value
+    atomic_write_json(lock_path, lock, overwrite=True)
+    monkeypatch.setattr(session, 'saved_run', lambda drive, kind, requested, root: dict(
+        config={'command':['python','-m','module','--data-root',str(data/('translatotron2' if kind == 'tt2' else 's2ut')/'fairseq')]},
+        identity={'inputs':{str(p):raw_sha(p) for p in data.rglob('*') if p.is_file()}}, metadata={}))
+    monkeypatch.setattr(session, 'copy_verified', lambda *a: pytest.fail('must reject before audio copy'))
+    with pytest.raises(ValueError, match='pinned HuBERT'):
+        session.prepare(persistent, data, local, {}, 1, 'c'*40,
+                        tt2_vocoder_mode='griffin_lim', s2ut_vocoder_mode='paper')
+
+
+def test_backend_changes_use_separate_plan_and_preserve_old_preview(tmp_path):
+    persistent, data, local, _ = backend_fixture(tmp_path, mel='hifigan', unit='trained')
+    old = session.prepare(persistent, data, local, {}, 1, 'c'*40)
+    sentinel = write(Path(old['output'])/'old-listening.wav', 'old audio')
+    new = session.prepare(persistent, data, local, {}, 1, 'c'*40,
+                          tt2_vocoder_mode='griffin_lim', s2ut_vocoder_mode='paper')
+    assert old['output'] != new['output'] and old['local'] != new['local']
+    assert sentinel.read_text() == 'old audio'
+    assert json.loads((Path(old['output'])/'plan.json').read_text(encoding='utf-8')) == old
+
+
+def test_cell7_public_backends_use_translation_environments_without_trained_vocoders(tmp_path, monkeypatch):
+    import direct_s2st.preview as preview
+    persistent, data, local, _ = backend_fixture(tmp_path)
+    plan = session.prepare(persistent, data, local, {}, 1, 'c'*40,
+                           tt2_vocoder_mode='griffin_lim', s2ut_vocoder_mode='paper')
+    monkeypatch.setattr(session.subprocess, 'check_output', lambda *a, **kw: 'c'*40)
+    monkeypatch.setattr(session.os, 'environ', dict(session.os.environ))
+    owners, calls = [], []
+    monkeypatch.setattr(session, 'environment', lambda repo, drive, run, invoke: owners.append(run['name']) or Path('python'))
+    monkeypatch.setattr(preview, 'publish', lambda value: calls.append(value))
+    session.execute(tmp_path/'repo', persistent, lambda *a: calls.append(a[-1]),
+                    tt2_vocoder_mode='griffin_lim', s2ut_vocoder_mode='paper')
+    assert owners == ['tt2-training-original','s2ut-training-original','s2ut-training-original','tt2-training-original']
+    assert calls == ['tt2','s2ut','unit','mel',plan]
+    owners.clear()
+    with pytest.raises(ValueError, match='settings changed'):
+        session.execute(tmp_path/'repo', persistent, lambda *a: pytest.fail('no inference on stale selection'),
+                        tt2_vocoder_mode='hifigan', s2ut_vocoder_mode='paper')
+    assert owners == []
+
+
+def test_official_unit_worker_downloads_pinned_artifacts_and_never_selects_trained_weights(tmp_path, monkeypatch):
+    import direct_s2st.preview as preview
+    import direct_s2st.vocoders.inference as inference
+    import direct_s2st.vocoders.monitor as monitor
+    import direct_s2st.vocoders.reference as reference
+    persistent, data, local, _ = backend_fixture(tmp_path)
+    plan = session.prepare(persistent, data, local, {}, 1, 'c'*40,
+                           tt2_vocoder_mode='griffin_lim', s2ut_vocoder_mode='paper')
+    monkeypatch.setattr(session.os, 'environ', dict(session.os.environ))
+    monkeypatch.setattr(monitor, 'select_generator', lambda *a: pytest.fail('no trained generator required'))
+    calls, downloads = [], []
+    def download(checkpoint, config):
+        downloads.append((checkpoint,config))
+        write(checkpoint, 'official mock bytes')
+        atomic_write_json(config, dict(sampling_rate=16000))
+    monkeypatch.setattr(reference, 'ensure_reference', download)
+    monkeypatch.setattr(inference, 'vocode', lambda *a, **kw: calls.append((a,kw)))
+    preview.worker(plan, 'unit')
+    assert len(downloads) == 1 and len(calls) == 2
+    assert all(a[3].name == 'g_00500000' and a[4].name == 'config.json' and kw['duration_prediction'] for a,kw in calls)
+    records = list(preview.read_jsonl(Path(plan['local'])/'unit-reference-input.jsonl'))
+    assert records[0]['units'] == [3,5,2] and records[0]['duration_mode'] == 'predicted'
+    assert plan['vocoders']['unit']['checkpoint_sha256'] == reference.CHECKPOINT_SHA256
+    def corrupt(*a):
+        raise ValueError('artifact checksum mismatch')
+    monkeypatch.setattr(reference, 'ensure_reference', corrupt)
+    with pytest.raises(ValueError, match='checksum mismatch'):
+        preview.worker(plan, 'unit')
+    assert len(calls) == 2  # never falls back to the weak trained model
+
+
+def test_griffin_lim_worker_needs_no_mel_checkpoint_and_keeps_translation_failure(tmp_path, monkeypatch):
+    import direct_s2st.preview as preview
+    import direct_s2st.vocoders.griffin_lim as gl
+    import direct_s2st.vocoders.monitor as monitor
+    import direct_s2st.translatotron2.prepare_fairseq as preparation
+    persistent, data, local, _ = backend_fixture(tmp_path)
+    plan = session.prepare(persistent, data, local, {}, 1, 'c'*40,
+                           tt2_vocoder_mode='griffin_lim', s2ut_vocoder_mode='paper')
+    root = Path(plan['local'])
+    monkeypatch.setattr(session.os, 'environ', dict(session.os.environ))
+    atomic_write_jsonl(root/'tt2/predictions.jsonl', [dict(pair_id='p', system_id='translatotron2',
+        status='failed', error='phone EOS not reached', inference_seconds=0)])
+    monkeypatch.setattr(monitor, 'select_generator', lambda *a: pytest.fail('no Mel generator required'))
+    extracted = []
+    def extract(source, target, spec):
+        extracted.append(str(source))
+        np.save(target, np.ones((20,spec['n_mels']), dtype=np.float32))
+    monkeypatch.setattr(preparation, '_extract_logmel_official', extract)
+    monkeypatch.setattr(gl, 'inverse_basis', lambda spec: None)
+    monkeypatch.setattr(gl, 'reconstruct', lambda *a, **kw: np.sin(np.arange(500)*0.1).astype(np.float32))
+    preview.worker(plan, 'mel')
+    failed = list(preview.read_jsonl(root/'mel-translated/predictions.jsonl'))[0]
+    reference = list(preview.read_jsonl(root/'mel-reference/predictions.jsonl'))[0]
+    assert failed['status'] == 'failed' and 'EOS' in failed['error']
+    assert failed['output_audio'] is None
+    assert reference['status'] == 'success' and reference['vocoder_type'] == 'griffin_lim'
+    lock = json.loads((root/'mel-reference/vocoder-lock.json').read_text())
+    assert lock['checkpoint_sha256'] is None and lock['iterations'] == 32 and lock['seed'] == 1
+    preview.worker(plan, 'mel')
+    assert len(extracted) == 1
+
+
+def test_listening_labels_keep_legacy_semantics_and_report_selected_backends():
+    from direct_s2st.preview import listening_labels, settings, vocoder_settings
+    assert '自前Mel' in listening_labels({})['mel-translated']
+    assert '自前Unit' in listening_labels({})['unit-reference']
+    plan = dict(vocoders=vocoder_settings('griffin_lim','paper'))
+    assert 'Griffin' in listening_labels(plan)['mel-translated']
+    assert 'LJSpeech' in listening_labels(plan)['unit-reference']
+    plan['vocoders']['unit']['checkpoint_sha256'] = 'a'*64
+    with pytest.raises(ValueError, match='identity changed'):
+        settings(plan)

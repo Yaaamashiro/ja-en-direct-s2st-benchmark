@@ -15,6 +15,39 @@ def read(path):
     return json.loads(Path(path).read_text(encoding='utf-8'))
 
 
+def vocoder_settings(mel='hifigan', unit='trained'):
+    """Explicit preview identity; old plans keep their trained-only semantics."""
+    from .recipes import TT2_VOCODERS, S2UT_VOCODERS
+    if mel not in TT2_VOCODERS or unit not in S2UT_VOCODERS:
+        raise ValueError('invalid preview vocoder mode')
+    values = dict(mel=dict(mode=mel), unit=dict(mode=unit))
+    if mel == 'griffin_lim':
+        values['mel'].update(iterations=32, seed=1)
+    if unit == 'paper':
+        from .vocoders.reference import BASE, CHECKPOINT_SHA256, CONFIG_SHA256
+        values['unit'].update(source=BASE, checkpoint_sha256=CHECKPOINT_SHA256,
+                              config_sha256=CONFIG_SHA256, training_data='LJSpeech')
+    return values
+
+
+def settings(plan):
+    values = plan.get('vocoders', vocoder_settings())
+    if values != vocoder_settings(values['mel']['mode'], values['unit']['mode']):
+        raise ValueError('preview vocoder identity changed; rerun cell 6')
+    return values
+
+
+def listening_labels(plan):
+    values = settings(plan)
+    mel = 'Griffin–Lim' if values['mel']['mode'] == 'griffin_lim' else '自前Mel HiFi-GAN'
+    unit = '公式Unit HiFi-GAN（LJSpeech）' if values['unit']['mode'] == 'paper' else '自前Unit HiFi-GAN'
+    return dict(original_ja='日本語原音', original_en='英語正解',
+                **{'mel-reference': f'正解Mel → {mel}',
+                   'unit-reference': f'正解Unit → {unit}（予測duration）',
+                   'mel-translated': f'TT2翻訳 → {mel}',
+                   'unit-translated': f'S2UT翻訳 → {unit}'})
+
+
 @operation('preview: run one model without optimizer or fitting')
 def worker(plan, kind):
     import os
@@ -24,8 +57,8 @@ def worker(plan, kind):
     if plan['purpose'] != 'dev_listening_only_not_benchmark' or plan['split'] != 'dev' or sample_ids(ids_path) != plan['ids']:
         raise ValueError('not a bounded dev preview plan')
     os.environ['S2ST_INPUT_MAP'] = str(root/'input-map.json')
-    run = plan['runs'][kind]
     if kind in ('tt2', 's2ut'):
+        run = plan['runs'][kind]
         module = 'translatotron2.infer' if kind == 'tt2' else 's2ut.fairseq_infer'
         command = [sys.executable, '-m', 'direct_s2st.'+module,
                    '--data-root', run['data_root'], '--run-root', run['work'],
@@ -36,21 +69,45 @@ def worker(plan, kind):
     from .vocoders.inference import vocode
     from .vocoders.monitor import select_generator
     from .journal import Journal
-    checkpoint = select_generator(Path(run['work']))
-    config_path = Path(option(run['config']['command'], '--config'))
-    config = read(config_path)
-    spec = config.get('mel') if kind == 'mel' else None
-    rate = config['sampling_rate']
+    selected = settings(plan)[kind]
+    mode = selected['mode']
+    owner = 'tt2' if kind == 'mel' else 's2ut'
+    run = plan['runs'].get(kind, plan['runs'][owner])
+    spec_path = Path(plan['runs'][owner]['data_root'])/'mel-spec.json' if kind == 'mel' else None
+    if mode == 'paper':
+        from .vocoders.reference import ensure_reference, validate_reference_units
+        lock = read(Path(plan['runs']['s2ut']['data_root'])/'data-lock.json')
+        validate_reference_units(lock['unit_configuration'])
+        checkpoint, config_path = root/'official-unit/g_00500000', root/'official-unit/config.json'
+        ensure_reference(checkpoint, config_path)
+        config = read(config_path)
+        spec, rate = None, config['sampling_rate']
+    elif mode == 'griffin_lim':
+        from .vocoders import griffin_lim
+        spec = read(spec_path)
+        griffin_lim.validate_spec(spec)
+        config_path, rate = spec_path, spec['sample_rate']
+    else:
+        checkpoint = select_generator(Path(run['work']))
+        config_path = Path(option(run['config']['command'], '--config'))
+        config = read(config_path)
+        spec = config.get('mel') if kind == 'mel' else None
+        rate = config['sampling_rate']
     predicted = root/('tt2' if kind == 'mel' else 's2ut')/'predictions.jsonl'
-    if kind == 'mel' and spec != read(Path(plan['runs']['tt2']['data_root'])/'mel-spec.json'):
+    if kind == 'mel' and spec != read(spec_path):
         # Matching required keys are checked by vocode as well. Complete spec
         # may include harmless metadata; compare the actual frontend contract.
         from .vocoders.inference import MEL_KEYS
-        target = read(Path(plan['runs']['tt2']['data_root'])/'mel-spec.json')
+        target = read(spec_path)
         if any(spec.get(k) != target.get(k) for k in MEL_KEYS):
             raise ValueError('trained Mel vocoder and TT2 target frontends differ')
-    vocode(kind, predicted, root/(kind+'-translated'), checkpoint, config_path,
-           sample_rate=rate, device='cuda', mel=spec, duration_prediction=True, resume=True)
+    def reconstruct(inputs, output):
+        if mode == 'griffin_lim':
+            return griffin_lim.vocode(inputs, output, spec_path, iterations=selected['iterations'],
+                                      seed=selected['seed'], resume=True)
+        return vocode(kind, inputs, output, checkpoint, config_path,
+                      sample_rate=rate, device='cuda', mel=spec, duration_prediction=True, resume=True)
+    reconstruct(predicted, root/(kind+'-translated'))
     references = root/(kind+'-reference-input.jsonl')
     identity = dict(purpose='reference_reconstruction_not_translation', ids=plan['ids'],
                     config=raw_sha(config_path), common=plan['common_sha256'])
@@ -96,8 +153,7 @@ def worker(plan, kind):
         except Exception as error:
             record.update(status='failed', error=f'{type(error).__name__}: {error}')
         with_reference.record(record)
-    vocode(kind, references, root/(kind+'-reference'), checkpoint, config_path,
-           sample_rate=rate, device='cuda', mel=spec, duration_prediction=True, resume=True)
+    reconstruct(references, root/(kind+'-reference'))
 
 
 @operation('preview: publish small verified listening results to Drive')
@@ -126,13 +182,15 @@ def publish(plan):
             else:
                 entries[pair_id]['audio'][label] = dict(status='failed', error=row.get('error'))
     result = dict(purpose=plan['purpose'], split='dev', execution_revision=plan['execution_revision'],
+                  vocoders=settings(plan), labels=listening_labels(plan),
                   runs={k: dict(name=v['name'], durable_updates=v['updates'], snapshot=v['snapshot'])
                         for k,v in plan['runs'].items()},
                   notes=['Not a test benchmark. No translation-quality score is computed.',
-                         'mel-reference: reference English audio -> saved Mel frontend -> trained Mel HiFi-GAN.',
-                         'unit-reference: reference reduced units -> trained Unit HiFi-GAN with PREDICTED durations.',
-                         'mel-translated: Japanese -> TT2 -> trained Mel HiFi-GAN (not the formal Griffin-Lim mode).',
-                         'unit-translated: Japanese -> S2UT -> trained Unit HiFi-GAN.'],
+                         'mel-reference: reference English audio -> saved Mel frontend -> selected Mel backend.',
+                         'unit-reference: reference reduced units -> selected Unit backend with PREDICTED durations.',
+                         'mel-translated: Japanese -> TT2 -> selected Mel backend.',
+                         'unit-translated: Japanese -> S2UT -> selected Unit backend.',
+                         'Official Unit weights are LJSpeech-trained, not Fisher/target-corpus-trained.'],
                   samples=[entries[i] for i in plan['ids']])
     atomic_write_json(output/'listening.json', result, overwrite=True)
     if read(output/'listening.json') != result:
