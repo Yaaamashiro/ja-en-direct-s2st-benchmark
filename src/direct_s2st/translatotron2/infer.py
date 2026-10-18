@@ -33,6 +33,7 @@ def main():
     parser.add_argument('--length-penalty', type=float, default=0.0)
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--sample-ids', type=Path, help='preview only: JSON array of 1..10 IDs, without editing prepared data')
     args = parser.parse_args()
     if os.environ.get('CORPUS_ROOT') and args.predictions.resolve().is_relative_to(Path(os.environ['CORPUS_ROOT']).resolve()):
         raise ValueError('predictions must not be inside CORPUS_ROOT')
@@ -61,8 +62,13 @@ def main():
     # ZIPs/spec remain untouched. Never switch back to the legacy source filter.
     source_spec = state['data_fingerprint'].get('training', {}).get('source_feature_config', source_spec)
     prepared = read_table(args.data_root / f'{args.split}.tsv')
-    common = list(read_common_manifest(args.common_root / f'{args.split}.jsonl'))
-    if {r['id'] for r in prepared} != {r['pair_id'] for r in common} or len(common) != len(prepared):
+    from ..preview_selection import sample_ids, common_rows
+    selected = sample_ids(args.sample_ids)
+    manifest = args.common_root / f'{args.split}.jsonl'
+    common, full_ids = (list(read_common_manifest(manifest)), None) if selected is None else common_rows(manifest, selected)
+    expected_ids = full_ids if selected is not None else {r['pair_id'] for r in common}
+    if ({r['id'] for r in prepared} != expected_ids or len(expected_ids) != len(prepared)
+            or (selected is None and len(common) != len(prepared))):
         raise ValueError('common/prepared IDs mismatch')
     if any(row['split'] != args.split for row in common):
         raise ValueError('common split mismatch')
@@ -73,6 +79,8 @@ def main():
                     source={r['pair_id']: sha256_file(Path(r['ja_audio'])) for r in common},
                     max_phones=args.max_phones, max_frames=args.max_frames, split=args.split,
                     beam_size=args.beam_size, length_penalty=args.length_penalty, source_feature_config=source_spec)
+    if selected is not None:
+        identity['preview_sample_ids'] = selected
     journal = Journal(args.predictions, identity, resume=args.resume, overwrite=args.overwrite)
     feature_root.mkdir(parents=True, exist_ok=True)
     for index, row in enumerate(track(common, 'tt2: inference (generate/reuse)')):
