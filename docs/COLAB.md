@@ -679,6 +679,39 @@ DriveのAPI/転送量・容量制限そのものを解除するものではあ�
 コード取得は保存済みGit revisionに戻るため、新コードを使う場合は最新コードを取得した新しいVMで新しい実験名を使い、
 旧実験のrevision/環境lockを無理に上書きしないでください。
 
+### 学習後、まず3件を試聴する（通常セル6・7）
+
+4種類の学習が終わったら、ノートブックを開き直し、セル1で
+`RUN_TRAINING=False`、`RUN_PREVIEW=True`、`RUN_BENCHMARK=False`、
+`PREVIEW_SAMPLES=3`（1〜10件）を設定して **セル1 → 6 → 7** を実行します。
+旧launcherを保存している実験では、`TRAIN_CODE_REVISION`に試聴機能対応の
+完全SHAを明示してください。学習用の保存revisionや実験名を変える必要はありません。
+
+セル6は、`last-training-run-{tt2,s2ut,unit,mel}.json`を優先して実際の保存名を選びます。
+ポインタがなければ学習済みrunが一意のときだけ自動選択し、複数候補は
+`PREVIEW_RUN_NAMES`で指定します。例えばTT2の`-probe-fix-v1`も実名のまま復元し、
+更新ゼロのデフォルト名を使って新規学習することはありません。
+snapshot ZIP・ファイル・保存configの整合性を照合して専用ローカル領域に復元します。
+学習入力の全件取り込みはせず、同じdev IDの日本語/英語WAVだけを検証コピーします。
+学習済みcheckpoint ZIPの取得は必要です。モデルによっては数GBあり、Driveの転送制限は残ります。
+
+セル7はGPUを使用します。各runの保存されたコード位置・依存環境を順に復元してから、
+現在の固定revisionの推論コードでdevの選択件数だけを生成します。
+再学習、optimizer更新、4A/4Bのやり直し、ASR/スコア評価は行いません。
+原音（日/英）、正解Melの再構成、正解の短縮Unitの再構成、TT2/S2UT翻訳音声を並べます。
+**Unit再構成もdurationはvocoderの予測値であり、正解の時間長を復元するものではありません。**
+試聴TT2は学習済みMel HiFi-GANを使用します。正式BLEU用のGriffin-Lim設定は変更しません。
+この比較で、vocoder自体の再構成品質と翻訳モデルの出力品質を分けて確認できます。
+生成失敗はエラー表示のまま残し、代替音声は作りません。
+
+試聴成果物は`<実験>/preview/<識別子>/listening.json`と`audio/`へ保存します。
+既存checkpoint・元コーパス・全件testのpredictions/resultsは変更しません。
+切断後は同じ設定で通常のセル1 → 6 → 7を再実行します。
+専用ローカルコピーは失われますが、Driveの保存snapshotと試聴成果物は保持されます。
+セル8は試聴を正式比較として評価しません。正式な全件test評価へ進む場合は
+`RUN_PREVIEW=False`、`RUN_BENCHMARK=True`としてセル6から準備します。
+実Colab/GPUでのこの新しい試聴E2Eは未検証です。
+
 ### テストの範囲
 
 工程別の保存単位・再開手順・旧データの制約は[中断・再開の範囲](RESUME.md)を参照してください。
