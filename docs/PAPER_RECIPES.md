@@ -25,7 +25,8 @@ TT2の追加選択肢`TT2_RECIPE=stabilized_seconds_v1`は明示的な安定化�
 | TRAIN_CALIBRATION_STEPS | 3 | 候補ごとの実forward/backward/optimizer測定回数（3以上） |
 | PRACTICAL_UPDATE_FREQ | 1 | practicalのみ使用。実効batch=物理batch×update_freq×world_size |
 | TT2_VOCODER_MODE | griffin_lim | hifiganは別の比較run。Mel vocoder学習が追加で必要 |
-| S2UT_VOCODER_MODE | trained | unit学習が必要。paperは公式LJSpeech配布重みの代替でありFisher学習重みではない |
+| S2UT_VOCODER_MODE | paper | 新paper_fisher_v1は公式LJSpeech配布重み（Fisher学習重みではない）。trainedは自前学習用の別条件 |
+| S2UT_RECIPE | paper_fisher_v1 | 新規run、warmup10000・400000更新上限・早期終了なし。旧run再開はlegacy_short |
 | TOTAL_UPDATES | 研究者が指定 | TT2 Appendix Aの総更新数はunknown。S2UT公式目安400000は自動実行しない |
 | S2UT_TOTAL_UPDATES | 400000 | S2UT専用。RUN_TRAININGとCONFIRM_TRAININGは既定OFFのまま。短期変更時は論文の学習量に未達と記録 |
 | TRAIN_CALIBRATION_OBJECTIVE | throughput | 安全な候補から試運転速度で選ぶ。capacityは収まる最大数。S2UT exactは収容確認のみ |
@@ -39,11 +40,16 @@ S2UTは開始前も追加分割・拡大禁止で、公式token-budget batchの�
 exactの実効1024は維持できるが、microbatch-localなBatchNorm統計は同じにならない。
 practicalでも通常はFisherモデル・LR・warmup・L2を保持する。
 例外としてS2UTの明示的な`S2UT_WARMUP_UPDATES=400/500/1000`を許可し、論文の10,000との差を記録する。
-ノートブックではこの短縮を既定にして新しい学習名を使う。TT2の既存checkpoint向け短縮はRESUME.md参照。
-通常セルの既定は両モデルとも400 warmup・10更新ごとのdev評価・patience 5・最低改善率1%。
+S2UTの短縮条件はlegacy_shortとして残すが、新規既定はpaper_fisher_v1とする。
+TT2の既存checkpoint向け短縮はRESUME.md参照。
+TT2と旧S2UTの短縮条件は400 warmup・10更新ごとのdev評価・patience 5・最低改善率1%。
 policy v3ではTT2の全4種、S2UTの全5種のDev lossを独立anchorで監視する。
 いずれも自身のanchorから1%以上改善しない評価が5回連続すれば停止する。
 これらは独自の短縮/早期終了条件であり、原論文の学習量やBLEUでのモデル選択の再現ではない。
+
+新S2UTは1000更新ごとの全Dev lossと固定500件補助text BLEU、主要更新で固定100件の
+音声ASR-BLEUを学習中に測定する。BLEUは停止・best選択に不使用で、bestはDev unit_loss。
+通常セルでの開始/再開、評価コスト、ASR/vocoderの論文との差異は[COLAB.md](COLAB.md)を参照。
 
 ## 共通の開始前VRAM測定（Colabセル5）
 

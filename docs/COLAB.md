@@ -1,5 +1,87 @@
 # Google Colab：テストと通常実験
 
+## 新規S2UT：公式Fisherレシピと学習中のBLEU推移
+
+`S2UT_RECIPE='paper_fisher_v1'` は旧短縮runとは別の新規学習です。
+warmup **10,000**、最大 **400,000 optimizer updates（絶対値）**、独自early stoppingなし。
+モデル、補助タスク、loss係数、Adam、inverse-sqrt、LR 0.0005、FP16、seed 1、
+max_tokens 20,000 / update_freq 4は公式レシピを維持します。
+1 GPUで4 GPU分を勾配蓄積する公式の単一GPU設定であり、4 GPU実行の数値的同一性は保証しません。
+
+根拠は[原論文](https://arxiv.org/abs/2107.05604)と
+[fairseq公式レシピ](https://github.com/facebookresearch/fairseq/blob/main/examples/speech_to_speech/docs/direct_s2st_discrete_units.md)。
+Fisherではなく日英コーパス、公式配布LJSpeech vocoder（Fisherでfitしたものではない）、
+固定Whisper（原論文のwav2vec2 ASRではない）を使用する点をmetadataへ明記します。
+この変更で翻訳品質の改善を保証するわけではありません。
+
+通常セル1で以下を設定し、セル5を実行します。4A/4Bの再作成は不要です。
+
+```python
+TRAIN_TARGET = 's2ut'
+S2UT_RECIPE = 'paper_fisher_v1'
+S2UT_WARMUP_UPDATES = 10000
+S2UT_TOTAL_UPDATES = 400000
+S2UT_VOCODER_MODE = 'paper'
+REPRODUCTION_MODE = 'paper_exact'
+TRAIN_RUN_NAME = ''
+RUN_TRAINING = True
+CONFIRM_TRAINING = True
+SESSION_MINUTES = 0
+```
+
+初回の新recipe取得時は、push後の対応する完全SHAを`TRAIN_CODE_REVISION`へ指定してください。
+未対応の古いlauncherは実行前に拒否します。
+保存名は `s2ut-training-<実験名>-paper-fisher-v1`。
+旧runのoptimizer/checkpoint/configは保持し、新runへ移植しません。
+以後は同じ設定で**セル1→5**により保存済み環境・optimizer・評価結果を復元します。
+旧runを続けるときだけ`legacy_short`、元のwarmup/モード/実保存名を選択します。
+新recipeから旧runを明示選択すると不一致で停止し、update 0へ誤再開しません。
+
+### 学習中の測定（すべてdev、testは不使用）
+
+| 測定 | 更新数 | 内容 |
+|---|---|---|
+| 全Dev loss | 1,000ごと | 全件teacher-forced検証、5種類すべて保存 |
+| 補助text BLEU | 1,000ごと | 固定dev最大500件、日本語音声→target-letter自由生成→英文 |
+| 音声ASR-BLEU | 1k / 5k / 10k / 25k / 50k / 100k / 200k / 400k | 固定dev最大100件、日本語音声→beam10 Unit自由生成→公式Unit vocoder→英語ASR |
+
+補助text BLEUはS2STの正式指標ではありません。2系列を混ぜずに記録します。
+固定IDはseed 1とpair_idのSHA256順で選び、音声100件は500件の部分集合。
+生成モデルへ正解Unit・正解テキスト・previous-output targetを渡しません。
+英文正解はスコア計算専用です。生成失敗も空hypothesisとして全選択件数の分母へ含め、
+failure数・エラーを保存します。Whisperは`openai/whisper-large-v3-turbo`の
+`60be3615a4d667e1258e8ad29130467587c489aa`を固定し、英語transcribeで使用します。
+Unit vocoderの重み/configもSHA256検証します。
+
+評価は同じGPUで学習と交互に行うため、その間optimizer更新は待ちます。
+別GPU/別Colabを要求しません。初回モデル取得の通信・VRAM・ディスク、推論/ASRの時間は追加です。
+項目間で30分の時間予算を確認し、超過後の未処理例は失敗として記録します。
+1件の処理・モデル取得の強制timeoutではありません。評価全体の失敗は欠測（null）として残し、
+偽のBLEUや改善値は作らず、完了した学習更新をlast checkpointへ保存します。
+CUDA OOM・device-side assertは例外で、安全性のためprocess-fatalとし、直前の永続snapshotから復旧します。
+学習modelのmode・buffer・Python/NumPy/Torch RNGを評価後に戻し、optimizerには触れません。
+
+**BLEUでearly stop/最良モデル選択はしません。**
+bestは全Dev `unit_loss`最小の完全checkpoint、再開はlast checkpointです。
+lossはtrain100更新/Dev1000更新の間引き履歴として保存し、400k分の巨大な履歴再生を避けます。
+400k到達済みcheckpointから追加optimizer更新はしません。
+
+### グラフ・保存・計算資源
+
+Driveの `PERSISTENT/checkpoints/<実保存run名>/` に
+`training-monitor.svg/.csv/.json`（loss）と `training-bleu.svg/.csv/.json`（2系列）を公開します。
+小さなper-update identity・固定ID・成功/失敗hypothesis・採点signatureも検証済みsnapshotへ同梱します。
+評価重みのSHAとpolicyが一致する成功例だけ再利用し、失敗例は再試行します。
+ASR/vocoderモデル本体や生成WAVを毎回の学習backupへ複製しません。
+
+`S2UT_PAPER_SAVE_INTERVAL=100`でlast checkpointを保存し、通常の非同期backup（既定600秒間隔）、
+Dev評価地点・終了地点の強制backupを使います。評価中のVM強制削除は最後の永続snapshotまで戻ります。
+評価途中のjournalがローカルにしかない場合も同様で、そこからの学習/評価を再実行します。
+全Dev/BLEU測定地点のsnapshotは保持しますが、全更新を永久保存するものではありません。
+Drive既定予算1024GBを超えると安全に停止し、自動削除・無断の予算拡大はしません。
+400kは非常に長いため、保存使用量と実測の更新速度を確認してください。
+短い上限で試運転した場合は原論文相当の学習量を完了したとは扱いません。
+
 ## TT2の安定化試験recipe（新規run限定）
 
 `TT2_RECIPE='stabilized_seconds_v1'` をセル1で明示選択すると、通常セル5から

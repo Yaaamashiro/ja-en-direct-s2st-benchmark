@@ -17,10 +17,26 @@ def prepare_research_metadata(command, *, check_audio=True):
                            prepared_metadata, MODES, S2UT_VOCODERS)
     from ..hashing import sha256_file
     command = list(command)
+    paper_recipe = '--s2ut-recipe' in command
+    if paper_recipe:
+        from .paper_recipe import PAPER, MAX_UPDATES, report_policy, bleu_policy, validate_report_policy, validate_bleu_policy
+        if option(command, '--s2ut-recipe') != PAPER:
+            raise ValueError('unknown S2UT scientific recipe')
+        position = command.index('--s2ut-recipe')
+        del command[position:position+2]
+        os.environ.pop('S2ST_S2UT_MONITOR_POLICY', None)
+        os.environ.setdefault('S2ST_S2UT_PAPER_MONITOR', json.dumps(report_policy()))
+        os.environ.setdefault('S2ST_S2UT_BLEU_POLICY', json.dumps(bleu_policy()))
+        paper_monitor = validate_report_policy(json.loads(os.environ['S2ST_S2UT_PAPER_MONITOR']))
+        paper_bleu = validate_bleu_policy(json.loads(os.environ['S2ST_S2UT_BLEU_POLICY']))
     from ..translatotron2.monitor import absolute_update_limit
     if '--max-update' in command:
         index = command.index('--max-update') + 1
         command[index] = str(absolute_update_limit('s2ut', int(command[index])))
+        if paper_recipe:
+            command[index] = str(min(int(command[index]), MAX_UPDATES))
+    elif paper_recipe:
+        command += ['--max-update', str(MAX_UPDATES)]
     mode, vocoder = option(command, '--reproduction-mode', 'smoke'), option(command, '--vocoder-mode', 'trained')
     for flag in ('--reproduction-mode', '--vocoder-mode'):
         if flag in command:
@@ -45,6 +61,13 @@ def prepare_research_metadata(command, *, check_audio=True):
     evidence = (validate_training(root, command) if check_audio else
                 validate_training(root, command, check_audio=False))
     metadata = training_metadata(command, 's2ut', mode, vocoder, world_size=int(os.environ.get('WORLD_SIZE', '1')))
+    if paper_recipe:
+        if mode != 'paper_exact' or vocoder != 'paper' or option(command, '--warmup-updates') != '10000':
+            raise ValueError('paper_fisher_v1 requires exact original S2UT schedule and official vocoder')
+        metadata.update(s2ut_recipe=PAPER, independent_early_stopping=False,
+                        online_dev_evaluation=dict(monitor=paper_monitor, bleu=paper_bleu),
+                        checkpoint_selection='teacher_forced_dev_unit_loss',
+                        evaluation_asr='benchmark Whisper; differs from paper wav2vec2')
     if int(os.environ.get('S2ST_TRAIN_FIXED_MICROBATCH', '0')):
         metadata['physical_batch_cap'] = int(os.environ['S2ST_TRAIN_FIXED_MICROBATCH'])
         metadata['batch_policy'] = 'startup-calibrated then fixed; logical token batches unchanged'
@@ -79,7 +102,11 @@ def prepare_research_metadata(command, *, check_audio=True):
     metadata['repository_revision'] = subprocess.check_output(['git', '-C', str(repository), 'rev-parse', 'HEAD'], text=True).strip()
     metadata.update(max_updates=int(option(command, '--max-update')), completed_updates=0)
     metadata['paper_training_length_reached'] = metadata['max_updates'] >= 400000
-    if not metadata['paper_training_length_reached']:
+    target_reaches_paper = metadata['max_updates'] >= 400000
+    if paper_recipe:
+        metadata['paper_training_target_requested'] = target_reaches_paper
+        metadata['paper_training_length_reached'] = False  # Requested length is not completed work.
+    if not target_reaches_paper:
         print('[recipe] S2UT short training: target updates below paper 400000; not a completed paper-length run',
               file=sys.stderr, flush=True)
     return command, (run_root, metadata)
@@ -165,7 +192,9 @@ def main():
         saved_policy = saved_monitor.get('policy')
         from .monitor import policy_from_env
         requested_policy = policy_from_env()
-        if (requested_policy and requested_policy.get('version') == 3) or (saved_policy and saved_policy.get('version') == 3):
+        if ((requested_policy and requested_policy.get('version') == 3) or
+                (saved_policy and saved_policy.get('version') == 3) or
+                (requested_policy or {}).get('mode') == 'report_only'):
             limit = absolute_update_limit('s2ut', int(option(command, '--max-update', '0')) or 3000, saved_policy)
             if '--max-update' in command:
                 command[command.index('--max-update')+1] = str(limit)
@@ -222,10 +251,16 @@ def main():
                                    'all_plateau' if monitor.policy.get('version') == 2 else 'unit_plateau'),
                     warmup_guard=monitor.warmup, adopted_at=monitor.origin,
                     paper_stopping_rule_reproduced=False)
+                if monitor.policy.get('mode') == 'report_only':
+                    research[1]['monitoring'].update(stopping_metrics=[], stopping_rule='disabled',
+                        early_stopping=False, absolute_max_update=400000,
+                        paper_stopping_rule_reproduced=True)
                 if monitor.policy.get('version') == 3:
                     research[1]['monitoring']['absolute_max_update'] = monitor.absolute_max_update
-            atomic_write_json(research[0] / 'research-metadata.json',
-                              dict(research[1], completed_updates=self.get_num_updates()), overwrite=True)
+            current_metadata = dict(research[1], completed_updates=self.get_num_updates())
+            if research[1].get('s2ut_recipe') == 'paper_fisher_v1':
+                current_metadata['paper_training_length_reached'] = self.get_num_updates() >= 400000
+            atomic_write_json(research[0] / 'research-metadata.json', current_metadata, overwrite=True)
         return original_save(self, filename, extra_state)
     if research:
         # Bind the actual restored file too, not only a sibling lock document.

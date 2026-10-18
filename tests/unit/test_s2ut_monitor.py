@@ -187,6 +187,52 @@ def install_trainer(monkeypatch):
     return Trainer, loop, dev_updates
 
 
+def test_paper_reporting_online_evaluation_and_real_optimizer_resume(tmp_path, monkeypatch):
+    from direct_s2st.s2ut.paper_recipe import report_policy
+    from direct_s2st.s2ut import bleu_monitor
+    Trainer, loop, dev_updates = install_trainer(monkeypatch)
+    monkeypatch.setenv('S2ST_S2UT_PAPER_MONITOR', json.dumps(report_policy(interval=2,train_interval=1)))
+    monkeypatch.setenv('S2ST_S2UT_BLEU_POLICY', '{}')  # Evaluator is isolated below.
+    for name in ('S2ST_BATCH_PROBE','S2ST_TRAIN_ADAPTIVE_BATCH','S2ST_TRAIN_DEADLINE'):
+        monkeypatch.delenv(name, raising=False)
+    calls=[]
+    def evaluate(trainer,task,work,update):
+        calls.append(update)
+        if update==4: raise RuntimeError('bounded simulated ASR loading failure')
+    monkeypatch.setattr(bleu_monitor,'evaluate',evaluate)
+    def run(work, count, restore=False):
+        work.mkdir(exist_ok=True)
+        trainer, audit = Trainer(work), NS()
+        command=['wrapper','--save-dir',str(work/'checkpoints'),'--warmup-updates','10000']
+        last=work/'checkpoints/checkpoint_last.pt'
+        if restore: command+=['--restore-file',str(last)]
+        iterator=NS(state_dict=lambda:{'iterations':trainer.updates})
+        with runtime_hooks(audit,command):
+            trainer.load_checkpoint(last if restore else None)
+            for _ in range(count):
+                trainer.train_step(audit)
+                _,stop=loop.validate_and_save(trainer.cfg,trainer,audit,iterator,['dev'],False)
+                assert not stop
+        return torch.load(last,weights_only=True)
+    torch.manual_seed(8)
+    continuous=run(tmp_path/'continuous',6)
+    torch.manual_seed(8)
+    first=run(tmp_path/'resumed',3)
+    resumed=run(tmp_path/'resumed',3,True)
+    assert resumed['updates']==continuous['updates']==6 and first['updates']==3
+    for name,tensor in continuous['model'].items():
+        torch.testing.assert_close(tensor,resumed['model'][name],rtol=0,atol=0)
+    for parameter,state in continuous['optimizer']['state'].items():
+        for key,value in state.items():
+            torch.testing.assert_close(value,resumed['optimizer']['state'][parameter][key],rtol=0,atol=0)
+    assert resumed['extra_state']['s2st_monitor']['stopped'] is False
+    assert select_checkpoint(tmp_path/'resumed').name=='checkpoint_best.pt'
+    assert torch.load(select_checkpoint(tmp_path/'resumed'),weights_only=True)['updates']==2
+    failed=json.loads((tmp_path/'resumed/training-bleu/000000004/result.json').read_text())
+    assert failed['status']=='failed' and failed['asr_bleu'] is None
+    assert calls==[2,4,6,2,4,6]
+
+
 @pytest.mark.parametrize('policy, terminal', [(POLICY, 6), (dict(DUAL_POLICY, interval=2), 12)])
 def test_real_adam_hooks_resume_counters_best_and_restore_methods(tmp_path, monkeypatch, policy, terminal):
     Trainer, loop, dev_updates = install_trainer(monkeypatch)

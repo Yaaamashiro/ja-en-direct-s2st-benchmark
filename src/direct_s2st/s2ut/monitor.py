@@ -65,6 +65,9 @@ class S2UTMonitor(Monitor):
 
 
 def policy_from_env():
+    if os.environ.get('S2ST_S2UT_PAPER_MONITOR'):
+        from .paper_recipe import validate_report_policy
+        return validate_report_policy(json.loads(os.environ['S2ST_S2UT_PAPER_MONITOR']))
     value = os.environ.get('S2ST_S2UT_MONITOR_POLICY')
     return validate_policy(json.loads(value)) if value else None
 
@@ -107,12 +110,20 @@ class Controller:
             self.collector.record(output, main)
 
     def restore(self, trainer, extra):
-        self.monitor = S2UTMonitor.restore(self.requested, (extra or {}).get('s2st_monitor'),
+        saved = (extra or {}).get('s2st_monitor')
+        monitor_class = S2UTMonitor
+        if (self.requested or {}).get('mode') == 'report_only' or (saved or {}).get('version') == 's2ut-paper-report-v1':
+            from .paper_monitor import PaperMonitor
+            monitor_class = PaperMonitor
+        self.monitor = monitor_class.restore(self.requested, saved,
                                           trainer.get_num_updates(), self.warmup, self.work)
         from ..translatotron2.monitor import absolute_update_limit
         if self.monitor and self.monitor.policy.get('version') == 3:
             configured = trainer.cfg.optimization.max_update or self.monitor.absolute_max_update
             trainer.cfg.optimization.max_update = absolute_update_limit('s2ut', configured, self.monitor.policy)
+        elif self.monitor and self.monitor.policy.get('mode') == 'report_only':
+            configured = trainer.cfg.optimization.max_update or self.monitor.absolute_max_update
+            trainer.cfg.optimization.max_update = min(configured, self.monitor.absolute_max_update)
 
 
 @contextmanager
@@ -155,7 +166,8 @@ def runtime_hooks(audit, command):
                 raise ValueError('S2UT checkpoint monitor was not restored')
             controller.restore(self, None)
         before = self.get_num_updates()
-        if controller.monitor.stopped or (controller.monitor.policy.get('version') == 3 and
+        if controller.monitor.stopped or ((controller.monitor.policy.get('version') == 3 or
+                                          controller.monitor.policy.get('mode') == 'report_only') and
                                           before >= self.cfg.optimization.max_update):
             # Upstream's epoch loop calls train_step once before its limit check.
             # A resumed checkpoint already at the cap must not optimize again.
@@ -211,7 +223,10 @@ def runtime_hooks(audit, command):
                        (cfg.optimization.max_update > 0 and update >= cfg.optimization.max_update) or
                        (cfg.optimization.stop_time_hours > 0 and
                         trainer.cumulative_training_time()/3600 > cfg.optimization.stop_time_hours))
-        if dev is not None and monitor.policy.get('version') != 3:
+        if dev is not None and monitor.policy.get('mode') == 'report_only':
+            print(f'[training-monitor] S2UT update={update} dev={json.dumps(dev)} '
+                  'early_stopping=False recipe=paper_fisher_v1', file=sys.stderr, flush=True)
+        elif dev is not None and monitor.policy.get('version') != 3:
             print(f'[training-monitor] S2UT update={update} dev_unit_loss={dev["unit_loss"]:.6g} '
                   f'dev_loss={dev["loss"]:.6g} '
                   f'best_update={monitor.best_update} unit_bad_evaluations={monitor.bad_evaluations}/'
@@ -239,6 +254,26 @@ def runtime_hooks(audit, command):
                     monitor.save_best(work, save_best)
                 finally:
                     controller.writing_best = False
+            if dev is not None and os.environ.get('S2ST_S2UT_BLEU_POLICY'):
+                from .bleu_monitor import evaluate, fatal_device_error
+                try:
+                    evaluate(trainer, task, work, update)
+                except Exception as error:
+                    if fatal_device_error(error):
+                        raise
+                    # A failed measurement must not discard completed optimizer
+                    # work. Persist an explicit failure (never a fabricated BLEU).
+                    from ..io import atomic_write_json
+                    from .bleu_monitor import report
+                    failed_path = work/'training-bleu'/f'{update:09d}'/'result.json'
+                    if failed_path.is_file():
+                        failed_path = failed_path.with_name('failed-attempt.json')
+                    atomic_write_json(failed_path,
+                        dict(update=update, status='failed', aux_bleu=None, asr_bleu=None,
+                             error=f'{type(error).__name__}: {error}'), overwrite=True)
+                    report(work)
+                    print(f'[training-bleu] update={update} status=failed error={error}; '
+                          'training checkpoint preserved', file=sys.stderr, flush=True)
             monitor.write_reports(work, render=dev is not None or should_stop)
             if should_stop:
                 # Existing resident snapshot hook must force the final backup.

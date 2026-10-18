@@ -14,6 +14,12 @@ def freeze_files(work, checkpoint, destination):
     work, checkpoint, destination = map(lambda p: Path(p).resolve(), (work, checkpoint, destination))
     relative = checkpoint.relative_to(work)
     files = [relative]+[Path(name) for name in ARTIFACTS if (work/name).is_file() and Path(name) != relative]
+    # Reports/receipts only, never generated audio or downloaded ASR/vocoder
+    # weights. This preserves completed measurements across Colab VM loss.
+    files += [Path(name) for name in ('training-bleu.json','training-bleu.csv','training-bleu.svg')
+              if (work/name).is_file()]
+    files += [p.relative_to(work) for p in sorted((work/'training-bleu').glob('*/*'))
+              if p.is_file() and p.suffix in ('.json','.jsonl')]
     hashes = {}
     for name in files:
         source, target = work/name, destination/name

@@ -37,5 +37,9 @@ def validate_checkpoint(path: Path) -> dict:
     monitor = state.get('extra_state', {}).get('s2st_monitor')
     if monitor is not None:
         from .monitor import S2UTMonitor
-        S2UTMonitor.restore(None, monitor, int(history[-1]['num_updates']), monitor['warmup'], path.parent.parent)
+        monitor_class = S2UTMonitor
+        if monitor.get('version') == 's2ut-paper-report-v1':
+            from .paper_monitor import PaperMonitor
+            monitor_class = PaperMonitor
+        monitor_class.restore(None, monitor, int(history[-1]['num_updates']), monitor['warmup'], path.parent.parent)
     return {"num_updates": int(history[-1]["num_updates"]), "checkpoint": str(path), "finite_parameters": True}

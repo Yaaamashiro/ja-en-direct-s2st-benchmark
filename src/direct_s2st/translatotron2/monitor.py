@@ -426,6 +426,10 @@ def select_checkpoint(work, selection='auto'):
             if saved.get('version') == 's2ut-dev-unit-monitor-v1':
                 from ..s2ut.monitor import S2UTMonitor
                 monitor_class = S2UTMonitor
+            if saved.get('version') == 's2ut-paper-report-v1':
+                from ..s2ut.paper_monitor import PaperMonitor
+                monitor_class = PaperMonitor
+                completed = saved['update']
             monitor_class.restore(None, saved, completed, saved['warmup'], work)
             return work/'checkpoints/checkpoint_best.pt'
     if selection == 'best':
@@ -440,7 +444,8 @@ def mirror_reports(frozen, backup):
     if not (frozen/'training-monitor.json').is_file():
         return
     try:
-        for name in ('training-monitor.csv', 'training-monitor.svg', 'training-monitor.json'):
+        for name in ('training-monitor.csv', 'training-monitor.svg', 'training-monitor.json',
+                     'training-bleu.csv', 'training-bleu.svg', 'training-bleu.json'):
             source = frozen/name
             if source.is_file():
                 value = source.read_bytes()

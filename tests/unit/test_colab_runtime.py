@@ -79,9 +79,9 @@ def test_notebooks_separate_data_models_and_training_guards(monkeypatch):
     assert settings['training']['MODEL_SIZE'] == 'fisher'
     assert settings['training']['REPRODUCTION_MODE'] == 'paper_exact'
     assert settings['training']['TT2_VOCODER_MODE'] == 'griffin_lim'
-    assert settings['training']['S2UT_VOCODER_MODE'] == 'trained'
+    assert settings['training']['S2UT_VOCODER_MODE'] == 'paper'
     assert settings['training']['TOTAL_UPDATES'] == 1000
-    assert settings['training']['S2UT_TOTAL_UPDATES'] == 3000
+    assert settings['training']['S2UT_TOTAL_UPDATES'] == 400000
     assert settings['training']['VOCODER_TOTAL_UPDATES'] == 10000
     assert settings['training']['TT2_WARMUP_UPDATES'] == 400
     assert settings['training']['TT2_MONITOR_PATIENCE'] == 5
@@ -90,10 +90,10 @@ def test_notebooks_separate_data_models_and_training_guards(monkeypatch):
     assert json.loads(os.environ['S2ST_TT2_MONITOR_POLICY']) == dict(version=3, interval=10, patience=5, min_relative_improvement=.01)
     assert settings['training']['S2UT_MONITOR_PATIENCE'] == 5
     assert settings['training']['S2UT_MONITOR_MIN_RELATIVE_IMPROVEMENT'] == .01
-    assert settings['training']['S2UT_WARMUP_UPDATES'] == 400
-    assert json.loads(os.environ['S2ST_S2UT_MONITOR_POLICY']) == dict(version=3, interval=10, patience=5, min_relative_improvement=.01)
-    assert settings['training']['training_mode']('s2ut') == 'paper_practical'
-    assert settings['training']['training_run_name']('s2ut').endswith('-recipe-v3-warmup400')
+    assert settings['training']['S2UT_WARMUP_UPDATES'] == 10000
+    assert 'S2ST_S2UT_MONITOR_POLICY' not in os.environ
+    assert settings['training']['training_mode']('s2ut') == 'paper_exact'
+    assert settings['training']['training_run_name']('s2ut').endswith('-paper-fisher-v1')
     assert settings['training']['TRAIN_CALIBRATION_OBJECTIVE'] == 'throughput'
     assert not settings['training']['RUN_TRAINING']
     assert not settings['training']['CONFIRM_TRAINING']
@@ -152,7 +152,7 @@ def test_cell5_short_s2ut_schedule_keeps_official_batch_options(monkeypatch):
     codes = [''.join(c['source']) for c in nb['cells'] if c['cell_type'] == 'code']
     cfg = {}
     exec(codes[0], cfg)
-    cfg.update(RUN_TRAINING=True, CONFIRM_TRAINING=True, TRAIN_TARGET='s2ut', os=os,
+    cfg.update(RUN_TRAINING=True, CONFIRM_TRAINING=True, TRAIN_TARGET='s2ut', S2UT_RECIPE='legacy_short', os=os,
                ensure_workspace=lambda: None)
     # Execute the real cell-5 option builder, stopping before remote code retrieval.
     builder = next(s for s in codes if s.startswith('#@title 5.')).split('    import sys\n')[0]
