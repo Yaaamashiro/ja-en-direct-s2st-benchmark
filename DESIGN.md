@@ -55,10 +55,10 @@ fingerprintを検証し、argv[0]以外の引数・学習条件・入力SHAが�
 全件取得より前に、保存状態の復元・recipe・checkpoint内fingerprintを照合する。
 この先行検査だけはWAV存在確認を省き、入力取得後の通常検査・payload SHA検証は維持する。
 
-Early stopping policy v3はTT2の4 Dev lossとS2UTの5 Dev lossすべてに独立anchorを持つ。
+Early stopping policy v3はTT2の4 Dev lossと旧S2UT (`legacy_short`) の5 Dev lossすべてに独立anchorを持つ。
 いずれかが自身のanchorから1%以上改善すれば共有patienceを0とし、その指標だけanchorを更新。
 全指標が改善不足の評価が5回連続すれば停止する。全devを10更新ごとに評価し、warmup中は停止せず、
-各指標のwarmup内最小値をanchorとする。通常実験のoptimizer更新の絶対上限はTT2=1000、S2UT=3000とする。
+各指標のwarmup内最小値をanchorとする。この短縮条件の絶対上限はTT2=1000、旧S2UT=3000とする。
 anchor/counterの改善はこのhard limitを延長しない。各モデルの上限到達済みの再開では追加更新しない。
 旧v3 S2UTの上限1000の保存状態も検証して読み込み、停止policy・anchor・counterは変更せず上限metadataのみ更新する。
 旧v1/v2の履歴・optimizer・bestは先に検証し、v3採用後の未来の停止判定だけを変更する。
@@ -66,6 +66,14 @@ anchor/counterの改善はこのhard limitを延長しない。各モデルの�
 この明示採用時だけ解除できる。同一v3のresumeは判定状態を完全継承する。policy_historyを保存する。
 checkpoint_bestの選択はTT2=Dev total loss最小、S2UT=Dev unit_loss最小のまま、停止判定から独立である。
 モデル・loss定義/重み・optimizer・scheduler・batch・validation split/間隔は変更しない。
+
+新規S2UT `paper_fisher_v1` は独立runとして元のwarmup10000・最大400000更新を使い、
+独自early stoppingを無効にする。旧runのoptimizerや停止履歴は移植・再解釈しない。
+全Devの5 lossと固定dev500件の補助text BLEUを1000更新ごとに記録し、固定dev100件の
+音声ASR-BLEUも学習中に1k/5k/10k/25k/50k/100k/200k/400kで測る。
+生成へ正解を渡さず、失敗を分母から除外せず、2 BLEU系列を分離して保存する。
+checkpoint_bestはDev unit_lossで選び、BLEUで停止/選択しない。モデル・loss・optimizer・batchは維持。
+日英コーパス・LJSpeech公開vocoder・固定Whisper ASRの差異を明記する。詳細はdocs/COLAB.md。
 
 通常Colabの全学習targetは、別プロセスの開始前VRAM測定を共通に使用する。
 測定はtrainのみ、試行weights/optimizerを本学習へ持ち込まず、update 0から新規開始する。

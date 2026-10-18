@@ -28,6 +28,8 @@ REVIEWED = {  # 2486164: the reported run's immutable execution code.
      '4c2d4e610a631054c3069aa1782eb74ec4cbfac34270b55b3f00b9d182f3c1a1'),  # 761a87f
     ('ee51261415ccdbd26b7f609212eb60199d40f20b4309e33194abfab9fad501a7',
      '90aaf2300c18ded5899f9d6ba1fb22d0b26fbbba1c3f5ea826fe82eb40ae441b'),  # f9cbe6d
+    ('ee51261415ccdbd26b7f609212eb60199d40f20b4309e33194abfab9fad501a7',
+     'c0dc7cf633a98923424a4beb050403a3d947bd5dcddb98ae525f10abe36a91e0'),  # 688b4d7
 }
 
 EXTRA_REVIEWED = {
@@ -35,10 +37,12 @@ EXTRA_REVIEWED = {
     SESSION: ('d70b530541b60d39da4f2ad270b339bef24af8cf903de393cd874c1ee4c60f18',
               '32072cd96da2a6e81ec1275f5cf11b71a20ed42da1c35a72f3d091b59b9d743a',
               '6ba54624e2bd4f9529fb887eb452ad242f2245a802dd1e17a3b7d0dd484e46f0'),
-    CHECKPOINT: 'd9672003743cd110e215eeabddfb6140e0a806d26a1e005f88e9f6b92c487496',
+    CHECKPOINT: ('d9672003743cd110e215eeabddfb6140e0a806d26a1e005f88e9f6b92c487496',
+                 'fffef9c38ab28343f9577118af53428a2dd49fd330cdea824f609f28756ebda3'),
     PREFLIGHT: '6a14765746c3b871a80fc0be869b892d9d81ec2d7da224191c7d48fa4d706ece',
     MONITOR: ('85fffccf90b5b9173c15695d96b9303c174bdcb18dc9490f845b185d915d2c1b',
-              '4e3f91b025aacfdc166261a0106c1d0833eeb9c27881a8e8b9c5f1a2c000a3fc'),
+              '4e3f91b025aacfdc166261a0106c1d0833eeb9c27881a8e8b9c5f1a2c000a3fc',
+              '49a4c59b98208cca6c4583c153bd908033c325a966c29d509751c001b915c7d1'),
 }
 
 
@@ -95,6 +99,9 @@ def replacements(execution, launcher):
     for name in (RECOVERY, RECIPE):
         if (execution/name).is_file():
             if (execution/name).read_bytes() != (launcher/name).read_bytes():
+                if name == RECOVERY and hashlib.sha256((execution/name).read_bytes()).hexdigest() == 'e30767379754cc225decbc260951a540716b87516858e0d21923419caae00f0a':
+                    changed[name] = (launcher/name).read_bytes()
+                    continue  # Reviewed addition: backup BLEU receipts, not optimizer/science.
                 raise ValueError('S2UT recovery helper differs from reviewed source: '+name)
         else:
             changed[name] = (launcher/name).read_bytes()

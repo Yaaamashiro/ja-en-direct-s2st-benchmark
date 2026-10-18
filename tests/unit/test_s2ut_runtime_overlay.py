@@ -27,7 +27,7 @@ def execution(tmp_path, revision=PIN):
     return root
 
 
-@pytest.mark.parametrize('revision', [PIN, 'e56ca1c749a72476f07e8d496e5634b43e12d47c', '39b41c3', '761a87f', 'f9cbe6d'])
+@pytest.mark.parametrize('revision', [PIN, 'e56ca1c749a72476f07e8d496e5634b43e12d47c', '39b41c3', '761a87f', 'f9cbe6d', '688b4d7'])
 def test_repair_only_changes_reviewed_runtime_checkpoint_and_audit_scope(tmp_path, revision):
     root = execution(tmp_path, revision)
     changed = replacements(root, ROOT)
@@ -57,7 +57,7 @@ def test_repair_only_changes_reviewed_runtime_checkpoint_and_audit_scope(tmp_pat
     assert audit.loss_count == 0
     assert 'check_audio' in module['prepare_research_metadata'].__wrapped__.__kwdefaults__
     assert changed[MONITOR] == (ROOT/MONITOR).read_bytes()
-    assert b'any_meaningful_resets_patience' in changed[SHARED_MONITOR]
+    assert b'any_meaningful_resets_patience' in changed.get(SHARED_MONITOR, baseline(SHARED_MONITOR, revision))
     for source in changed.values(): ast.parse(source)
     (root/PERFORMANCE).write_bytes(baseline(PERFORMANCE)+b'\n# unreviewed change\n')
     with pytest.raises(ValueError, match='reviewed pinned runtime'):
@@ -82,3 +82,12 @@ def test_overlay_resumes_and_preserves_originals_configs_and_other_source(tmp_pa
     with pytest.raises(FileExistsError):
         prepare(root, ROOT, tmp_path/'persistent', 's2ut-run')
     assert (root/PERFORMANCE).read_bytes() == baseline(PERFORMANCE)
+
+
+def test_reviewed_existing_recovery_helper_is_updated_but_unknown_edits_rejected(tmp_path):
+    from s2ut_runtime_overlay import RECOVERY
+    root=execution(tmp_path,'688b4d7')
+    (root/RECOVERY).write_bytes(baseline(RECOVERY,'688b4d7'))
+    assert replacements(root,ROOT)[RECOVERY]==(ROOT/RECOVERY).read_bytes()
+    (root/RECOVERY).write_bytes(baseline(RECOVERY,'688b4d7')+b'\n# unknown change\n')
+    with pytest.raises(ValueError,match='helper differs'): replacements(root,ROOT)

@@ -1,5 +1,35 @@
 # Audit and implementation report
 
+## 2026-10-18: independent S2UT paper recipe and online BLEU
+
+- Added `s2ut/paper_recipe.py`, `paper_monitor.py`, `bleu_monitor.py`;
+  integrated the new recipe into Colab config/normal cell 5, the native trainer,
+  checkpoint verification, recovery freezing and dashboard publishing.
+- New run only: warmup 10000, absolute max 400000, no independent early stopping.
+  Original Fisher model/loss/Adam/inverse-sqrt/FP16/token batches are retained.
+  Legacy short-run configs, optimizer states and selection semantics are preserved.
+- Full-dev five-loss reporting and fixed-dev-500 auxiliary free-generation BLEU
+  every 1000 updates. Fixed-dev-100 speech→official Unit vocoder→English Whisper
+  ASR-BLEU runs online at 1k/5k/10k/25k/50k/100k/200k/400k. BLEU never stops
+  training or selects best; best remains dev unit_loss.
+- Tests cover real CPU Adam continuous/resumed equality, state/RNG restoration,
+  per-example journals restored from recovery copies, failed/timeout examples in
+  the BLEU denominator, selection independence, upper limit, recipe separation,
+  dependency preflight, notebook compilation and six reviewed legacy baselines.
+- Full non-GPU suite: **657 passed, 2 skipped, 5 GPU tests deselected**.
+  Additional local native-weight check: production online-vocoder loader and
+  actual pinned CodeGenerator with official SHA-verified weights generated three
+  reference examples on CPU. The ASR interface was mocked in that bounded check.
+- **Not verified:** full native fairseq/Python 3.10 + CUDA + real Whisper end-to-end,
+  A100 memory/throughput, 400k convergence, translation quality or paper-equivalent
+  numerical results. Dependency pins/import preflight do not prove remote model
+  downloads will always succeed. Day-to-day resume remains normal cells 1→5;
+  a compatible pushed launcher revision is required for Colab to fetch the code.
+- Japanese-English corpus, public LJSpeech vocoder and benchmark Whisper instead
+  of paper wav2vec2 ASR remain documented deviations. See [COLAB.md](COLAB.md).
+
+---
+
 Date: 2026-09-13 (Asia/Tokyo). Scope: benchmark repository only.
 No corpus files were edited or regenerated. No trained weights, audio, features,
 predictions or large results were added to Git. No commit/push was performed.

@@ -30,13 +30,22 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
                 calibrate_batch=False, calibration_max_batch=1024, calibration_steps=3,
                 calibration_reserve_ratio=.1, calibration_trial_seconds=1800, calibration_objective='throughput',
                 reproduction_mode=None, tt2_vocoder_mode='griffin_lim', s2ut_vocoder_mode='trained',
-                s2ut_warmup_updates=None, tt2_recipe='legacy_frames'):
+                s2ut_warmup_updates=None, tt2_recipe='legacy_frames', s2ut_recipe='legacy_short'):
     """Explicit throughput knobs; gpu80 is a starting point, not a VRAM guarantee."""
     from .config import load_config
     from .recipes import (MODES, TT2_VOCODERS, S2UT_VOCODERS, replace_option,
                           tt2_batch, training_metadata, prepared_metadata, tt2_source_spec,
                           validate_s2ut_paper)
     reproduction_mode = reproduction_mode or ('smoke' if model_size == 'smoke' else 'paper_exact')
+    from .s2ut.paper_recipe import LEGACY as S2UT_LEGACY, PAPER as S2UT_PAPER, RECIPES as S2UT_RECIPES
+    if s2ut_recipe not in S2UT_RECIPES or (kind != 's2ut' and s2ut_recipe != S2UT_LEGACY):
+        raise ValueError('invalid S2UT training recipe')
+    if s2ut_recipe == S2UT_PAPER:
+        if (reproduction_mode != 'paper_exact' or s2ut_vocoder_mode != 'paper'
+                or s2ut_warmup_updates not in (None,10000) or adaptive_batch or precision != 'default'
+                or max_tokens not in (None,20000) or update_freq not in (None,4) or not optimize):
+            raise ValueError('paper_fisher_v1 requires exact Fisher batches/schedule and official Unit vocoder')
+        s2ut_warmup_updates = 10000
     if reproduction_mode not in MODES or tt2_vocoder_mode not in TT2_VOCODERS or s2ut_vocoder_mode not in S2UT_VOCODERS:
         raise ValueError('invalid reproduction/vocoder mode')
     paper = reproduction_mode != 'smoke' and kind in ('tt2', 's2ut')
@@ -122,6 +131,8 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
         command[0] = '{python}'
         replace_option(command, '--reproduction-mode', reproduction_mode)
         replace_option(command, '--vocoder-mode', s2ut_vocoder_mode)
+        if s2ut_recipe == S2UT_PAPER:
+            replace_option(command, '--s2ut-recipe', s2ut_recipe)
         if s2ut_warmup_updates is not None:
             replace_option(command, '--warmup-updates', s2ut_warmup_updates)
         command[command.index('--max-tokens')+1] = str(max_tokens)
@@ -195,6 +206,14 @@ def make_config(repository, data, environment_lock, kind='tt2', model_size='smok
         result['batch_calibration'] = dict(max_batch=calibration_max_batch, steps=calibration_steps,
             reserve_ratio=calibration_reserve_ratio, trial_seconds=calibration_trial_seconds,
             objective=calibration_objective)
+    if s2ut_recipe == S2UT_PAPER:
+        from .s2ut.paper_recipe import report_policy, bleu_policy
+        from .vocoders.reference import validate_reference_units
+        validate_reference_units(result['research_metadata']['unit_artifacts'])
+        identity_files += [str(data/'common/dev.jsonl'), str(data/'common/dataset-lock.json')]
+        result['s2ut_paper'] = dict(monitor=report_policy(), bleu=bleu_policy())
+        result['research_metadata'].update(s2ut_recipe=s2ut_recipe, independent_early_stopping=False,
+            recommended_total_updates=400000, evaluation_asr='benchmark Whisper; differs from paper wav2vec2')
     return result
 
 
@@ -399,6 +418,11 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=0,
                 resume=False, auto_resume=False, confirm_training=False, restore_only=False, runner=subprocess.run, clock=time.monotonic,
                 inspect_checkpoint=checkpoint_updates, _staged=False):
     work, backup = Path(work).resolve(), Path(backup).resolve()
+    if config.get('kind') == 's2ut':
+        from .s2ut.paper_recipe import activate, recipe_from_config, PAPER, MAX_UPDATES
+        activate(config)
+        if recipe_from_config(config) == PAPER:
+            total = min(total, MAX_UPDATES)
     from .translatotron2.monitor import absolute_update_limit
     total = absolute_update_limit(config['kind'], total)
     if restore_only and not resume:

@@ -26,7 +26,7 @@ def git(repo, *args):
 
 
 @operation('cell 5: inspect saved training runs')
-def choose_run(persistent, kind, default_name, requested='', *, tt2_recipe=LEGACY):
+def choose_run(persistent, kind, default_name, requested='', *, tt2_recipe=LEGACY, s2ut_recipe='legacy_short'):
     persistent = Path(persistent)
     if requested and not re.fullmatch('[A-Za-z0-9_-]+', requested):
         raise ValueError('invalid TRAIN_RUN_NAME')
@@ -44,6 +44,13 @@ def choose_run(persistent, kind, default_name, requested='', *, tt2_recipe=LEGAC
                 if path.stem == requested:
                     raise ValueError(f'TT2 recipe differs from saved run ({saved_recipe} vs {tt2_recipe}); '
                                      'old checkpoints preserved; select a separate new recipe run')
+                continue
+        if kind == 's2ut':
+            from direct_s2st.s2ut.paper_recipe import recipe_from_config
+            saved_recipe = recipe_from_config(config)
+            if saved_recipe != s2ut_recipe:
+                if path.stem == requested:
+                    raise ValueError('S2UT recipe differs from saved run; select a separate new paper run')
                 continue
         backup = persistent/'checkpoints'/path.stem
         markers = sorted(backup.glob('*/snapshot.json'), reverse=True)
@@ -96,8 +103,17 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     repo, persistent, data = Path(repo), Path(persistent), Path(data)
     if total < 1 or seconds < 0 or (total > 10 and not confirm):
         raise ValueError('long training requires CONFIRM_TRAINING=True')
+    from direct_s2st.s2ut.paper_recipe import LEGACY as S2UT_LEGACY, PAPER as S2UT_PAPER, RECIPES as S2UT_RECIPES
+    s2ut_recipe = options.get('s2ut_recipe', S2UT_LEGACY)
+    if s2ut_recipe not in S2UT_RECIPES or (kind != 's2ut' and s2ut_recipe != S2UT_LEGACY):
+        raise ValueError('invalid S2UT recipe selection')
     if kind in ('tt2', 's2ut'):
-        total = min(total, 3000 if kind == 's2ut' else 1000)
+        total = min(total, (400000 if s2ut_recipe == S2UT_PAPER else 3000) if kind == 's2ut' else 1000)
+    if s2ut_recipe == S2UT_PAPER:
+        os.environ.pop('S2ST_S2UT_MONITOR_POLICY', None)
+    elif kind == 's2ut':
+        os.environ.pop('S2ST_S2UT_PAPER_MONITOR', None)
+        os.environ.pop('S2ST_S2UT_BLEU_POLICY', None)
     practical_warmup = options.get('tt2_warmup_updates') if kind == 'tt2' else None
     tt2_recipe = options.get('tt2_recipe', LEGACY) if kind == 'tt2' else LEGACY
     if kind == 'tt2':
@@ -112,7 +128,8 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     corpus = os.environ.get('CORPUS_ROOT')
     if corpus and any(p.resolve().is_relative_to(Path(corpus).resolve()) for p in (persistent, data)):
         raise ValueError('training outputs must stay outside CORPUS_ROOT')
-    name, snapshot = choose_run(persistent, kind, default_name, requested, tt2_recipe=tt2_recipe)
+    name, snapshot = choose_run(persistent, kind, default_name, requested, tt2_recipe=tt2_recipe,
+                                s2ut_recipe=s2ut_recipe)
     config_path = persistent/(name+'.json')
     backup = persistent/'checkpoints'/name
     work = WORK_ROOT/name
@@ -200,8 +217,12 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     if kind == 's2ut':
         from validation_dependencies import ensure
         ensure(python, RUNTIME_ROOT, persistent, run)
-        from s2ut_runtime_overlay import prepare
-        execution = prepare(execution, ROOT, persistent, name)
+        if s2ut_recipe == S2UT_LEGACY:
+            from s2ut_runtime_overlay import prepare
+            execution = prepare(execution, ROOT, persistent, name)
+        else:
+            run(python, '-c', 'from direct_s2st.s2ut.paper_recipe import preflight_dependencies; '
+                             'print(preflight_dependencies())')
     if kind in ('unit', 'mel'):
         from vocoder_monitor_overlay import prepare
         execution = prepare(execution, ROOT, persistent, name)
@@ -209,6 +230,8 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     if tt2_recipe == LEGACY:
         # Older pinned builders do not accept this newly introduced option.
         builder_options.pop('tt2_recipe', None)
+    if s2ut_recipe == S2UT_LEGACY:
+        builder_options.pop('s2ut_recipe', None)
     os.environ['PYTHONPATH'] = str(execution/'src')+os.pathsep+os.environ.get('PYTHONPATH', '')
     os.environ['S2ST_CONFIG_ROOT'] = str(execution/'configs')
     if kind == 's2ut' and snapshot and (work/'checkpoints/checkpoint_last.pt').is_file():
