@@ -712,6 +712,14 @@ snapshot ZIP・ファイル・保存configの整合性を照合して専用ロ�
 `RUN_PREVIEW=False`、`RUN_BENCHMARK=True`としてセル6から準備します。
 実Colab/GPUでのこの新しい試聴E2Eは未検証です。
 
+S2UT推論は1件ずつ処理し、`--required-batch-size-multiple 1`も明示します。
+既定値8のままだと、固定fairseqのバッチ生成で最後の1件が除外されるためです。
+この設定は少数試聴・全件推論の双方に適用し、学習batchは変えません。
+旧設定の不完全な生成シャードは保持しますが、新しいキャッシュ識別子で再生成します。
+`preview generated unexpected or missing sample IDs`が出た旧版は、対応する
+`TRAIN_CODE_REVISION`に更新し、通常のセル1 → 6 → 7で再実行してください。
+checkpointや準備済みデータの削除・再学習は不要です。
+
 ### テストの範囲
 
 工程別の保存単位・再開手順・旧データの制約は[中断・再開の範囲](RESUME.md)を参照してください。

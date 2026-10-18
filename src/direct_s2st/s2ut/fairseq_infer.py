@@ -29,6 +29,21 @@ def parse_generated(path: Path, ids: list[str], *, require_complete=True) -> dic
     return result
 
 
+def generation_command(data_root, checkpoint, generated, split, beam, device):
+    command = [sys.executable, '-m', 'fairseq_cli.generate', str(data_root),
+               '--config-yaml', 'config.yaml', '--multitask-config-yaml', 'config_multitask.yaml',
+               '--task', 'speech_to_speech', '--target-is-code', '--target-code-size', '100',
+               '--path', str(checkpoint), '--gen-subset', split,
+               '--beam', str(beam), '--max-len-a', '1', '--batch-size', '1',
+               # Pinned fairseq drops the last non-multiple batch. Its CLI
+               # default is 8 even with batch_size=1: explicitly retain every
+               # sample, including a one-example preview or final shard.
+               '--required-batch-size-multiple', '1', '--results-path', str(generated)]
+    if device == 'cpu':
+        command.append('--cpu')
+    return command
+
+
 @operation('s2ut: resumable generation shards')
 def generate_shards(command, generated, split, ids, identity, *, resume=False, overwrite=False,
                     runner=None, shard_size=32, selected_ids=None):
@@ -41,7 +56,9 @@ def generate_shards(command, generated, split, ids, identity, *, resume=False, o
         raise ValueError('invalid bounded S2UT preview selection')
     count = 1 if selected_ids is not None else max(1, math.ceil(len(ids)/shard_size))
     results, timings = {}, {}
-    cache_identity = dict(stage='generation-v1', inputs=identity, num_shards=count)
+    # Older full-generation shards could be saved with their final sample
+    # missing. Keep those artifacts, but never reuse them under the fixed policy.
+    cache_identity = dict(stage='generation-v2-complete-batches', inputs=identity, num_shards=count)
     if selected_ids is not None:
         cache_identity['preview_sample_ids'] = selected_ids
     with Checkpoints(generated/'.checkpoints', cache_identity, resume=resume and not overwrite, overwrite=overwrite) as cache:
@@ -69,7 +86,10 @@ def generate_shards(command, generated, split, ids, identity, *, resume=False, o
                 path = directory/f'generate-{split}.txt'
                 values = parse_generated(path, ids, require_complete=False)
                 if selected_ids is not None and set(values) != set(wanted):
-                    raise ValueError('preview generated unexpected or missing sample IDs')
+                    raise ValueError('preview generated unexpected or missing sample IDs: '
+                                     f'expected={len(wanted)} generated={len(values)} '
+                                     f'missing={sorted(set(wanted)-set(values))} '
+                                     f'unexpected={sorted(set(values)-set(wanted))}; log={path}')
                 saved = dict(records=values, seconds=seconds, log_sha256=sha256_file(path))
                 cache.record(key, saved)
                 cache.flush()  # Every successful subprocess is a durable recovery unit.
@@ -127,14 +147,7 @@ def main() -> None:
         return
     if generated.exists() and any(generated.iterdir()) and not (args.overwrite or args.resume):
         raise ExistingOutputError(str(generated))
-    command = [sys.executable, "-m", "fairseq_cli.generate", str(args.data_root),
-               "--config-yaml", "config.yaml", "--multitask-config-yaml", "config_multitask.yaml",
-               "--task", "speech_to_speech", "--target-is-code", "--target-code-size", "100",
-               "--path", str(checkpoint), "--gen-subset", args.split,
-               "--beam", str(args.beam), "--max-len-a", "1", "--batch-size", "1",
-               "--results-path", str(generated)]
-    if args.device == "cpu":
-        command.append("--cpu")
+    command = generation_command(args.data_root, checkpoint, generated, args.split, args.beam, args.device)
     ids = list(rows)
     import json
     records, timings = generate_shards(command, generated, args.split, ids,

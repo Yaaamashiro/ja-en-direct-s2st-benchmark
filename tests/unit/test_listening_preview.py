@@ -201,6 +201,71 @@ def test_s2ut_preview_shard_restricts_generation_without_reindexing(tmp_path):
                     selected_ids=['d','b'], runner=lambda *a, **kw: pytest.fail('should reuse'), resume=True)
 
 
+@pytest.mark.parametrize('count', [1, 2, 3, 8, 10, 32, 33])
+def test_pinned_fairseq_batching_keeps_all_single_example_inference_batches(count, monkeypatch):
+    """Execute the actual pinned Python wrapper, including its drop-last branch.
+
+    Only its Cython kernel is replaced with singleton batches, the exact result
+    of max_sentences=1. Importing the entire old fairseq isn't Python-3.13 safe.
+    """
+    from direct_s2st.s2ut.fairseq_infer import generation_command
+    source = ROOT/'third_party/fairseq/fairseq/data/data_utils.py'
+    node = next(n for n in ast.parse(source.read_text(encoding='utf-8')).body
+                if isinstance(n, ast.FunctionDef) and n.name == 'batch_by_size')
+    def kernel(indices, fn, max_tokens, max_sentences, multiple):
+        assert max_sentences == 1
+        return [np.asarray([i]) for i in indices]
+    monkeypatch.setitem(sys.modules, 'fairseq.data.data_utils_fast', NS(
+        batch_by_size_fn=kernel, batch_by_size_vec=kernel, batch_fixed_shapes_fast=None))
+    namespace = dict(np=np)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), namespace)
+    batch = namespace['batch_by_size']
+    indices = np.arange(count)
+    # Reproduce the reported missing final sample, without touching corpus/GPU.
+    old = batch(indices, lambda i: 100, max_sentences=1, required_batch_size_multiple=8)
+    assert [int(v) for b in old for v in b] == list(range(count-1))
+    for split in ('dev', 'test'):
+        command = generation_command('prepared', 'best.pt', 'generated', split, 10, 'cuda')
+        multiple = int(command[command.index('--required-batch-size-multiple')+1])
+        assert command[command.index('--batch-size')+1] == '1' and multiple == 1
+        fixed = batch(indices, lambda i: 100, max_sentences=1, required_batch_size_multiple=multiple)
+        assert [int(v) for b in fixed for v in b] == list(range(count))
+    assert '--cpu' in generation_command('prepared', 'best.pt', 'generated', 'dev', 10, 'cpu')
+
+
+def test_preview_command_forwards_complete_batch_policy_and_failure_lists_missing_ids(tmp_path):
+    from direct_s2st.s2ut.fairseq_infer import generate_shards, generation_command
+    command = generation_command('prepared', 'best.pt', tmp_path/'unused', 'dev', 10, 'cpu')
+    def runner(args, **kwargs):
+        assert args[2] == 'direct_s2st.s2ut.preview_generate'
+        assert args[args.index('--required-batch-size-multiple')+1] == '1'
+        assert args[args.index('--distributed-world-size')+1] == '1'
+        directory = Path(args[args.index('--results-path')+1])
+        write(directory/'generate-dev.txt', 'D-0\t-1\t1 2\nD-2\t-1\t3 4\n')
+    with pytest.raises(ValueError, match=r"expected=3 generated=2 missing=\['b'\]"):
+        generate_shards(command, tmp_path/'gen', 'dev', ['a','b','c'], {},
+                        selected_ids=['a','b','c'], runner=runner, resume=True)
+
+
+def test_fixed_generation_does_not_reuse_partial_legacy_shard_cache(tmp_path):
+    from direct_s2st.s2ut.fairseq_infer import generate_shards, generation_command
+    from direct_s2st.preparation import Checkpoints
+    generated, identity = tmp_path/'gen', {'checkpoint':'same'}
+    with Checkpoints(generated/'.checkpoints', dict(stage='generation-v1', inputs=identity, num_shards=1), resume=True) as old:
+        old.record('0', dict(records={'a':[1,2]}, seconds=1, log_sha256='old'))
+        old.flush()
+        old_path = old.root
+    calls = []
+    def runner(args, **kwargs):
+        calls.append(args)
+        directory = Path(args[args.index('--results-path')+1])
+        write(directory/'generate-dev.txt', 'D-0\t-1\t1 2\nD-1\t-1\t3 4\n')
+    command = generation_command('prepared', 'best.pt', 'unused', 'dev', 10, 'cpu')
+    values, _ = generate_shards(command, generated, 'dev', ['a','b'], identity, runner=runner, resume=True)
+    assert values == {'a':[1,2], 'b':[3,4]} and len(calls) == 1
+    assert old_path.is_dir()  # retained for inspection, never overwritten/deleted
+
+
 def test_publish_keeps_failures_and_separates_preview_from_test_results(tmp_path):
     from direct_s2st.preview import publish
     local, output = tmp_path/'local', tmp_path/'drive/preview/identity'
