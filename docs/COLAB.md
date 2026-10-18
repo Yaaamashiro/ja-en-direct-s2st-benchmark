@@ -688,13 +688,28 @@ DriveのAPI/転送量・容量制限そのものを解除するものではあ�
 
 ### 学習後、まず3件を試聴する（通常セル6・7）
 
-4種類の学習が終わったら、ノートブックを開き直し、セル1で
+選択した方式で必要な学習が終わったら、ノートブックを開き直し、セル1で
 `RUN_TRAINING=False`、`RUN_PREVIEW=True`、`RUN_BENCHMARK=False`、
 `PREVIEW_SAMPLES=3`（1〜10件）を設定して **セル1 → 6 → 7** を実行します。
 旧launcherを保存している実験では、`TRAIN_CODE_REVISION`に試聴機能対応の
 完全SHAを明示してください。学習用の保存revisionや実験名を変える必要はありません。
 
-セル6は、`last-training-run-{tt2,s2ut,unit,mel}.json`を優先して実際の保存名を選びます。
+セル6・7はセル1の`TT2_VOCODER_MODE`・`S2UT_VOCODER_MODE`を試聴にも適用します。
+
+| 設定 | 試聴で使う音声化方式 | 自前vocoderの学習snapshot |
+|---|---|---|
+| `TT2_VOCODER_MODE='griffin_lim'` | 保存済みTT2 Mel仕様によるGriffin–Lim（32反復・seed=1） | Melは不要 |
+| `TT2_VOCODER_MODE='hifigan'` | 自前Mel HiFi-GANの検証済みbest | Melが必要 |
+| `S2UT_VOCODER_MODE='paper'` | SHA256固定の公式LJSpeech Unit HiFi-GAN | Unitは不要 |
+| `S2UT_VOCODER_MODE='trained'` | 自前Unit HiFi-GANの検証済みbest | Unitが必要 |
+
+公式Unitとの切り分けは`griffin_lim`＋`paper`で行えます。必要な学習済みrunはTT2とS2UTのみです。
+公式Unitは初回に重み・configを取得し、SHA256を検証して再利用します。
+保存済みS2UTデータのHuBERT revision・層・クラスタ数・k-means SHA256も照合します。
+`paper`はLJSpeech話者の配布モデルで、Fisherや対象コーパスで学習した重みではありません。
+音声の話者が変わり得るため、対象話者の保持性能とは区別してください。
+
+セル6は、必要な`last-training-run-{tt2,s2ut,unit,mel}.json`を優先して実際の保存名を選びます。
 ポインタがなければ学習済みrunが一意のときだけ自動選択し、複数候補は
 `PREVIEW_RUN_NAMES`で指定します。例えばTT2の`-probe-fix-v1`も実名のまま復元し、
 更新ゼロのデフォルト名を使って新規学習することはありません。
@@ -710,7 +725,12 @@ snapshot ZIP・ファイル・保存configの整合性を照合して専用ロ�
 再学習、optimizer更新、4A/4Bのやり直し、ASR/スコア評価は行いません。
 原音（日/英）、正解Melの再構成、正解の短縮Unitの再構成、TT2/S2UT翻訳音声を並べます。
 **Unit再構成もdurationはvocoderの予測値であり、正解の時間長を復元するものではありません。**
-試聴TT2は学習済みMel HiFi-GANを使用します。正式BLEU用のGriffin-Lim設定は変更しません。
+試聴の表示名・`listening.json`には実際に選んだ音声化方式と公式重みの識別情報を記録します。
+方式や重みが異なる場合は別の試聴識別子で保存し、以前の自前vocoderの音声は上書きしません。
+セル6の後に方式を変更した場合、セル7は停止してセル6の再実行を案内します。
+旧試聴planは自前HiFi-GANの意味のまま扱い、公式重みへ暗黙変換しません。
+旧launcherに固定されている場合は対応版の`TRAIN_CODE_REVISION`を指定してください。
+正式評価や学習済みモデルのconfig・checkpointは、この試聴の切替では変更しません。
 この比較で、vocoder自体の再構成品質と翻訳モデルの出力品質を分けて確認できます。
 生成失敗はエラー表示のまま残し、代替音声は作りません。
 
@@ -721,6 +741,12 @@ snapshot ZIP・ファイル・保存configの整合性を照合して専用ロ�
 セル8は試聴を正式比較として評価しません。正式な全件test評価へ進む場合は
 `RUN_PREVIEW=False`、`RUN_BENCHMARK=True`としてセル6から準備します。
 実Colab/GPUでのこの新しい試聴E2Eは未検証です。
+音声化方式の4組合せ、不要vocoderの復元省略、設定変更時の別保存、旧planの意味の維持、
+SHA/Unit IDの不一致拒否、生成失敗の保持、保存依存環境への振分けはCPUテストで確認します。
+公式Unit重み・configの実ファイルもSHA256検証し、同じ推論adapterで正解Unit3件と予測Unit3件を
+CPU音声化できることを確認しました。これはWindows/Python 3.13で固定fairseqの生成器・duration予測器を
+そのまま分離読込した確認であり、Colab/Python 3.10の全fairseq import・GPU E2Eや音質評価の代わりではありません。
+今回の切替のために追加パッケージは導入せず、既存のTT2/S2UTの保存済み依存環境を使用します。
 
 S2UT推論は1件ずつ処理し、`--required-batch-size-multiple 1`も明示します。
 既定値8のままだと、固定fairseqのバッチ生成で最後の1件が除外されるためです。

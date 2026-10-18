@@ -15,9 +15,11 @@ from direct_s2st.io import atomic_write_json, read_jsonl
 from direct_s2st.journal import digest
 from direct_s2st.preparation import file_stamp
 from direct_s2st.progress import operation, track
-from direct_s2st.recipes import option
+from direct_s2st.recipes import option, TT2_VOCODERS, S2UT_VOCODERS
+from direct_s2st.preview import settings, vocoder_settings
 
 KINDS = ('tt2', 's2ut', 'unit', 'mel')
+PREVIEW_BACKEND_VERSION = 2
 
 
 def read(path):
@@ -121,19 +123,27 @@ def checked_metadata(run, path):
 
 
 @operation('cell 6: prepare small dev listening preview')
-def prepare(persistent, data, local, requested, count, revision):
+def prepare(persistent, data, local, requested, count, revision, *,
+            tt2_vocoder_mode='hifigan', s2ut_vocoder_mode='trained'):
     if not 1 <= count <= 10:
         raise ValueError('PREVIEW_SAMPLES must be 1..10')
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('preview execution requires an immutable revision')
+    vocoders = vocoder_settings(tt2_vocoder_mode, s2ut_vocoder_mode)
     from direct_s2st.drive_staging import ensure_local, read_common_manifest_row
     local = ensure_local(local)
-    runs = {kind: saved_run(persistent, kind, requested.get(kind, ''), local) for kind in KINDS}
+    required = ['tt2', 's2ut']
+    if s2ut_vocoder_mode == 'trained':
+        required.append('unit')
+    if tt2_vocoder_mode == 'hifigan':
+        required.append('mel')
+    runs = {kind: saved_run(persistent, kind, requested.get(kind, ''), local) for kind in required}
     common = data/'common/dev.jsonl'
     # Vocoder fitting identities include common manifests. Verify their source,
     # without hashing the full corpus, feature ZIPs or training audio.
     for kind in ('unit', 'mel'):
-        checked_metadata(runs[kind], common)
+        if kind in runs:
+            checked_metadata(runs[kind], common)
     raw = list(read_jsonl(common))
     if len({r['pair_id'] for r in raw}) != len(raw) or len(raw) < count or any(r['split'] != 'dev' for r in raw):
         raise ValueError('invalid common dev metadata')
@@ -159,9 +169,19 @@ def prepare(persistent, data, local, requested, count, revision):
                     checked_metadata(runs[kind], path)
                     runs[kind]['metadata'][str(path)] = runs[kind]['identity']['inputs'][str(path)]
         checked_metadata(runs[kind], directory/'dev.tsv')
-    body = dict(version=1, purpose='dev_listening_only_not_benchmark', split='dev', ids=ids,
+    if tt2_vocoder_mode == 'griffin_lim':
+        from direct_s2st.vocoders.griffin_lim import validate_spec
+        spec_path = Path(runs['tt2']['data_root'])/'mel-spec.json'
+        checked_metadata(runs['tt2'], spec_path)
+        validate_spec(read(spec_path))
+    if s2ut_vocoder_mode == 'paper':
+        from direct_s2st.vocoders.reference import validate_reference_units
+        lock_path = Path(runs['s2ut']['data_root'])/'data-lock.json'
+        checked_metadata(runs['s2ut'], lock_path)
+        validate_reference_units(read(lock_path)['unit_configuration'])
+    body = dict(version=2, purpose='dev_listening_only_not_benchmark', split='dev', ids=ids,
                 common_root=str(data/'common'), common_sha256=raw_sha(common),
-                execution_revision=revision, runs=runs)
+                execution_revision=revision, runs=runs, vocoders=vocoders)
     token = digest(body)[:24]
     output = persistent/'preview'/token
     owned = local/token
@@ -192,7 +212,7 @@ def prepare(persistent, data, local, requested, count, revision):
     atomic_write_json(output/'plan.json', body, resume=True)
     atomic_write_json(persistent/'preview/latest.json', dict(plan=str(output/'plan.json'), sha256=raw_sha(output/'plan.json')), overwrite=True)
     print(json.dumps(dict(plan=str(output/'plan.json'), ids=ids,
-                          trained_runs={k: v['name'] for k,v in runs.items()})), flush=True)
+                          trained_runs={k: v['name'] for k,v in runs.items()}, vocoders=vocoders)), flush=True)
     return body
 
 
@@ -226,12 +246,16 @@ def environment(repo, persistent, run, invoke):
 
 
 @operation('cell 7: translate and reconstruct selected dev examples')
-def execute(repo, persistent, invoke):
+def execute(repo, persistent, invoke, *, tt2_vocoder_mode=None, s2ut_vocoder_mode=None):
     pointer = read(persistent/'preview/latest.json')
     path = Path(pointer['plan'])
     if raw_sha(path) != pointer['sha256']:
         raise ValueError('preview plan changed; rerun cell 6')
     plan = read(path)
+    selected = settings(plan)
+    if ((tt2_vocoder_mode is not None and tt2_vocoder_mode != selected['mel']['mode'])
+            or (s2ut_vocoder_mode is not None and s2ut_vocoder_mode != selected['unit']['mode'])):
+        raise ValueError('preview vocoder settings changed; rerun normal cell 6 before cell 7')
     revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     if plan['execution_revision'] != revision:
         raise ValueError('preview execution revision changed; rerun cell 6')
@@ -242,7 +266,8 @@ def execute(repo, persistent, invoke):
         raise ValueError('common dev metadata changed; preview retained')
     os.environ['S2ST_INPUT_MAP'] = str(owned/'input-map.json')
     for kind in KINDS:
-        run = plan['runs'][kind]
+        owner = kind if kind in plan['runs'] else ('tt2' if kind == 'mel' else 's2ut')
+        run = plan['runs'][owner]
         for name, sha in track(run.get('metadata', {}).items(), f'preview: recheck {kind} metadata'):
             if raw_sha(Path(name)) != sha:
                 raise ValueError('prepared metadata changed; preview retained')
@@ -265,6 +290,8 @@ def main():
     parser.add_argument('--local', type=Path, default=Path('/content/s2st-preview'))
     parser.add_argument('--samples', type=int, default=3)
     parser.add_argument('--run-names', default='{}')
+    parser.add_argument('--tt2-vocoder-mode', choices=TT2_VOCODERS, default='griffin_lim')
+    parser.add_argument('--s2ut-vocoder-mode', choices=S2UT_VOCODERS, default='trained')
     args = parser.parse_args()
     corpus = os.environ.get('CORPUS_ROOT')
     if corpus and args.persistent.resolve().is_relative_to(Path(corpus).resolve()):
@@ -274,9 +301,11 @@ def main():
         subprocess.run(list(map(str, command)), check=True)
     if args.action == 'prepare':
         revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
-        prepare(args.persistent, args.data, args.local, json.loads(args.run_names), args.samples, revision)
+        prepare(args.persistent, args.data, args.local, json.loads(args.run_names), args.samples, revision,
+                tt2_vocoder_mode=args.tt2_vocoder_mode, s2ut_vocoder_mode=args.s2ut_vocoder_mode)
     else:
-        execute(args.repo, args.persistent, invoke)
+        execute(args.repo, args.persistent, invoke, tt2_vocoder_mode=args.tt2_vocoder_mode,
+                s2ut_vocoder_mode=args.s2ut_vocoder_mode)
 
 
 if __name__ == '__main__':
