@@ -1,6 +1,7 @@
 """Restore actual dependency versions; never substitute an old environment hash."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -8,7 +9,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/'src'))
-from direct_s2st.io import atomic_write_bytes, atomic_write_text
+from direct_s2st.io import atomic_write_bytes, atomic_write_json
 from direct_s2st.progress import operation, track
 
 EDITABLE = {'fairseq', 'ja-en-direct-s2st-benchmark'}
@@ -78,6 +79,38 @@ def verified_manifest(persistent, expected):
     return path
 
 
+def verify_managed_venv(python, prefix):
+    """Never uninstall from the notebook kernel or another Python installation."""
+    prefix, python = Path(prefix).absolute(), Path(python).absolute()
+    venv = prefix/'venv'
+    if (prefix == Path(prefix.anchor) or python != venv/'bin/python'
+            or any(p.is_symlink() or getattr(p, 'is_junction', lambda: False)()
+                   for p in (prefix, venv))
+            or not (venv/'pyvenv.cfg').is_file()):
+        raise ValueError('dependency cleanup requires the dedicated runtime virtual environment')
+    if not re.search(r'^include-system-site-packages\s*=\s*false\s*$',
+                     (venv/'pyvenv.cfg').read_text(encoding='utf-8'), re.I | re.M):
+        raise ValueError('dependency cleanup requires an isolated virtual environment without system packages')
+    corpus = os.environ.get('CORPUS_ROOT')
+    if corpus and prefix.resolve().is_relative_to(Path(corpus).resolve()):
+        raise ValueError('runtime dependency cleanup must stay outside CORPUS_ROOT')
+    actual = subprocess.check_output([str(python), '-c', 'import sys; print(sys.prefix)'], text=True).strip()
+    if Path(actual).resolve() != venv.resolve():
+        raise ValueError('runtime Python is not executing inside the expected virtual environment')
+
+
+def dependency_difference(wanted, observed):
+    expected_pins, actual_pins = freeze_pins(wanted['packages']), freeze_pins(observed['packages'])
+    return dict(
+        missing={k:v for k,v in expected_pins.items() if k not in actual_pins},
+        extra={k:v for k,v in actual_pins.items() if k not in expected_pins},
+        changed={k:dict(expected=v, actual=actual_pins[k]) for k,v in expected_pins.items()
+                 if k in actual_pins and actual_pins[k] != v},
+        metadata={k:dict(expected=wanted.get(k), actual=observed.get(k))
+                  for k in wanted.keys() | observed.keys() if k != 'packages' and wanted.get(k) != observed.get(k)},
+        freeze_text_differs=wanted['packages'] != observed['packages'])
+
+
 @operation('training recovery: restore exact dependency environment')
 def ensure_environment(repo, persistent, run, *, expected=None, prefix=Path('/content/s2st-runtime')):
     import runtime
@@ -98,25 +131,49 @@ def ensure_environment(repo, persistent, run, *, expected=None, prefix=Path('/co
         setup(manifest)  # Never trust a stale lock after manual package changes.
     actual = hashlib.sha256(path.read_bytes()).hexdigest()
     if expected and actual != expected:
-        wanted = freeze_pins(json.loads(manifest.read_text())['packages']) if manifest else legacy_pins(persistent/'session.log')
-        current = freeze_pins(subprocess.check_output([str(python), '-m', 'pip', 'freeze'], text=True))
+        saved = json.loads(manifest.read_text()) if manifest else None
+        wanted = freeze_pins(saved['packages']) if saved else legacy_pins(persistent/'session.log')
+        observed = subprocess.check_output([str(python), '-m', 'pip', 'freeze'], text=True)
+        current = freeze_pins(observed)
         changed = [f'{name}=={version}' for name, version in wanted.items() if current.get(name) != version]
+        # Installing constraints does not remove packages left by another run.
+        # Only a complete SHA-verified manifest can authorize exact membership:
+        # legacy session-log evidence may be partial and must never drive removals.
+        extra = sorted(set(current)-set(wanted)) if saved is not None else []
+        if extra:
+            verify_managed_venv(python, prefix)
+            receipt = prefix/('dependency-recovery-before-'+expected+'-'+hashlib.sha256(observed.encode()).hexdigest()+'.json')
+            atomic_write_json(receipt, dict(expected_environment=expected, packages=observed,
+                              removed={name:current[name] for name in extra}), resume=True)
+            print('[environment-recovery] remove_unsaved_packages='+', '.join(extra)+
+                  f' scope=runtime_venv_only recovery_receipt={receipt}', file=sys.stderr, flush=True)
+            run(python, '-m', 'pip', 'uninstall', '--yes', *extra)
         if changed:
-            print('[environment-recovery] restore_versions='+', '.join(changed), flush=True)
+            print('[environment-recovery] restore_versions='+', '.join(changed), file=sys.stderr, flush=True)
             run(python, '-m', 'pip', 'install', '--no-deps', '--extra-index-url',
                 'https://download.pytorch.org/whl/cu126', *changed)
+        if changed or extra:
             run(python, '-m', 'pip', 'check')
         setup(manifest)  # Re-measure real packages and repository using the actual bootstrap.
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
         if actual != expected:
+            measured = json.loads(path.read_text())
+            difference = dependency_difference(saved, measured) if saved else dict(
+                missing={k:v for k,v in wanted.items() if k not in freeze_pins(measured['packages'])},
+                legacy_manifest_missing=True)
+            diagnostic = prefix/f'dependency-recovery-difference-{expected[:12]}-{actual[:12]}.json'
+            atomic_write_json(diagnostic, dict(expected_sha256=expected, actual_sha256=actual,
+                              difference=difference), resume=True)
+            print('[environment-recovery] unresolved_difference='+json.dumps(difference, sort_keys=True)+
+                  f' diagnostic={diagnostic}', file=sys.stderr, flush=True)
             raise ValueError('dependency restoration still differs from saved SHA256; checkpoint retained, no training started. '
-                             'Do not change environment.json or snapshot identities')
+                             f'See {diagnostic}. Do not change environment.json or snapshot identities')
     if json.loads(path.read_text()).get('packages') != subprocess.check_output([str(python), '-m', 'pip', 'freeze'], text=True):
         raise ValueError('actual installed packages differ from the measured environment; no training started')
     target = manifest_path(persistent, actual)
     atomic_write_bytes(target, path.read_bytes(), resume=True)
     if target.read_bytes() != path.read_bytes():
         raise OSError('environment manifest readback mismatch')
-    print(f'[environment-recovery] status=verified sha256={actual} manifest={target}', flush=True)
+    print(f'[environment-recovery] status=verified sha256={actual} manifest={target}', file=sys.stderr, flush=True)
     # This ready check no longer rebuilds: setup above matched the actual code.
     return runtime.ensure_runtime(repo, persistent, run, require_gpu=True, prefix=prefix)

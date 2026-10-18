@@ -146,6 +146,13 @@ vocoderの既定更新数は独立の `VOCODER_TOTAL_UPDATES=10000` に移して
 
 依存環境の完全なJSONを`.runtime-environments/<SHA256>.json`へatomic保存・readbackする。
 新しいランタイムではその全依存版をconstraintとして構築する。
+異なるrunを同じローカルvenvで順番に使った場合は、版だけでなくパッケージ構成も復元する。
+完全なSHA検証済みmanifestにない余分な通常パッケージは、専用runtime venvであることを確認し、
+変更前のpip freezeと削除対象をローカルreceiptに保存してから、そのvenv内だけで除去する。
+ノートブック本体のPython、コーパス、保存済み環境JSON、checkpointは変更しない。
+旧session.logしかない場合は記録が不完全な可能性があるため、この除去は行わない。
+復元後もSHAが一致しなければ停止し、`/content/s2st-runtime/dependency-recovery-difference-*.json`へ
+不足・余分・版違い・metadataの差分を記録する。照合を無効化して続行することはない。
 復元用constraintは元リポジトリのrequirementsを絶対パスで参照し、
 入れ子の`preparation.txt`等も元ファイルのディレクトリから解決する。
 旧復元用ファイルは通常セル5の構築時に再生成するため、手動コピー・データ削除は不要。
@@ -697,6 +704,9 @@ snapshot ZIP・ファイル・保存configの整合性を照合して専用ロ�
 
 セル7はGPUを使用します。各runの保存されたコード位置・依存環境を順に復元してから、
 現在の固定revisionの推論コードでdevの選択件数だけを生成します。
+同じVMでの再実行も各runの完全な依存manifestに合わせて復元するため、Unit/Mel用の追加依存が
+旧TT2環境に残ってSHA不一致になる場合も、通常セルの復元処理で調整します。
+環境identityはGPU機種を含みません。GPU変更だけで保存lockを変更する必要はありません。
 再学習、optimizer更新、4A/4Bのやり直し、ASR/スコア評価は行いません。
 原音（日/英）、正解Melの再構成、正解の短縮Unitの再構成、TT2/S2UT翻訳音声を並べます。
 **Unit再構成もdurationはvocoderの予測値であり、正解の時間長を復元するものではありません。**
