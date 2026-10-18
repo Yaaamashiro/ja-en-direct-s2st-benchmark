@@ -733,6 +733,9 @@ snapshot ZIP・ファイル・保存configの整合性を照合して専用ロ�
 正式評価や学習済みモデルのconfig・checkpointは、この試聴の切替では変更しません。
 この比較で、vocoder自体の再構成品質と翻訳モデルの出力品質を分けて確認できます。
 生成失敗はエラー表示のまま残し、代替音声は作りません。
+試聴launcher・各推論子プロセスは通常のINFOログを使用し、固定fairseqが有効化する
+Numba等のDEBUGダンプを抑制します。進捗、INFO、警告、エラー、例外、結果JSONは残します。
+JITコンパイルやモデルの計算自体を無効化する変更ではありません。
 
 試聴成果物は`<実験>/preview/<識別子>/listening.json`と`audio/`へ保存します。
 既存checkpoint・元コーパス・全件testのpredictions/resultsは変更しません。

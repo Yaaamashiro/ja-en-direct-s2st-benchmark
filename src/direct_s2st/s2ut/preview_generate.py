@@ -50,6 +50,8 @@ def selected_iterator(tasks, indices, expected_size, split):
 
 
 def main():
+    from ..inference_logging import configure_logging
+    configure_logging()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--indices', required=True)
     parser.add_argument('--dataset-size', type=int, required=True)

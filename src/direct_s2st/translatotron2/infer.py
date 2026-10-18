@@ -18,6 +18,8 @@ from .engine import load_checkpoint
 
 @operation('translatotron2/infer: main')
 def main():
+    from ..inference_logging import configure_logging
+    configure_logging()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-root', type=Path, required=True)
     parser.add_argument('--run-root', type=Path, required=True)
