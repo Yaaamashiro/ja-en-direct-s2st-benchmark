@@ -37,10 +37,16 @@ WAVの個別大量配置を避け、ID/ZIP/member/SHA index・ASR文を永続化
 現在のQwen BF16設定は維持し、非対応GPUへの暗黙の精度/モデル切替はしない。
 
 Qwen SDKの内部revision取り落としを避けるため、固定revisionの完全snapshotを取得・
-必須ファイル検査し、SDKへローカルpathだけを渡す。モデルロード前の検査はASR/MTより先に行う。
+必須ファイル検査し、SDKへローカルpathだけを渡す。再開時は保存ASR/MTを読み取り専用で
+先に検証し、不足・破損なら再生成せず停止する。元journal/pointer/ZIP/timingを保持する。
+CUDA/BF16対応をロード前に確認し、実モデルで固定非参照文を試験合成してWAVのmono・
+有限値・非無音・durationを検証後のみ本番TTSへ進む。試験音声は評価ID/母数に含めない。
 初版cascadeがTTSロード前に停止した場合だけ、レビュー済みloader差分と同一モデル/testを
 確認して元plan・元依存identity・ASR/MT journalを保持した実行overlayを採用できる。
+worker差分もASR/MT/identity関数のAST不変を検証し、試験合成とTTS保存検証に限定する。
 採用前のTTS WAVや未公開ZIPを暗黙再利用せず、採用後の実行revisionは別receiptとreportへ残す。
+既知の完全snapshot修正c741fcaの採用記録があれば、そのplan/receipt/Git系統とTTSロード・
+デコード引数不変を検証して生成済みWAVを保持した移行を許可し、親receipt SHAを記録する。
 
 Colab学習は既定で時間上限なし（SESSION_MINUTES=0 / --session-seconds=0）とし、
 明示確認された目標更新数まで続行する。時間による自動一時停止は行わない。

@@ -37,6 +37,12 @@ def snapshot(tmp_path, monkeypatch):
 
 
 def test_complete_pinned_local_bundle_prevents_sdk_nested_main_resolution(tmp_path, monkeypatch):
+    import torch
+    from contextlib import nullcontext
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
+    monkeypatch.setattr(torch.cuda, 'device', lambda device: nullcontext())
+    monkeypatch.setattr(torch.cuda, 'is_bf16_supported', lambda: True)
+    monkeypatch.setattr(torch.cuda, 'get_device_name', lambda device: 'NVIDIA L4')
     root, downloads = snapshot(tmp_path, monkeypatch)
     from transformers.utils.hub import cached_file
     from transformers import AutoFeatureExtractor
@@ -58,6 +64,8 @@ def test_complete_pinned_local_bundle_prevents_sdk_nested_main_resolution(tmp_pa
     assert adapter.speaker == 'Ono_Anna' and len(sdk_calls) == 1
     assert downloads == [dict(repo_id='Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice', revision=REVISION)]
     assert sdk_calls[0][1]['attn_implementation'] == 'sdpa'
+    assert sdk_calls[0][1]['dtype'] == torch.bfloat16
+    assert adapter.runtime['gpu'] == 'NVIDIA L4' and adapter.runtime['bf16_supported']
 
 
 @pytest.mark.parametrize('name', ['speech_tokenizer/preprocessor_config.json', 'preprocessor_config.json',
@@ -65,6 +73,7 @@ def test_complete_pinned_local_bundle_prevents_sdk_nested_main_resolution(tmp_pa
 def test_missing_bundle_member_fails_before_gpu_model_load(tmp_path, monkeypatch, name):
     root, _ = snapshot(tmp_path, monkeypatch)
     (root/name).unlink()
+    monkeypatch.setattr(tts, 'check_runtime', lambda device: {})
     with pytest.raises(ValueError, match='incomplete pinned Qwen snapshot'):
         tts.QwenTTS(model_id='Qwen/model', revision=REVISION, speaker='x', language='English')
 
@@ -88,6 +97,39 @@ def test_sdk_cannot_receive_another_revision_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(huggingface_hub, 'snapshot_download', lambda **kwargs: str(root.parent/('0'*40)))
     with pytest.raises(ValueError, match='snapshot path'):
         tts.pinned_snapshot('Qwen/model', REVISION)
+
+
+@pytest.mark.parametrize('kind', ['nan', 'inf', 'silent', 'stereo'])
+def test_raw_qwen_waveform_is_checked_before_pcm_conversion(tmp_path, kind):
+    import numpy as np
+    values = dict(nan=np.array([.1, float('nan')]), inf=np.array([.1, float('inf')]),
+                  silent=np.zeros(10), stereo=np.ones((10, 2))*.1)
+    adapter = object.__new__(tts.QwenTTS)
+    adapter.speaker, adapter.language = 'Ono_Anna', 'English'
+    adapter.model = SimpleNamespace(generate_custom_voice=lambda **kwargs: ([values[kind]], 24000))
+    path = tmp_path/'result.wav'
+    with pytest.raises(ValueError, match='invalid/non-finite'):
+        adapter('This is a synthesis test.', path)
+    assert not path.exists()
+
+
+def test_valid_qwen_generation_keeps_original_decoding_and_pcm_bytes(tmp_path):
+    import numpy as np
+    import soundfile as sf
+    waveform = np.sin(np.arange(1000)/10)*.1
+    calls = []
+    def generate(**kwargs):
+        calls.append(kwargs)
+        return [waveform], 24000
+    adapter = object.__new__(tts.QwenTTS)
+    adapter.speaker, adapter.language = 'Ono_Anna', 'English'
+    adapter.model = SimpleNamespace(generate_custom_voice=generate)
+    path, original = tmp_path/'new.wav', tmp_path/'original.wav'
+    adapter('saved MT output', path)
+    sf.write(original, waveform, 24000, subtype='PCM_16')
+    assert path.read_bytes() == original.read_bytes()
+    assert calls == [dict(text='saved MT output', language='English', speaker='Ono_Anna',
+                          do_sample=False, subtalker_dosample=False)]
 
 
 def overlay_plan(tmp_path):

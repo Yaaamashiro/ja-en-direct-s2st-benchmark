@@ -54,7 +54,7 @@ def models(monkeypatch):
             if phase == 'mt':
                 assert argument == '実際に認識した日本語'  # Never the JA/EN reference transcript.
                 return 'actual translated english'
-            assert argument == 'actual translated english'
+            assert argument in ('actual translated english', 'This is a synthesis test.')
             wav(output)
         return run
     monkeypatch.setattr(worker, 'loader', load)
@@ -88,7 +88,7 @@ def test_all_stages_real_journals_zip_recovery_scoring_and_cpu_listening(tmp_pat
     worker.text_phase(plan, 'asr')
     worker.text_phase(plan, 'mt')
     predictions = worker.synthesize(plan)
-    assert loads == ['asr','mt','tts'] and len(calls) == 9
+    assert loads == ['asr','mt','tts'] and len(calls) == 10
     assert all(p['system_id'] == 'cascade' and p['status'] == 'success' for p in predictions)
     asr_loads = []
     def load_asr(**kwargs):
@@ -114,7 +114,7 @@ def test_all_stages_real_journals_zip_recovery_scoring_and_cpu_listening(tmp_pat
     worker.text_phase(plan, 'mt')
     worker.synthesize(plan)
     scoring.evaluate(plan)
-    assert loads == ['asr','mt','tts'] and len(calls) == 9 and len(asr_loads) == 1
+    assert loads == ['asr','mt','tts'] and len(calls) == 10 and len(asr_loads) == 1
     listened = session.listen(persistent, tmp_path/'another-vm', index=1, target='cascade')
     assert listened['pair_id'] == 'test_001'
     assert set(listened['audio']) == {'カスケード翻訳'}
@@ -158,7 +158,7 @@ def test_failed_asr_is_not_sent_to_mt_or_tts_and_stays_in_bleu_denominator(tmp_p
     worker.text_phase(plan, 'asr')
     worker.text_phase(plan, 'mt')
     predictions = worker.synthesize(plan)
-    assert calls == ['asr','asr','mt','tts']
+    assert calls == ['asr','asr','mt','tts','tts']  # Includes isolated preflight.
     assert predictions[0]['status'] == 'failed' and predictions[0]['output_audio'] is None
     monkeypatch.setattr('direct_s2st.evaluation.transcribe.EvaluationASR', lambda **kwargs: lambda path:'the book is new')
     scoring.evaluate(plan)
@@ -212,7 +212,7 @@ def test_normal_cells_route_only_cascade_and_worker_processes_are_separate(tmp_p
     calls = []
     session.execute_cascade(persistent, 'run', lambda *args: calls.append(args), 'a'*40)
     phases = [c[-1] for c in calls if 'direct_s2st.cascade.benchmark_worker' in c]
-    assert phases == ['asr','mt','tts']
+    assert phases == ['asr','mt','verify-text','tts']
     assert all(c[0] == '/cascade/python3.10' for c in calls)
     with pytest.raises(ValueError, match='reviewed original'):
         session.execute_cascade(persistent, 'run', lambda *args: None, 'b'*40)
@@ -262,5 +262,5 @@ def test_loader_repair_reuses_original_plan_and_environment_location(tmp_path, m
     session.execute_cascade(persistent, 'run', lambda *args: commands.append(args), 'c'*40)
     assert builds == [tmp_path/'original-build']
     assert [c[2] for c in commands if len(c)>2 and c[1] == '-m'] == [
-        'direct_s2st.cascade.tts', 'direct_s2st.cascade.benchmark_worker',
         'direct_s2st.cascade.benchmark_worker', 'direct_s2st.cascade.benchmark_worker']
+    assert [c[-1] for c in commands if 'direct_s2st.cascade.benchmark_worker' in c] == ['verify-text', 'tts']

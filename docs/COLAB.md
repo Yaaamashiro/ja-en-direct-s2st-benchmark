@@ -944,26 +944,55 @@ FlashAttention未導入の警告とは別の問題です。
 修正版は固定SHAの**完全snapshotを先に取得し、root processor・tokenizer・重み・
 speech_tokenizerの必須ファイル/JSONを確認してから、SDKへローカルディレクトリだけを渡します**。
 SDKの内部取得で`main`へ戻ることを避け、既存のHub blobは再利用します。
-セル7はASR/MTを始める前にモデルをロードしないartifact検査を行い、設定ファイル不足を
-最初のTTSまで持ち越しません。依存version・モデルSHA・話者・言語・BF16/SDPAは変更しません。
+セル7はGPU確認→保存済みASR/MTの読み取り専用検証→固定snapshot→実Qwenロード→
+固定文 `This is a synthesis test.` の試験合成→未生成TTS、の順で進みます。
+CUDA/BF16非対応時はロード前に停止し、GPU名・対応状況・bfloat16/SDPAをログへ残します。
+試験合成はWAV保存・読み戻し・mono・有限値・非無音・durationを検証し、失敗なら
+正式test音声を1件も生成しません。成功記録とWAVは別の`preflight/`へ保存し、
+正式predictions/index・BLEU母数へ混ぜません。試験前後で乱数状態も復元します。
+依存version・モデルSHA・話者・言語・BF16/SDPA・正式デコード条件は変更しません。
 
 `f9f1520047bca2c0e977b581cab70168892091e2`で**最初のTTSロード前に停止した評価**は、
 対応修正版の`TRAIN_CODE_REVISION`で通常のセル1→6→7→8を実行してください。
 セル6はモデル設定・test全ID/manifest SHAが同じなら元planの再利用を検討します。
-レビュー済みGit差分（TTS loader・通常launcher・説明/テストのみ）を確認し、
-既存のTTS WAVがない場合だけ`execution-overlays/<修正revision>.json`を保存します。
+レビュー済みGit差分（TTS loader/試験合成・通常launcher・説明/テスト）と、
+worker内ASR/MT/identity関数のAST不変を確認し、
+初回のloader修正採用はTTS WAVがない場合に限定し、`execution-overlays/<修正revision>.json`を保存します。
 元plan・ASR/MT journal・完了pointer・runtime SHAを上書きしません。
 元と同じeditable build位置から実依存を復元し、修正ソースだけを別のPYTHONPATHから使用します。
 したがってASR/MT完了分を再計算せず、TTSから続行できます。
+`ASR: reuse 1196/1196`・`MT: reuse 1196/1196`と表示し、Whisper/NLLBはロードしません。
+pointer・identity・journal・ZIP・SHA・全ID・成功状態・入力文/時刻の対応を検証し、
+不足や破損は明確に停止させます。旧結果を再生成したり、元ファイルを更新したりしません。
+新規runで初めてASR/MTを生成する経路は残しますが、保存途中のtext段階がある場合も
+自動再推論しません。不完全なtext段階をやり直す場合は別途原因・復旧方法の確認が必要です。
 同じ修正revisionを再開する場合は、その採用後に生成したWAVも再利用します。
+すでに`c741fca0c8408d67750a480cb989370fbcab9071`の修正採用記録がある場合は、
+元plan SHA・採用receipt・Git系統・固定snapshot処理・モデルロード/合成引数のAST不変を
+確認した場合に限り、生成済みWAVを保持して試験合成/再開対応版へ移行できます。
+新しいoverlayへ親receiptのSHAを記録し、旧receiptやWAVを変更しません。
 最終metrics/reportに元revisionと実行修正revisionを記録します。
 
-旧版が既にWAVを生成していた場合、不変ZIPが未公開の場合、元plan/依存receiptが不一致の場合、
+検証済み修正採用記録のない旧版が既にWAVを生成していた場合、不変ZIPが未公開の場合、元plan/依存receiptが不一致の場合、
 ASR/MT/モデル設定/依存を含む未レビュー差分がある場合は自動合流せず停止します。
 古いsnapshotから音声トークナイザーだけを手作業でコピーしたり、`environment.json`や
 保存planのrevisionを書き換えたり、コーパス/ASR/MT結果を削除したりしないでください。
 CPUテストは実TransformersのEncodec feature extractorによるローカル設定読込も含みますが、
 Qwen本体重みを使う実GPU合成は未検証です。
+
+TTSは先に全保存グループのjournal/identity・WAV SHA/形式を確認し、
+`TTS: saved=... remaining=...`、`[cascade-tts] reused=... computed=... remaining=...`を表示します。
+成功済みWAVは再生成せず、`mt_en_text`だけを入力します。同じVMでの中断なら
+未公開グループの成功済みWAVも再利用します。VMごと消失した場合はDrive保存済み32件単位から
+再開するので、最後の最大31件は再生成され得ます（500件処理、480件公開なら480件を保証）。
+全成功WAVが保存済みならQwenロード・試験合成も不要です。セル8の評価定義は変更しません。
+ASR/MTバッチ化・TTSバッチ化・FlashAttention追加は今回実施していません。
+
+実モデル用GPUテストは`tests/gpu/test_cascade_qwen_preflight.py`に分離しています。
+固定Colab環境のL4で`S2ST_RUN_QWEN_GPU_TEST=1`を明示した場合のみ、モックなしで
+Qwen本体/音声tokenizerのロードとWAV生成を行います。CPUテスト成功はL4実機成功を意味しません。
+運用確認は同じ実験の通常セル1→必要なら6→7で、試験合成成功後の正式音声を確認し、
+セル7を中断→再実行して保存済み件数と再利用ログを確認してください。追加セルは不要です。
 
 ### テストの範囲
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import re
+import sys
 import tempfile
 from pathlib import Path
 from ..progress import operation
@@ -57,8 +58,9 @@ class QwenTTS:
         language: str,
         device: str = "cuda:0",
     ) -> None:
-        snapshot = pinned_snapshot(model_id, revision)
         import torch
+        self.runtime = check_runtime(device)
+        snapshot = pinned_snapshot(model_id, revision)
         from qwen_tts import Qwen3TTSModel
 
         self.model = Qwen3TTSModel.from_pretrained(
@@ -70,8 +72,10 @@ class QwenTTS:
         )
         self.speaker = speaker
         self.language = language
+        self.snapshot = str(snapshot)
 
     def __call__(self, text: str, output_path: Path) -> None:
+        import numpy as np
         import soundfile as sf
 
         waveforms, sample_rate = self.model.generate_custom_voice(
@@ -81,6 +85,13 @@ class QwenTTS:
             do_sample=False,
             subtalker_dosample=False,
         )
+        if not waveforms or sample_rate <= 0:
+            raise ValueError('Qwen returned no waveform or an invalid sample rate')
+        waveform = np.asarray(waveforms[0])
+        if (waveform.ndim not in (1, 2) or (waveform.ndim == 2 and waveform.shape[1] != 1)
+                or not 0 < len(waveform)/sample_rate <= 120
+                or not np.isfinite(waveform).all() or not np.any(waveform)):
+            raise ValueError('Qwen returned invalid/non-finite/silent/non-mono waveform')
         output_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
             dir=output_path.parent, prefix=f".{output_path.stem}.", suffix=".wav"
@@ -88,15 +99,33 @@ class QwenTTS:
         os.close(descriptor)
         temporary = Path(temporary_name)
         try:
-            sf.write(temporary, waveforms[0], sample_rate, subtype="PCM_16")
+            sf.write(temporary, waveform, sample_rate, subtype="PCM_16")
             os.replace(temporary, output_path)
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
 
 
+def check_runtime(device='cuda:0'):
+    """Fail before downloads/model loading; never silently change precision."""
+    import torch
+    available = torch.cuda.is_available()
+    supported = False
+    name = None
+    if available and str(device).startswith('cuda'):
+        with torch.cuda.device(device):
+            supported = torch.cuda.is_bf16_supported()
+            name = torch.cuda.get_device_name(device)
+    runtime = dict(gpu=name, cuda_available=available, bf16_supported=supported,
+                   dtype='bfloat16', attention='sdpa', device=str(device))
+    print('[cascade-tts-runtime] '+json.dumps(runtime), file=sys.stderr, flush=True)
+    if not available or not str(device).startswith('cuda') or not supported:
+        raise RuntimeError('Cascade Qwen TTS requires CUDA and BF16 support; no FP16/CPU fallback')
+    return runtime
+
+
 def main():
-    """Model-free artifact preflight, before expensive ASR/MT stages."""
+    """Optional artifact-only check; normal cell 7 also requires synthesis."""
     import argparse
     from ..inference_logging import configure_logging
     configure_logging()

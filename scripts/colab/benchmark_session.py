@@ -16,7 +16,7 @@ from direct_s2st.io import atomic_write_json, read_jsonl
 from direct_s2st.journal import digest
 from direct_s2st.progress import operation, track
 
-BENCHMARK_BACKEND_VERSION = 3
+BENCHMARK_BACKEND_VERSION = 4
 
 
 def load_plan(persistent, target='s2ut'):
@@ -141,11 +141,15 @@ def execute_cascade(persistent, action, invoke, revision):
            'from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer; '
            'from qwen_tts import Qwen3TTSModel; print("Cascade dependencies checked")')
     if action == 'run':
-        # Check the entire pinned tokenizer/processor bundle before spending GPU
-        # time on ASR/MT, not only when the first sentence reaches synthesis.
-        invoke(python, '-m', 'direct_s2st.cascade.tts', '--model', plan['pipeline']['tts']['model'],
-               '--revision', plan['pipeline']['tts']['revision'])
-    phases = ('asr', 'mt', 'tts') if action == 'run' else ('evaluate',)
+        invoke(python, '-c', 'from direct_s2st.cascade.tts import check_runtime; check_runtime()')
+        # A previous/adopted run is read-only for ASR/MT. Missing/corrupt results
+        # must fail, never cause implicit Whisper/NLLB recomputation.
+        output = Path(plan['output'])
+        existing_text = (overlay or any((output/'text').glob('*.json'))
+                         or any((output/'progress').glob('*.json')))
+        phases = ('verify-text', 'tts') if existing_text else ('asr', 'mt', 'verify-text', 'tts')
+    else:
+        phases = ('evaluate',)
     for phase in phases:
         invoke(python, '-m', 'direct_s2st.cascade.benchmark_worker', '--plan', path, '--action', phase)
     if action == 'evaluate':
