@@ -15,7 +15,7 @@ from ..drive_staging import local_path, raw_sha
 from ..io import atomic_write_json, atomic_write_jsonl, atomic_write_text, read_jsonl
 from ..journal import Journal, digest
 from ..manifests.reader import read_common_manifest
-from ..progress import operation, track
+from ..progress import operation, track, activity
 from ..s2ut.benchmark_worker import ordered, save_index
 from .pipeline import _fatal_accelerator_error
 
@@ -60,7 +60,32 @@ def loader(plan, phase):
                               source_language=cfg['source_language'], target_language=cfg['target_language'])
     from .tts import QwenTTS
     return QwenTTS(model_id=cfg['model'], revision=cfg['revision'],
-                   speaker=cfg['speaker'], language=cfg['language'])
+                   speaker=cfg['speaker'], language=cfg['language'], generation=cfg.get('generation'))
+
+
+def text_source_plan(plan):
+    """A new TTS policy may share immutable completed text, never old WAVs."""
+    source = plan.get('text_source')
+    if not source:
+        return plan
+    path = Path(source['plan'])
+    if raw_sha(path) != source['plan_sha256']:
+        raise ValueError('cascade text-source plan changed; no recomputation allowed')
+    old = read(path)
+    if old.get('text_source') or old.get('system_id') != 'cascade' or old.get('split') != 'test':
+        raise ValueError('invalid/nested cascade text source')
+    for key in ('ids', 'common_root', 'common_sha256', 'dataset_lock_sha256', 'asr', 'bleu_denominator'):
+        if old[key] != plan[key]:
+            raise ValueError('cascade text-source test/evaluation conditions changed')
+    if any(old['pipeline'][key] != plan['pipeline'][key] for key in ('asr', 'mt')):
+        raise ValueError('cascade text-source ASR/MT settings changed')
+    root = Path(old['output'])
+    for name, expected in source['files'].items():
+        if name not in ('text/asr.json', 'text/mt.json', 'runtime.json') or raw_sha(root/name) != expected:
+            raise ValueError('saved cascade text-source pointer/runtime changed')
+    if set(source['files']) != {'text/asr.json', 'text/mt.json', 'runtime.json'}:
+        raise ValueError('incomplete cascade text-source evidence')
+    return old
 
 
 def read_phase(plan, phase):
@@ -82,6 +107,11 @@ def read_phase(plan, phase):
 @operation('cascade: verify saved ASR/MT without recomputation or remote writes')
 def verify_text(plan):
     """Completed journals are immutable inputs, NOT invitations to retry models."""
+    original = text_source_plan(plan)
+    if original is not plan:
+        if runtime_identity(plan) != runtime_identity(original):
+            raise ValueError('cascade text-source dependency environment differs')
+        return verify_text(original)
     inputs = common_rows(plan)
     for phase, field in (('asr', 'asr_ja_text'), ('mt', 'mt_en_text')):
         pointer = read(Path(plan['output'])/'text'/(phase+'.json'))
@@ -126,6 +156,14 @@ def checked_wav(path):
     return duration
 
 
+def verified_generation(plan, text, record):
+    policy = plan['pipeline']['tts'].get('generation')
+    if policy:
+        from .qwen_generation import verify_success
+        verify_success(policy, text, record)
+    return record
+
+
 @operation('Qwen TTS: actual model/tokenizer and fixed-text synthesis preflight')
 def synthesis_preflight(plan, model):
     """Exercise the real adapter before creating any formal test journal/WAV.
@@ -146,6 +184,7 @@ def synthesis_preflight(plan, model):
             started = time.perf_counter()
             model('This is a synthesis test.', path)
             duration = checked_wav(path)
+            verified_generation(plan, 'This is a synthesis test.', getattr(model, 'last_generation', None))
             checksum = raw_sha(path)
             output = guarded(Path(plan['output'])/'preflight')
             token = uuid.uuid4().hex
@@ -153,6 +192,7 @@ def synthesis_preflight(plan, model):
             copy_verified(path, target, checksum)
             body = dict(plan=plan['identity'], runtime=runtime_identity(plan),
                         pipeline=plan['pipeline']['tts'], telemetry=getattr(model, 'runtime', None),
+                        tts_generation=getattr(model, 'last_generation', None),
                         snapshot=getattr(model, 'snapshot', None), text='This is a synthesis test.',
                         output_audio=str(target), output_sha256=checksum, output_duration=duration,
                         seconds=time.perf_counter()-started, status='success', benchmark_sample=False)
@@ -164,6 +204,54 @@ def synthesis_preflight(plan, model):
         if state[3] is not None:
             torch.cuda.set_rng_state_all(state[3])
     print('Qwen TTS preflight: success (not a benchmark sample)', file=sys.stderr, flush=True)
+
+
+def restore_tts_group(output, label, directory, identity):
+    """Merge a verified durable snapshot with newer local retry progress.
+
+    Old successful records/WAVs are immutable. Only failed records may have
+    newer local outcomes; an interrupted retry must not collide with its ZIP.
+    """
+    from ..drive_staging import copy_verified
+    guarded(directory)
+    path = directory/'predictions.jsonl'
+    if path.is_symlink() or path.with_suffix('.lock.json').is_symlink():
+        raise ValueError('local TTS retry journal must not be a symlink')
+    if not path.is_file():
+        return restore_tree(output/'audio', label, directory, identity)
+    guarded(directory.parent)
+    with tempfile.TemporaryDirectory(prefix='r-', dir=directory.parent) as temporary:
+        restored = Path(temporary)/'saved'
+        receipt = restore_tree(output/'audio', label, restored, identity)
+        if read(path.with_suffix('.lock.json')) != identity:
+            raise ValueError('local TTS retry identity changed; retained')
+        local_rows = list(read_jsonl(path))
+        local = {row['pair_id']: row for row in local_rows}
+        if len(local) != len(local_rows):
+            raise ValueError('duplicate local TTS retry IDs')
+        saved_rows = list(read_jsonl(restored/'predictions.jsonl'))
+        saved = {row['pair_id']: row for row in saved_rows}
+        if len(saved) != len(saved_rows):
+            raise ValueError('duplicate durable TTS IDs')
+        for key, row in saved.items():
+            if key in local and row['status'] == 'success' and row != local[key]:
+                raise ValueError('successful durable TTS record changed; retained')
+        for name, metadata in receipt['body']['files'].items():
+            if name == 'predictions.jsonl':
+                continue
+            target = directory/name
+            guarded(target.parent)
+            if target.is_symlink():
+                raise ValueError('saved local TTS artifact must not be a symlink')
+            if target.is_file():
+                if raw_sha(target) != metadata['sha256']:
+                    raise ValueError('saved local TTS artifact changed; retained')
+            else:
+                copy_verified(restored/name, target, metadata['sha256'])
+        merged = dict(saved, **local)
+        if merged != local:
+            atomic_write_jsonl(path, merged.values(), overwrite=True)
+        return receipt
 
 
 @operation('cascade: inspect saved TTS journals and WAV hashes')
@@ -178,7 +266,7 @@ def tts_groups(plan, inputs):
         directory = local/'audio'/label
         receipt = output/'audio'/(label+'.json')
         if receipt.is_file():
-            restore_tree(output/'audio', label, directory, identity)
+            restore_tts_group(output, label, directory, identity)
         path = directory/'predictions.jsonl'
         lock = path.with_suffix('.lock.json')
         if path.exists() or lock.exists():
@@ -190,12 +278,19 @@ def tts_groups(plan, inputs):
         if len(saved) != len(rows) or not saved.keys() <= expected.keys():
             raise ValueError('saved cascade TTS IDs changed; retained')
         for key, row in saved.items():
-            if row.get('mt_en_text') != expected[key]['mt_en_text']:
+            upstream = expected[key]
+            provenance = dict(source_audio=upstream['ja_audio'], reference_audio=upstream['en_audio'],
+                              reference_text=upstream['en_text'], asr_ja_text=upstream.get('asr_ja_text'),
+                              mt_en_text=upstream.get('mt_en_text'), asr_seconds=upstream.get('asr_seconds', 0),
+                              mt_seconds=upstream.get('mt_seconds', 0), system_id='cascade',
+                              run_id=plan['run']['name'], split='test')
+            if any(row.get(field) != value for field, value in provenance.items()):
                 raise ValueError('saved cascade TTS input changed; retained')
             if row.get('status') == 'success':
                 if Path(row['output_audio']) != directory/'audio'/(key+'.wav'):
                     raise ValueError('saved cascade TTS WAV path changed; retained')
                 valid_saved(row)
+                verified_generation(plan, row['mt_en_text'], row.get('tts_generation'))
                 duration = checked_wav(Path(row['output_audio']))
                 if (row.get('output_duration') != duration or not isinstance(row.get('tts_seconds'), (int, float))
                         or not 0 < row['tts_seconds'] < float('inf')):
@@ -269,15 +364,25 @@ def valid_saved(row):
 
 @operation('cascade: English TTS and durable WAV ZIPs')
 def synthesize(plan):
-    inputs = read_phase(plan, 'mt')
+    inputs = verify_text(plan) if plan.get('text_source') else read_phase(plan, 'mt')
     local, output = Path(plan['local']), Path(plan['output'])
     model, samples, predictions = None, [], []
     groups, saved_count = tts_groups(plan, inputs)
+    index_path = output/'audio-index.json'
+    previous_samples = {}
+    if index_path.is_file():
+        index = read(index_path)
+        body = index['body']
+        previous_samples = {row['pair_id']: row for row in body['samples']}
+        if (index['sha256'] != digest(body) or body['identity'] != plan['identity']
+                or len(previous_samples) != len(body['samples']) or not previous_samples.keys() <= set(plan['ids'])):
+            raise ValueError('saved cascade audio index changed; retained')
     if any(row['status'] == 'success' for row in inputs) and saved_count < sum(row['status'] == 'success' for row in inputs):
         model = loader(plan, 'tts')
         synthesis_preflight(plan, model)
     reused, computed, processed = 0, 0, 0
-    for batch, identity, label, directory in track(groups, 'cascade: synthesize/reuse/persist WAV groups'):
+    for batch, identity, label, directory in track(groups, 'cascade: synthesize/reuse/persist WAV groups',
+                                                 key=lambda group: group[2]):
         journal = Journal(directory/'predictions.jsonl', identity, resume=True)
         values, changed = [], False
         for row in track(batch, 'cascade: TTS generate/reuse'):
@@ -301,21 +406,27 @@ def synthesize(plan):
                     path = directory/'audio'/(row['pair_id']+'.wav')
                     started = time.perf_counter()
                     try:
-                        model(row['mt_en_text'], path)
-                        duration = checked_wav(path)
+                        with activity('Qwen main tokens / waveform decode; see token progress'):
+                            model(row['mt_en_text'], path)
+                        with activity('validate generated WAV'):
+                            duration = checked_wav(path)
+                            verified_generation(plan, row['mt_en_text'], getattr(model, 'last_generation', None))
                         result.update(output_audio=str(path), output_sha256=raw_sha(path),
                                       output_duration=duration, status='success')
                     except Exception as error:
-                        if _fatal_accelerator_error(error):
+                        if _fatal_accelerator_error(error) or getattr(error, 'fatal_tts', False):
                             raise
                         result['error'] = f'{type(error).__name__}: {error}'
                     result['tts_seconds'] = time.perf_counter()-started
+                    if getattr(model, 'last_generation', None) is not None:
+                        result['tts_generation'] = dict(model.last_generation)
                     computed += 1
                 result['inference_seconds'] = sum(result[key] for key in ('asr_seconds','mt_seconds','tts_seconds'))
                 if result['output_duration']:
                     result['real_time_factor'] = result['inference_seconds']/result['output_duration']
                 result['timing_scope'] = 'per-sample ASR+MT+TTS wall time; excludes model loading and backup'
-                journal.record(result)
+                with activity('save local TTS journal'):
+                    journal.record(result)
             values.append(result)
             processed += 1
             print(f'[cascade-tts] reused={reused} computed={computed} remaining={len(inputs)-processed}',
@@ -330,7 +441,9 @@ def synthesize(plan):
                                 archive_sha256=receipt['body']['sha256'], output_sha256=row.get('output_sha256'),
                                 reference_text=row['reference_text']))
         predictions.extend(values)
-        save_index(output, plan['identity'], samples)
+        # Publishing an early resumed part must not hide already saved later parts.
+        previous_samples.update({row['pair_id']: row for row in samples})
+        save_index(output, plan['identity'], [previous_samples[key] for key in plan['ids'] if key in previous_samples])
     atomic_write_jsonl(output/'predictions.jsonl', predictions, overwrite=True)
     atomic_write_jsonl(local/'predictions.jsonl', predictions, overwrite=True)
     stream = io.StringIO(newline='')

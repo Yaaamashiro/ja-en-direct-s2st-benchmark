@@ -56,9 +56,19 @@ def models(monkeypatch):
                 return 'actual translated english'
             assert argument in ('actual translated english', 'This is a synthesis test.')
             wav(output)
+            generation_record(run, plan, argument)
         return run
     monkeypatch.setattr(worker, 'loader', load)
     return loads, calls
+
+
+def generation_record(model, plan, text):
+    """Explicit test-double evidence; real adapter tests use real HF tokens."""
+    from direct_s2st.cascade.qwen_generation import generation_policy, generation_kwargs, text_seed, CODEC_EOS
+    policy = generation_policy(plan['pipeline']['tts'].get('generation'))
+    model.last_generation = dict(policy=policy, seed=text_seed(text, policy), status='success',
+                                 stop_reason='eos', eos_observed=True, eos_token_id=CODEC_EOS,
+                                 max_new_tokens=generation_kwargs(policy)['max_new_tokens'], generated_tokens=3)
 
 
 def test_prepare_has_no_s2ut_tt2_or_vocoder_and_isolated_pointer(tmp_path, monkeypatch):
@@ -153,6 +163,7 @@ def test_failed_asr_is_not_sent_to_mt_or_tts_and_stays_in_bleu_denominator(tmp_p
             if phase == 'mt':
                 return 'the book is new'
             wav(output)
+            generation_record(run, plan, value)
         return run
     monkeypatch.setattr(worker, 'loader', load)
     worker.text_phase(plan, 'asr')
@@ -246,11 +257,13 @@ def test_loader_repair_reuses_original_plan_and_environment_location(tmp_path, m
         return {'repair':'receipt'}
     monkeypatch.setattr('cascade_loader_overlay.approve', approve)
     reused = session.prepare_cascade(persistent, data, local, 'c'*40)
-    assert reused == plan and approvals[-1] == (plan['identity'], 'c'*40, True)
+    assert reused['identity'] != plan['identity'] and not approvals
+    assert reused['text_source']['plan'] == str(path)
     assert path.read_bytes() == original_plan
     assert (Path(plan['output'])/'runtime.json').read_bytes() == original_environment
-    worker.text_phase(reused, 'asr')
-    worker.text_phase(reused, 'mt')
+    body = dict(plan=reused['identity'], environment_sha256='b'*64)
+    atomic_write_json(Path(reused['output'])/'runtime.json', dict(body=body, sha256=digest(body)))
+    worker.verify_text(reused)
     assert loads == ['asr','mt'] and len(calls) == 6
     builds = []
     monkeypatch.setattr('cascade_loader_overlay.original_build', lambda *args: tmp_path/'original-build')

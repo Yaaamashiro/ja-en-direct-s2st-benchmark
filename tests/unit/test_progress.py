@@ -91,3 +91,10 @@ def test_known_total_and_empty_input(capsys):
 def test_fast_loop_does_not_log_per_item(capsys):
     assert sum(track(range(10000), 'fast', interval=3600)) == sum(range(10000))
     assert len(capsys.readouterr().err.splitlines()) == 2
+
+
+def test_group_key_does_not_dump_transcripts_or_whole_group(capsys):
+    group = ([{'asr_ja_text': 'private transcript'}], {}, 'part-00000', 'path')
+    assert list(track([group], 'groups', key=lambda g: g[2])) == [group]
+    log = capsys.readouterr().err
+    assert 'current=part-00000' in log and 'private transcript' not in log

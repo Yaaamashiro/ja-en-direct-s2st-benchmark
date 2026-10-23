@@ -14,4 +14,4 @@ def components_from_config(config):
     return (WhisperS2T(model_id=speech['model'], revision=speech['revision'],
                 language=speech['language'], task=speech['task']),
             QwenTTS(model_id=voice['model'], revision=voice['revision'],
-                speaker=voice['speaker'], language=voice['language']))
+                speaker=voice['speaker'], language=voice['language'], generation=voice.get('generation')))

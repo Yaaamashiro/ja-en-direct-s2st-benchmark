@@ -251,3 +251,12 @@ optimizer再開は従来のnative bufferを使い、推論のみ対応する較�
 configにimmutable revision・language・taskを保存し、共通journalのidentityに含める。
 S2T出力は`s2t_en_text`、時間は`s2t_seconds`に記録する。
 同一common/testと評価configで4方式を検証する。Colabは固定Python 3.10のnative subprocess経路を持つ。
+
+## Cascade TTS generation policy audit（2026-10-24）
+
+公式との差分は理由・妥当性・根拠・検証範囲を判断してから変更する。
+Qwenの従来greedy固定は適性確認が不十分だったため、ユーザー承認の別評価で
+固定モデルの公式samplingを使用する。入力文seed、既存120秒上限相当token budget、
+協調的時間保護は独自の追加として明記する。EOSを実main talkerでdecode前に検証する。
+旧TTS結果は不変、旧ASR/MTはSHA固定の読み取り専用入力とし再推論しない。
+詳細と実GPU未確認事項は[監査記録](docs/CASCADE_TTS_AUDIT.md)を参照する。

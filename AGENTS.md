@@ -3,6 +3,7 @@
 - Implement the experiment pipeline in the order documented in `DESIGN.md`.
 - Never modify the external corpus repository or write derived artifacts below `CORPUS_ROOT`.
 - Keep model IDs and immutable revisions together. Reject configurations that omit a revision.
+- Before changing an official model/paper/recipe setting, check the authoritative fixed-version source and record the official value, current deviation, reason, expected impact, and whether the deviation is justified. Revisit existing deviations in the affected scope; label unknowns and untested effects explicitly. Do not silently change scientific conditions or mix results produced under different generation settings.
 - Default to the `smoke` profile. Never start `full` training implicitly.
 - Keep long-running operations resumable and use atomic writes for manifests and state.
 - Integrate persistent Colab recovery and resume fixes into the normal notebook cells. Require additional cells only when genuinely necessary for temporary emergency recovery; do not make them the ongoing resume workflow.

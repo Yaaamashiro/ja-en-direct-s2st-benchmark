@@ -12,7 +12,8 @@ S2UT、Translatotron 2、ASR→MT→TTS Cascadeと同じcommon/testを使いま�
   `f00cf133b78d3c2c35857faba3b1be9b98c4f971`、`Ono_Anna`、English。
 - `configs/s2t_tts/default.yaml`から条件を読み込みます。`main` revisionは拒否します。
 - Whisperは`do_sample=False, condition_on_prev_tokens=False`。
-  既存`QwenTTS`を再利用し、`do_sample=False, subtalker_dosample=False`です。
+  共通`QwenTTS`は固定モデルの公式sampling（main/subtalkerともTrue）と文ごとの固定seedを使用します。
+  旧greedy条件とは別runです。変更理由・EOS監視・上限の意味は[監査記録](CASCADE_TTS_AUDIT.md)を参照してください。
   決定的デコード設定ですが、異なるGPU/runtime間のbitwise一致は保証しません。
 
 既存CascadeはWhisper large-v3-turboの`transcribe` → NLLB-200 distilled 600M

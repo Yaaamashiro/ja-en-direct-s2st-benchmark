@@ -326,6 +326,8 @@ def _run_direct_model(
 @operation('direct_s2st/cli: _run_cascade')
 def _run_cascade(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     from .cascade.pipeline import components_from_config, run_pipeline
+    from .cascade.qwen_generation import generation_policy
+    config = dict(config, tts=dict(config['tts'], generation=generation_policy(config['tts'].get('generation'))))
 
     roots = RootPaths.from_environment()
     split = args.split or "test"
@@ -338,6 +340,7 @@ def _run_cascade(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, 
         "split": split,
         "manifest": str(roots.experiment_data / "common" / f"{split}.jsonl"),
         "output_root": str(output),
+        "tts_generation": config['tts']['generation'],
     }
     if args.dry_run:
         return plan
@@ -362,6 +365,8 @@ def _run_cascade(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, 
 @operation('direct_s2st/cli: _run_s2t_tts')
 def _run_s2t_tts(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     from .s2t_tts.pipeline import components_from_config, run_pipeline
+    from .cascade.qwen_generation import generation_policy
+    config = dict(config, tts=dict(config['tts'], generation=generation_policy(config['tts'].get('generation'))))
     from .s2t_tts.s2t import validate_s2t_config
     from .runs import validate_run_id, collect_model_revisions
     from .io import atomic_write_json

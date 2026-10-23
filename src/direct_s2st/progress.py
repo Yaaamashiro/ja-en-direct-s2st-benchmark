@@ -73,7 +73,7 @@ def operation(phase):
     return decorate
 
 
-def track(items, phase, *, total=None, interval=10.0):
+def track(items, phase, *, total=None, interval=10.0, key=None):
     """Stream without pre-reading/counting a manifest or changing item order."""
     if total is None:
         try:
@@ -87,7 +87,7 @@ def track(items, phase, *, total=None, interval=10.0):
                 label = displayed.get('pair_id', displayed.get('id', displayed.get('stage', '-')))
             else:
                 label = getattr(displayed, 'pair_id', displayed)
-            progress.current = str(label)[:160]
+            progress.current = str(key(item) if key is not None else label)[:160]
             yield item
             progress.count += 1
             progress.advanced = time.monotonic()

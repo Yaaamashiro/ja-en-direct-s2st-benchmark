@@ -9,3 +9,8 @@ tts:
   revision: f00cf133b78d3c2c35857faba3b1be9b98c4f971
   speaker: Ono_Anna
   language: English
+  generation:
+    policy: official_sampling_eos_v1
+    seed: 17
+    max_audio_seconds: 120
+    max_wall_seconds: 600

@@ -48,6 +48,7 @@ def test_pipeline_keeps_intermediates_and_failures(tmp_path: Path) -> None:
 
     def tts(text: str, path: Path) -> None:
         _wav(path)
+        tts.last_generation = dict(seed=17, eos_observed=True)
 
     result = run_pipeline(
         manifest,
@@ -65,6 +66,8 @@ def test_pipeline_keeps_intermediates_and_failures(tmp_path: Path) -> None:
     assert records[0]["real_time_factor"] is not None
     assert records[1]["status"] == "failed"
     assert "fixture failure" in records[1]["error"]
+    assert records[0]['tts_generation']['eos_observed'] is True
+    assert 'tts_generation' not in records[1]  # MT failed; do not attach another sample's stale TTS state.
 
 
 def test_resume_reuses_verified_success(tmp_path: Path) -> None:

@@ -27,6 +27,10 @@ def snapshot(tmp_path, monkeypatch):
         chunk_length_s=None, feature_extractor_type='EncodecFeatureExtractor', feature_size=1,
         overlap=None, padding_side='right', padding_value=0.0,
         return_attention_mask=True, sampling_rate=24000), overwrite=True)
+    from direct_s2st.cascade.qwen_generation import OFFICIAL
+    atomic_write_json(root/'config.json', dict(talker_config=dict(codec_eos_token_id=2150)), overwrite=True)
+    atomic_write_json(root/'speech_tokenizer/config.json', dict(output_sample_rate=24000, decode_upsample_rate=1920), overwrite=True)
+    atomic_write_json(root/'generation_config.json', dict(OFFICIAL, max_new_tokens=8192), overwrite=True)
     calls = []
     def download(**kwargs):
         calls.append(kwargs)
@@ -43,6 +47,9 @@ def test_complete_pinned_local_bundle_prevents_sdk_nested_main_resolution(tmp_pa
     monkeypatch.setattr(torch.cuda, 'device', lambda device: nullcontext())
     monkeypatch.setattr(torch.cuda, 'is_bf16_supported', lambda: True)
     monkeypatch.setattr(torch.cuda, 'get_device_name', lambda device: 'NVIDIA L4')
+    import importlib.metadata
+    actual_version = importlib.metadata.version
+    monkeypatch.setattr(importlib.metadata, 'version', lambda name: '0.1.1' if name == 'qwen-tts' else actual_version(name))
     root, downloads = snapshot(tmp_path, monkeypatch)
     from transformers.utils.hub import cached_file
     from transformers import AutoFeatureExtractor
@@ -55,7 +62,8 @@ def test_complete_pinned_local_bundle_prevents_sdk_nested_main_resolution(tmp_pa
         config = cached_file(path, 'speech_tokenizer/config.json', revision=None)
         extractor = AutoFeatureExtractor.from_pretrained(str(Path(config).parent), local_files_only=True)
         assert extractor.sampling_rate == 24000
-        return SimpleNamespace(generate_custom_voice=lambda **kwargs: ([], 24000))
+        from test_qwen_generation import FakeSDK
+        return FakeSDK()
     package = ModuleType('qwen_tts')
     package.Qwen3TTSModel = SimpleNamespace(from_pretrained=load)
     monkeypatch.setitem(sys.modules, 'qwen_tts', package)
@@ -99,37 +107,51 @@ def test_sdk_cannot_receive_another_revision_snapshot(tmp_path, monkeypatch):
         tts.pinned_snapshot('Qwen/model', REVISION)
 
 
+@pytest.mark.parametrize('damage', ['sdk_version', 'codec_eos', 'codec_rate', 'official_sampling'])
+def test_generation_contract_is_checked_before_sdk_load(tmp_path, monkeypatch, damage):
+    import importlib.metadata
+    root, _ = snapshot(tmp_path, monkeypatch)
+    monkeypatch.setattr(tts, 'check_runtime', lambda device: {})
+    monkeypatch.setattr(importlib.metadata, 'version', lambda name: '0.1.2' if damage == 'sdk_version' else '0.1.1')
+    if damage != 'sdk_version':
+        name, key, value = {
+            'codec_eos': ('config.json', 'talker_config', dict(codec_eos_token_id=151673)),
+            'codec_rate': ('speech_tokenizer/config.json', 'decode_upsample_rate', 2000),
+            'official_sampling': ('generation_config.json', 'do_sample', False),
+        }[damage]
+        document = __import__('json').loads((root/name).read_text())
+        document[key] = value
+        atomic_write_json(root/name, document, overwrite=True)
+    with pytest.raises(RuntimeError, match='reviewed qwen|official decoding contract'):
+        tts.QwenTTS(model_id='Qwen/model', revision=REVISION, speaker='Ono_Anna', language='English')
+
+
 @pytest.mark.parametrize('kind', ['nan', 'inf', 'silent', 'stereo'])
 def test_raw_qwen_waveform_is_checked_before_pcm_conversion(tmp_path, kind):
     import numpy as np
     values = dict(nan=np.array([.1, float('nan')]), inf=np.array([.1, float('inf')]),
                   silent=np.zeros(10), stereo=np.ones((10, 2))*.1)
-    adapter = object.__new__(tts.QwenTTS)
-    adapter.speaker, adapter.language = 'Ono_Anna', 'English'
-    adapter.model = SimpleNamespace(generate_custom_voice=lambda **kwargs: ([values[kind]], 24000))
+    from test_qwen_generation import adapter as make_adapter, FakeSDK
+    adapter = make_adapter(FakeSDK(waveform=values[kind]))
     path = tmp_path/'result.wav'
     with pytest.raises(ValueError, match='invalid/non-finite'):
         adapter('This is a synthesis test.', path)
     assert not path.exists()
 
 
-def test_valid_qwen_generation_keeps_original_decoding_and_pcm_bytes(tmp_path):
+def test_valid_qwen_generation_keeps_pcm_bytes_with_declared_official_decoding(tmp_path):
     import numpy as np
     import soundfile as sf
     waveform = np.sin(np.arange(1000)/10)*.1
-    calls = []
-    def generate(**kwargs):
-        calls.append(kwargs)
-        return [waveform], 24000
-    adapter = object.__new__(tts.QwenTTS)
-    adapter.speaker, adapter.language = 'Ono_Anna', 'English'
-    adapter.model = SimpleNamespace(generate_custom_voice=generate)
+    from test_qwen_generation import adapter as make_adapter, FakeSDK
+    from direct_s2st.cascade.qwen_generation import generation_kwargs
+    adapter = make_adapter(FakeSDK(waveform=waveform))
     path, original = tmp_path/'new.wav', tmp_path/'original.wav'
     adapter('saved MT output', path)
     sf.write(original, waveform, 24000, subtype='PCM_16')
     assert path.read_bytes() == original.read_bytes()
-    assert calls == [dict(text='saved MT output', language='English', speaker='Ono_Anna',
-                          do_sample=False, subtalker_dosample=False)]
+    assert adapter.model.calls == [dict(text='saved MT output', language='English', speaker='Ono_Anna',
+                                        non_streaming_mode=True, **generation_kwargs(adapter.generation))]
 
 
 def overlay_plan(tmp_path):

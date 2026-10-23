@@ -935,6 +935,14 @@ CPU/モックでは通常セルの対象分岐・参照漏洩防止・ZIP復元�
 
 #### Qwenトークナイザー取得エラーと、ASR/MTを保持する再開
 
+以下のloader-only overlayは旧版の経緯です。現在の公式sampling/EOS対策では
+**旧WAVへ合流せず、完了ASR/MTだけを共有する別評価**を作ります。
+通常セル1→6→7→8を使用し、旧plan/receiptを書き換えないでください。
+設定変更の理由・公式との差・検証範囲は[Qwen TTS監査記録](CASCADE_TTS_AUDIT.md)を参照してください。
+新policyはmain/subtalker sampling=True、文ごとseed固定、120秒相当1501 token上限、
+600秒の協調的時間保護を明示します。EOS未確認音声を切り詰めて成功扱いにはしません。
+Qwen実GPUで問題が解消したことはまだ未確認です。
+
 `qwen-tts==0.1.1`は指定revisionを受け取っても、内部の音声トークナイザーの
 `cached_file`やprocessor取得でそのrevisionを引き継がない経路があります。
 本体を`f00cf13...`から取得した一方、`speech_tokenizer`を別snapshotから参照して
@@ -950,7 +958,8 @@ CUDA/BF16非対応時はロード前に停止し、GPU名・対応状況・bfloa
 試験合成はWAV保存・読み戻し・mono・有限値・非無音・durationを検証し、失敗なら
 正式test音声を1件も生成しません。成功記録とWAVは別の`preflight/`へ保存し、
 正式predictions/index・BLEU母数へ混ぜません。試験前後で乱数状態も復元します。
-依存version・モデルSHA・話者・言語・BF16/SDPA・正式デコード条件は変更しません。
+旧loader-only修正では依存version・モデルSHA・話者・言語・BF16/SDPA・正式デコード条件を変更していません。
+新しいsampling policyは正式デコード条件の変更なので、上記の別評価方式を使用します。
 
 `f9f1520047bca2c0e977b581cab70168892091e2`で**最初のTTSロード前に停止した評価**は、
 対応修正版の`TRAIN_CODE_REVISION`で通常のセル1→6→7→8を実行してください。

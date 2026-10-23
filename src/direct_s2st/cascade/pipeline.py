@@ -100,6 +100,7 @@ def _run_text_pipeline(
             record.update(s2t_en_text=None, s2t_seconds=0.0, tts_seconds=0.0, output_sha256=None)
         total_started = perf_counter()
         fatal_error = None
+        tts_called = False
         try:
             text = Path(row["ja_audio"])
             for field, timing, component in text_stages:
@@ -112,6 +113,7 @@ def _run_text_pipeline(
             if strict and (not isinstance(text, str) or not text.strip()):
                 raise ValueError('empty translated text')
             started = perf_counter()
+            tts_called = True
             tts(text, output_audio)
             record["tts_seconds"] = perf_counter() - started
             record["output_duration"] = _duration(output_audio)
@@ -124,9 +126,11 @@ def _run_text_pipeline(
             record["status"] = "success"
             record['output_sha256'] = sha256_file(output_audio)
         except Exception as error:
-            if _fatal_accelerator_error(error):
+            if _fatal_accelerator_error(error) or getattr(error, 'fatal_tts', False):
                 fatal_error = error
             record["error"] = f"{type(error).__name__}: {error}"
+        if tts_called and getattr(tts, 'last_generation', None) is not None:
+            record['tts_generation'] = dict(tts.last_generation)
         record["total_seconds"] = perf_counter() - total_started
         record["inference_seconds"] = record["total_seconds"]
         duration = float(record.get("output_duration") or 0.0)
@@ -175,5 +179,6 @@ def components_from_config(config: dict[str, Any]) -> tuple[WhisperASR, NllbTran
             revision=tts_values["revision"],
             speaker=tts_values["speaker"],
             language=tts_values["language"],
+            generation=tts_values.get('generation'),
         ),
     )
