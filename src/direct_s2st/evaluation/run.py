@@ -22,6 +22,8 @@ def evaluate_predictions(
     resume: bool = False,
     overwrite: bool = False,
     evaluation_identity: dict | None = None,
+    include_failed_in_bleu: bool = False,
+    on_record: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     per_sample_path = output_root / "per_sample.jsonl"
     predictions = list(read_jsonl(predictions_path))
@@ -34,6 +36,8 @@ def evaluate_predictions(
     identity = {'predictions': sha256_file(predictions_path), 'evaluation': evaluation_identity,
                 'speaker_enabled': speaker_similarity is not None, 'blaser_enabled': blaser is not None,
                 'audio': {}}
+    if include_failed_in_bleu:
+        identity['bleu_denominator'] = 'all_samples_failed_as_empty'
     for raw in track(predictions, 'evaluation: verify input hashes'):
         Prediction.from_dict(raw)
         for field in ('output_audio', 'source_audio', 'reference_audio'):
@@ -44,6 +48,7 @@ def evaluate_predictions(
     results: list[dict[str, Any]] = []
     hypotheses: list[str] = []
     references: list[str] = []
+    successes = 0
     for raw in track(predictions, 'evaluation: score (compute/reuse)'):
         prediction = Prediction.from_dict(raw)
         old = prior.get(prediction.pair_id)
@@ -107,12 +112,21 @@ def evaluate_predictions(
                                 f"{type(error).__name__}: {error}"
                             )
                 except Exception as error:
+                    if include_failed_in_bleu and any(s in str(error).lower() for s in (
+                            'cuda out of memory', 'device-side assert', 'cuda error')):
+                        raise
                     result["evaluation_error"] = f"{type(error).__name__}: {error}"
         if result.get("evaluation_status") == "success":
+            successes += 1
             hypotheses.append(str(result["hypothesis_normalized"]))
             references.append(str(result["reference_normalized"]))
+        elif include_failed_in_bleu:
+            hypotheses.append('')
+            references.append(str(result['reference_normalized']))
         results.append(result)
         journal.record(result)
+        if on_record is not None:
+            on_record(len(results), len(predictions))
 
     def mean(field: str) -> float | None:
         values = [float(row[field]) for row in results if row.get(field) is not None]
@@ -124,7 +138,7 @@ def evaluate_predictions(
         "samples": len(predictions),
         "evaluation_identity": evaluation_identity,
         "generation_failures": sum(row.get("status") == "failed" for row in predictions),
-        "asr_success_rate": len(hypotheses) / len(predictions) if predictions else 0.0,
+        "asr_success_rate": successes / len(predictions) if predictions else 0.0,
         "bleu": corpus_bleu(hypotheses, references),
         "blaser": mean("blaser"),
         "speaker_similarity_source": mean("speaker_similarity_source"),
@@ -133,5 +147,9 @@ def evaluate_predictions(
         "clipping_ratio": mean("clipping_ratio"),
         **aggregate_runtime(predictions),
     }
+    if include_failed_in_bleu:
+        metrics.update(bleu_denominator='all_samples_failed_as_empty',
+                       asr_failures=sum(r['generation_status'] == 'success' and r['evaluation_status'] != 'success'
+                                        for r in results))
     atomic_write_json(output_root / "metrics.json", metrics, overwrite=overwrite or resume)
     return metrics

@@ -20,6 +20,16 @@ PCM16、duration、必須 text を検証し、入力 manifest の hash を datas
 
 ## Reproducibility and recovery
 
+学習済みS2UTだけの正式test評価は4方式acceptanceから分離し、通常セル6/7/8で
+保存済み実run・dev unit-loss best・元の依存lockを検証して実行する。
+beam10→公式SHA固定LJSpeech Unit vocoder→固定英語Whisper→sacreBLEUとし、
+test全IDを保持し、生成/ASR失敗は空仮説としてcorpus BLEUの母数から除外しない。
+train/devによるモデル選択を変えず、testによるcheckpoint選択・再学習は行わない。
+Unit shard・32件WAV ZIP・ASR journalをDriveへatomic保存し、切断後は検証再利用する。
+WAVの個別大量配置を避け、ID/ZIP/member/SHA index・ASR文を永続化する。
+通常セル9の保存音声再生はモデル・GPUを使わず、元コーパスを変更しない。
+この経路ではTT2・自前vocoder・train音声・BLASER・話者類似度は不要である。
+
 Colab学習は既定で時間上限なし（SESSION_MINUTES=0 / --session-seconds=0）とし、
 明示確認された目標更新数まで続行する。時間による自動一時停止は行わない。
 Colab側の切断は防げないため、atomic snapshot保存・検証・再開機構は維持する。

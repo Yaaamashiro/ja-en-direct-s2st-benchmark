@@ -835,6 +835,58 @@ CPU音声化できることを確認しました。これはWindows/Python 3.13�
 
 S2UT推論は1件ずつ処理し、`--required-batch-size-multiple 1`も明示します。
 既定値8のままだと、固定fairseqのバッチ生成で最後の1件が除外されるためです。
+
+### S2UTだけの正式test評価と生成音声の保存（通常セル6～9）
+
+TT2をまだ再学習していない場合も、S2UTだけを評価できます。セル1は
+`RUN_TRAINING=False`、`RUN_PREVIEW=False`、`RUN_BENCHMARK=True`、
+`BENCHMARK_TARGET='s2ut'`、`S2UT_VOCODER_MODE='paper'`、`DATA_LIMIT=None`、
+`CONFIRM_FULL_DATA=True`とします。`BENCHMARK_RUN_NAME=''`は保存済み
+`last-training-run-s2ut.json`を優先し、なければ一意な実保存runを選択します。
+複数候補があれば実名を指定してください。`TRAIN_TARGET`は評価対象を決めません。
+保存launcherが旧版の場合は対応版の完全SHAを`TRAIN_CODE_REVISION`に明示指定します。
+元の学習revision・依存lock・snapshotは書き換えません。
+
+1. **セル6**: S2UTの保存snapshot、元の依存環境identity、prepared metadataを照合。
+   `checkpoint_best.pt`をdev unit lossの最良値・SHAと照合し、選択updateを表示します。
+   学習最終400000 updateとdev-bestのupdateは異なり得ます。test全ID・正解英語は
+   checkpoint-boundのtarget文字ラベルと照合します。取得対象WAVはtestの日英のみ。
+   既存の音声ZIPは再利用し、欠けたtest ZIPだけ元コーパスを読んで別領域へ作成します。
+2. **セル7**: 固定fairseq、beam10でtest全件のUnit生成、公式HuBERT L6/KM100
+   LJSpeech Unit HiFi-GAN（SHA固定、duration予測）で音声化。
+   TT2・自前Unit/Mel・train音声・新たな学習/optimizer更新は不要です。
+3. **セル8**: 元の保存依存環境を復元し、固定revisionの
+   `openai/whisper-large-v3-turbo`で英語ASR、既存の英語正規化＋sacreBLEUでcorpus BLEU。
+   生成/ASR失敗も空仮説として**全test件数を母数に含めます**。失敗件数、ASR成功率も保存します。
+   BLASER・話者類似度はこの単独経路では実行せず、4方式acceptanceとは別の報告です。
+
+生成Unitの完了shard、WAVの32件グループ、ASRの32件ごとのjournalを、SHA検証付き
+不変ZIPとしてDriveへ保存します。切断後は同じ設定で**セル1→6→7→8**。
+ローカル環境/入力が失われても、完了receiptとZIPを検証して復元します。
+保存前に失われた実行中グループは再処理され得ます。Drive転送制限やマウント切断を
+回避できる保証はありませんが、生成WAVをDriveに1件ずつ置く方式は使いません。
+保存済みZIPは削除せず、追記・完了indexのatomic更新で公開します。
+
+保存先は`<実験>/benchmarks/s2ut/<評価ID>/`です。
+
+- `plan.json`: 実run名、checkpoint/環境/metadata SHA、ASR revision、全test ID。
+- `audio/part-....zip`: 生成WAV（32件ごと）。隣接JSONはZIPと各WAVのSHAを持つreceipt。
+- `audio-index.json` / `audio-index.csv`: pair ID→ZIP名・ZIP内WAV・正解英語・成否。
+- `predictions.jsonl`: 全件の生成結果（ローカルパスは記録当時のもの。再生はZIP/indexを使用）。
+- `results/metrics.json` / `report.md`: 全件S2UT単独ASR-BLEU。
+- `results/per_sample.jsonl` / `.csv`: 正解文、ASR文、sentence BLEU、失敗理由。
+
+**後から聴くには、CPUでセル1→9だけ**実行します。
+`BENCHMARK_LISTEN_ID`にpair ID、または空欄のまま`BENCHMARK_LISTEN_INDEX`に0始まりの番号を指定。
+保存ZIPから選択WAVをSHA検証して取り出し、日本語原音・英語正解・S2UT翻訳・ASR文を表示します。
+モデル/venv/GPUは不要、再推論や再学習もしません。元音声は元コーパスから読み取るため、
+日本語/英語原音も聴くにはコーパスを保持してください。原音が取得できなくても保存済み
+翻訳音声の試聴は継続し、原音の取得失敗を表示します。生成WAV自体はZIPをPCへ取得して
+展開するだけでも再生できます。試聴は評価結果・既存のpreviewを変更しません。
+
+新しい経路はCPUテストで保存・SHA拒否・再開・母数・通常セル分岐を確認します。
+実Colab/GPUでの全test E2Eや品質・実行時間の保証ではありません。
+従来の4方式比較は`BENCHMARK_TARGET='all'`で維持します。
 この設定は少数試聴・全件推論の双方に適用し、学習batchは変えません。
 旧設定の不完全な生成シャードは保持しますが、新しいキャッシュ識別子で再生成します。
 `preview generated unexpected or missing sample IDs`が出た旧版は、対応する

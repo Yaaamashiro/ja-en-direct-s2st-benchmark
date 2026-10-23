@@ -46,7 +46,7 @@ def generation_command(data_root, checkpoint, generated, split, beam, device):
 
 @operation('s2ut: resumable generation shards')
 def generate_shards(command, generated, split, ids, identity, *, resume=False, overwrite=False,
-                    runner=None, shard_size=32, selected_ids=None):
+                    runner=None, shard_size=32, selected_ids=None, on_shard=None):
     import math
     from ..hashing import sha256_file
     from ..preparation import Checkpoints
@@ -93,6 +93,8 @@ def generate_shards(command, generated, split, ids, identity, *, resume=False, o
                 saved = dict(records=values, seconds=seconds, log_sha256=sha256_file(path))
                 cache.record(key, saved)
                 cache.flush()  # Every successful subprocess is a durable recovery unit.
+                if on_shard is not None:
+                    on_shard()
             if results.keys() & saved['records'].keys():
                 raise ValueError('duplicate ID across generation shards')
             results.update(saved['records'])
@@ -118,10 +120,13 @@ def main() -> None:
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--checkpoint-selection', choices=('auto', 'last', 'best'), default='auto')
     parser.add_argument('--sample-ids', type=Path, help='preview only: JSON array of 1..10 IDs')
+    parser.add_argument('--generation-backup', type=Path, help='verified benchmark shard ZIP backups')
     args = parser.parse_args()
     from ..preview_selection import sample_ids, common_rows
     selected = sample_ids(args.sample_ids)
-    validate_prepared(args.data_root, check_audio=selected is None)
+    # Metadata for every split remains checked. Benchmark test inference must
+    # not require downloading/stat-ing train WAVs; selected test audio is hashed below.
+    validate_prepared(args.data_root, check_audio=selected is None and args.generation_backup is None)
     from ..translatotron2.monitor import select_checkpoint
     checkpoint = select_checkpoint(args.run_root, args.checkpoint_selection)
     if not checkpoint.is_file():
@@ -152,8 +157,20 @@ def main() -> None:
     command = generation_command(args.data_root, checkpoint, generated, args.split, args.beam, args.device)
     ids = list(rows)
     import json
+    callback = None
+    if args.generation_backup is not None:
+        if selected is not None or args.overwrite:
+            raise ValueError('durable benchmark generation requires full split and resume, not overwrite')
+        from ..benchmark_storage import publish_tree, restore_tree
+        if not generated.exists() and (args.generation_backup/'units.json').is_file():
+            restore_tree(args.generation_backup, 'units', generated, identity)
+        command[2] = 'direct_s2st.s2ut.staged_generate'
+        callback = lambda: publish_tree(generated, args.generation_backup, 'units', identity)
     records, timings = generate_shards(command, generated, args.split, ids,
-        json.loads(journal.lock.read_text()), resume=args.resume, overwrite=args.overwrite, selected_ids=selected)
+        json.loads(journal.lock.read_text()), resume=args.resume, overwrite=args.overwrite,
+        selected_ids=selected, on_shard=callback)
+    if callback is not None:
+        callback()  # Also publish if a previous upload failed after local completion.
     for pair_id in track(selected if selected is not None else ids, 's2ut: write predictions'):
         row = common[pair_id]
         journal.record({"pair_id": pair_id, "system_id": "s2ut", "run_id": args.run_root.name,

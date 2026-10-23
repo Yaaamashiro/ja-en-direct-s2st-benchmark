@@ -62,7 +62,8 @@ def write_waveform(path: Path, waveform, sample_rate: int, *, overwrite: bool = 
 @operation('vocoders/inference: vocode')
 def vocode(kind: str, input_path: Path, output_root: Path, checkpoint: Path, config_path: Path,
            *, sample_rate: int, device: str = "cuda", mel: dict | None = None,
-           duration_prediction: bool = True, overwrite: bool = False, resume: bool = False) -> dict:
+           duration_prediction: bool = True, overwrite: bool = False, resume: bool = False,
+           fatal_cuda: bool = False) -> dict:
     from ..journal import Journal
     if os.environ.get('CORPUS_ROOT') and output_root.resolve().is_relative_to(Path(os.environ['CORPUS_ROOT']).resolve()):
         raise ValueError('vocoder output must not be in CORPUS_ROOT')
@@ -138,6 +139,9 @@ def vocode(kind: str, input_path: Path, output_root: Path, checkpoint: Path, con
                       "vocoder_seconds": elapsed, "real_time_factor": seconds / duration,
                       "status": "success", "error": None}
         except Exception as error:
+            if fatal_cuda and any(s in str(error).lower() for s in (
+                    'cuda out of memory', 'device-side assert', 'cuda error')):
+                raise
             output = {**row, 'output_audio': None, 'output_duration': None, 'real_time_factor': None,
                       'inference_seconds': float(row.get('inference_seconds', 0)) + time.perf_counter() - started,
                       'status': 'failed', 'error': f'{type(error).__name__}: {error}'}
