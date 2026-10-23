@@ -214,7 +214,7 @@ def test_normal_cells_route_only_cascade_and_worker_processes_are_separate(tmp_p
     phases = [c[-1] for c in calls if 'direct_s2st.cascade.benchmark_worker' in c]
     assert phases == ['asr','mt','tts']
     assert all(c[0] == '/cascade/python3.10' for c in calls)
-    with pytest.raises(ValueError, match='revision changed'):
+    with pytest.raises(ValueError, match='reviewed original'):
         session.execute_cascade(persistent, 'run', lambda *args: None, 'b'*40)
     nb = read(ROOT/'notebooks/colab_training.ipynb')
     namespace = {}
@@ -230,3 +230,37 @@ def test_normal_cells_route_only_cascade_and_worker_processes_are_separate(tmp_p
         exec(''.join(cell['source']), namespace)
     assert [c[c.index('--action')+1] for c in commands] == ['prepare','run','evaluate']
     assert all(c[c.index('--target')+1] == 'cascade' for c in commands)
+
+
+def test_loader_repair_reuses_original_plan_and_environment_location(tmp_path, monkeypatch):
+    persistent, data, local, _, plan = fixture(tmp_path, monkeypatch)
+    loads, calls = models(monkeypatch)
+    worker.text_phase(plan, 'asr')
+    worker.text_phase(plan, 'mt')
+    path, _ = session.load_plan(persistent, 'cascade')
+    original_plan = path.read_bytes()
+    original_environment = (Path(plan['output'])/'runtime.json').read_bytes()
+    approvals = []
+    def approve(root, plan_path, old, revision, **kwargs):
+        approvals.append((old['identity'], revision, kwargs.get('adopt', False)))
+        return {'repair':'receipt'}
+    monkeypatch.setattr('cascade_loader_overlay.approve', approve)
+    reused = session.prepare_cascade(persistent, data, local, 'c'*40)
+    assert reused == plan and approvals[-1] == (plan['identity'], 'c'*40, True)
+    assert path.read_bytes() == original_plan
+    assert (Path(plan['output'])/'runtime.json').read_bytes() == original_environment
+    worker.text_phase(reused, 'asr')
+    worker.text_phase(reused, 'mt')
+    assert loads == ['asr','mt'] and len(calls) == 6
+    builds = []
+    monkeypatch.setattr('cascade_loader_overlay.original_build', lambda *args: tmp_path/'original-build')
+    def environment(*args, **kwargs):
+        builds.append(kwargs['build'])
+        return '/original-venv/python'
+    monkeypatch.setattr(session, 'cascade_environment', environment)
+    commands = []
+    session.execute_cascade(persistent, 'run', lambda *args: commands.append(args), 'c'*40)
+    assert builds == [tmp_path/'original-build']
+    assert [c[2] for c in commands if len(c)>2 and c[1] == '-m'] == [
+        'direct_s2st.cascade.tts', 'direct_s2st.cascade.benchmark_worker',
+        'direct_s2st.cascade.benchmark_worker', 'direct_s2st.cascade.benchmark_worker']

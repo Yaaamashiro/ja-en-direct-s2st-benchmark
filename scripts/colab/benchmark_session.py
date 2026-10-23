@@ -16,7 +16,7 @@ from direct_s2st.io import atomic_write_json, read_jsonl
 from direct_s2st.journal import digest
 from direct_s2st.progress import operation, track
 
-BENCHMARK_BACKEND_VERSION = 2
+BENCHMARK_BACKEND_VERSION = 3
 
 
 def load_plan(persistent, target='s2ut'):
@@ -59,12 +59,26 @@ def prepare_cascade(persistent, data, local, revision):
                 asr=dict(model_id='openai/whisper-large-v3-turbo',
                          revision='60be3615a4d667e1258e8ad29130467587c489aa'),
                 bleu_denominator='all_samples_failed_as_empty')
+    reused = None
+    if (persistent/'benchmarks/cascade/latest.json').is_file():
+        old_path, old = load_plan(persistent, 'cascade')
+        semantic_keys = body.keys() - {'execution_revision'}
+        if (old['execution_revision'] != revision
+                and all(old.get(key) == body[key] for key in semantic_keys)):
+            from cascade_loader_overlay import approve
+            approve(ROOT, old_path, old, revision, adopt=True)
+            reused = old
     token = digest(body)[:24]
-    owned = ensure_local(local/'cascade'/token)
-    output = guarded(persistent/'benchmarks/cascade'/token)
+    owned = ensure_local(Path(reused['local']) if reused else local/'cascade'/token)
+    output = guarded(Path(reused['output']) if reused else persistent/'benchmarks/cascade'/token)
     mapping = stage_audio(data/'common', data/'.drive-audio-packs', owned/'inputs',
                           splits=('test',), languages=('ja', 'en'))
     atomic_write_json(owned/'input-map.json', dict(rows=mapping, sha256=digest(mapping)), overwrite=True)
+    if reused:
+        print(json.dumps(dict(target='cascade', test_samples=len(ids), output=str(output),
+                              resume_saved_asr_mt=True, original_plan_preserved=True,
+                              execution_revision=revision)), flush=True)
+        return reused
     plan = dict(body, local=str(owned), output=str(output), identity=digest(body),
                 run=dict(name='cascade-test-'+token))
     atomic_write_json(output/'plan.json', plan, resume=True)
@@ -75,7 +89,7 @@ def prepare_cascade(persistent, data, local, revision):
 
 
 @operation('cascade benchmark: restore measured inference environment')
-def cascade_environment(persistent, plan, invoke, *, prefix=Path('/content/s2st-runtime')):
+def cascade_environment(persistent, plan, invoke, *, prefix=Path('/content/s2st-runtime'), build=None):
     from environment_recovery import ensure_environment
     from direct_s2st.io import atomic_write_bytes
     path = Path(plan['output'])/'runtime.json'
@@ -84,7 +98,7 @@ def cascade_environment(persistent, plan, invoke, *, prefix=Path('/content/s2st-
                      or previous['body']['plan'] != plan['identity']):
         raise ValueError('cascade dependency receipt differs from saved evaluation')
     expected = previous['body']['environment_sha256'] if previous else None
-    python = ensure_environment(ROOT, persistent, invoke, expected=expected, prefix=prefix)
+    python = ensure_environment(build or ROOT, persistent, invoke, expected=expected, prefix=prefix)
     checksum = raw_sha(prefix/'environment.json')
     if expected and checksum != expected:
         raise ValueError('cascade runtime differs; saved outputs retained')
@@ -100,8 +114,10 @@ def cascade_environment(persistent, plan, invoke, *, prefix=Path('/content/s2st-
 @operation('cascade benchmark: execute without training checkpoints')
 def execute_cascade(persistent, action, invoke, revision):
     path, plan = load_plan(persistent, 'cascade')
+    overlay = None
     if plan['execution_revision'] != revision:
-        raise ValueError('cascade execution revision changed; rerun normal cell 6')
+        from cascade_loader_overlay import approve
+        overlay = approve(ROOT, path, plan, revision)
     local = Path(plan['local'])
     if not (local/'input-map.json').is_file():
         raise ValueError('local test inputs lost; normal cell 1 -> 6 -> 7 -> 8 restores saved work')
@@ -110,7 +126,12 @@ def execute_cascade(persistent, action, invoke, revision):
             or raw_sha(common/'dataset-lock.json') != plan['dataset_lock_sha256']):
         raise ValueError('cascade test metadata changed')
     os.environ['S2ST_INPUT_MAP'] = str(local/'input-map.json')
-    python = cascade_environment(persistent, plan, invoke)
+    if overlay:
+        from cascade_loader_overlay import original_build
+        build = original_build(ROOT, plan['execution_revision'], invoke)
+        python = cascade_environment(persistent, plan, invoke, build=build)
+    else:
+        python = cascade_environment(persistent, plan, invoke)
     bf16_check = ('assert torch.cuda.is_bf16_supported(), "The pinned Qwen adapter requires a BF16-capable GPU"; '
                   if action == 'run' else '')
     invoke(python, '-c', 'from direct_s2st.inference_logging import configure_logging; configure_logging(); '
@@ -119,10 +140,25 @@ def execute_cascade(persistent, action, invoke, revision):
            +bf16_check+
            'from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer; '
            'from qwen_tts import Qwen3TTSModel; print("Cascade dependencies checked")')
+    if action == 'run':
+        # Check the entire pinned tokenizer/processor bundle before spending GPU
+        # time on ASR/MT, not only when the first sentence reaches synthesis.
+        invoke(python, '-m', 'direct_s2st.cascade.tts', '--model', plan['pipeline']['tts']['model'],
+               '--revision', plan['pipeline']['tts']['revision'])
     phases = ('asr', 'mt', 'tts') if action == 'run' else ('evaluate',)
     for phase in phases:
         invoke(python, '-m', 'direct_s2st.cascade.benchmark_worker', '--plan', path, '--action', phase)
     if action == 'evaluate':
+        if overlay:
+            from direct_s2st.io import atomic_write_text
+            results = Path(plan['output'])/'results'
+            metrics = read(results/'metrics.json')
+            metrics['execution_overlay'] = overlay
+            atomic_write_json(results/'metrics.json', metrics, overwrite=True)
+            report = (results/'report.md').read_text(encoding='utf-8')
+            report += ('\nReviewed TTS loader execution: `'+revision+'`; original plan/dependencies: `'
+                       +plan['execution_revision']+'`. ASR/MT history is unchanged.\n')
+            atomic_write_text(results/'report.md', report, overwrite=True)
         print((Path(plan['output'])/'results/report.md').read_text(encoding='utf-8'), flush=True)
 
 

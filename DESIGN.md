@@ -36,6 +36,12 @@ WAVの個別大量配置を避け、ID/ZIP/member/SHA index・ASR文を永続化
 既存S2UT評価を変更しない。ASR-BLEUの正規化・全件母数・評価ASRはS2UT単独経路と同じとする。
 現在のQwen BF16設定は維持し、非対応GPUへの暗黙の精度/モデル切替はしない。
 
+Qwen SDKの内部revision取り落としを避けるため、固定revisionの完全snapshotを取得・
+必須ファイル検査し、SDKへローカルpathだけを渡す。モデルロード前の検査はASR/MTより先に行う。
+初版cascadeがTTSロード前に停止した場合だけ、レビュー済みloader差分と同一モデル/testを
+確認して元plan・元依存identity・ASR/MT journalを保持した実行overlayを採用できる。
+採用前のTTS WAVや未公開ZIPを暗黙再利用せず、採用後の実行revisionは別receiptとreportへ残す。
+
 Colab学習は既定で時間上限なし（SESSION_MINUTES=0 / --session-seconds=0）とし、
 明示確認された目標更新数まで続行する。時間による自動一時停止は行わない。
 Colab側の切断は防げないため、atomic snapshot保存・検証・再開機構は維持する。

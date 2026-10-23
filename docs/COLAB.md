@@ -933,6 +933,38 @@ CUDA OOM/device-side assertはprocess-fatalとし、残りを全件failed扱い�
 CPU/モックでは通常セルの対象分岐・参照漏洩防止・ZIP復元・段階再利用・失敗の母数保持・
 依存receipt一致・S2UT保存先の非変更をテストします。実Colab/GPU・実Qwen全件生成は未検証です。
 
+#### Qwenトークナイザー取得エラーと、ASR/MTを保持する再開
+
+`qwen-tts==0.1.1`は指定revisionを受け取っても、内部の音声トークナイザーの
+`cached_file`やprocessor取得でそのrevisionを引き継がない経路があります。
+本体を`f00cf13...`から取得した一方、`speech_tokenizer`を別snapshotから参照して
+`preprocessor_config.json`が見つからなくなる場合があります。
+FlashAttention未導入の警告とは別の問題です。
+
+修正版は固定SHAの**完全snapshotを先に取得し、root processor・tokenizer・重み・
+speech_tokenizerの必須ファイル/JSONを確認してから、SDKへローカルディレクトリだけを渡します**。
+SDKの内部取得で`main`へ戻ることを避け、既存のHub blobは再利用します。
+セル7はASR/MTを始める前にモデルをロードしないartifact検査を行い、設定ファイル不足を
+最初のTTSまで持ち越しません。依存version・モデルSHA・話者・言語・BF16/SDPAは変更しません。
+
+`f9f1520047bca2c0e977b581cab70168892091e2`で**最初のTTSロード前に停止した評価**は、
+対応修正版の`TRAIN_CODE_REVISION`で通常のセル1→6→7→8を実行してください。
+セル6はモデル設定・test全ID/manifest SHAが同じなら元planの再利用を検討します。
+レビュー済みGit差分（TTS loader・通常launcher・説明/テストのみ）を確認し、
+既存のTTS WAVがない場合だけ`execution-overlays/<修正revision>.json`を保存します。
+元plan・ASR/MT journal・完了pointer・runtime SHAを上書きしません。
+元と同じeditable build位置から実依存を復元し、修正ソースだけを別のPYTHONPATHから使用します。
+したがってASR/MT完了分を再計算せず、TTSから続行できます。
+同じ修正revisionを再開する場合は、その採用後に生成したWAVも再利用します。
+最終metrics/reportに元revisionと実行修正revisionを記録します。
+
+旧版が既にWAVを生成していた場合、不変ZIPが未公開の場合、元plan/依存receiptが不一致の場合、
+ASR/MT/モデル設定/依存を含む未レビュー差分がある場合は自動合流せず停止します。
+古いsnapshotから音声トークナイザーだけを手作業でコピーしたり、`environment.json`や
+保存planのrevisionを書き換えたり、コーパス/ASR/MT結果を削除したりしないでください。
+CPUテストは実TransformersのEncodec feature extractorによるローカル設定読込も含みますが、
+Qwen本体重みを使う実GPU合成は未検証です。
+
 ### テストの範囲
 
 工程別の保存単位・再開手順・旧データの制約は[中断・再開の範囲](RESUME.md)を参照してください。
