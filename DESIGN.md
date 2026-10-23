@@ -30,6 +30,12 @@ WAVの個別大量配置を避け、ID/ZIP/member/SHA index・ASR文を永続化
 通常セル9の保存音声再生はモデル・GPUを使わず、元コーパスを変更しない。
 この経路ではTT2・自前vocoder・train音声・BLASER・話者類似度は不要である。
 
+カスケード単独test評価も通常セル6/7/8/9で選択する。学習runを復元せず、固定モデルの
+日本語ASR→日英MT→英語TTSを別プロセスで順次実行し、参照文を推論入力へ混入しない。
+段階別のjournal・WAV ZIP・実依存manifestを別のbenchmarks/cascade領域へ保存し、
+既存S2UT評価を変更しない。ASR-BLEUの正規化・全件母数・評価ASRはS2UT単独経路と同じとする。
+現在のQwen BF16設定は維持し、非対応GPUへの暗黙の精度/モデル切替はしない。
+
 Colab学習は既定で時間上限なし（SESSION_MINUTES=0 / --session-seconds=0）とし、
 明示確認された目標更新数まで続行する。時間による自動一時停止は行わない。
 Colab側の切断は防げないため、atomic snapshot保存・検証・再開機構は維持する。

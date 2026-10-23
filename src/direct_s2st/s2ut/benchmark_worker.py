@@ -108,7 +108,8 @@ def restore_audio(plan):
     common = {r['pair_id']: r for r in read_jsonl(Path(plan['common_root'])/'test.jsonl')}
     from ..drive_staging import local_path
     for row, item in zip(predictions, body['samples']):
-        if row['pair_id'] != item['pair_id'] or row['reference_text'] != common[row['pair_id']]['en_text']:
+        if (row['pair_id'] != item['pair_id'] or row['reference_text'] != common[row['pair_id']]['en_text']
+                or row['system_id'] != plan.get('system_id', 's2ut') or row['run_id'] != plan['run']['name']):
             raise ValueError('saved test references/IDs changed')
         if row['status'] == 'success':
             expected = str(local/'audio'/item['part']/item['member'])
@@ -121,13 +122,16 @@ def restore_audio(plan):
     return predictions
 
 
-@operation('cell 8: full-test S2UT ASR-BLEU, with durable recovery')
+@operation('cell 8: full-test single-system ASR-BLEU, with durable recovery')
 def evaluate(plan):
     local, output = Path(plan['local']), Path(plan['output'])
     predictions = restore_audio(plan)
     identity = dict(plan=plan['identity'], predictions=raw_sha(local/'predictions.jsonl'),
                     asr=plan['asr'], bleu_denominator=plan['bleu_denominator'],
                     normalization='nfkc_lower_english_v1', optional_metrics=False)
+    cascade = plan.get('system_id') == 'cascade'
+    if cascade:
+        identity['runtime'] = read(output/'runtime.json')
     label = 'asr-'+digest(identity)[:24]
     scores = local/label
     if not scores.exists() and (output/'progress'/(label+'.json')).is_file():
@@ -136,35 +140,54 @@ def evaluate(plan):
     from ..evaluation.run import evaluate_predictions
     from ..evaluation.transcribe import EvaluationASR
     from ..progress import Progress
-    # Loading ASR is explicit, pinned, and never runs in the listening action.
-    with Progress('benchmark: load pinned English evaluation ASR'):
-        asr = EvaluationASR(**plan['asr'], device=0)
+    # A fully restored ASR journal does not need another model download/load.
+    asr = None
+    def transcribe(path):
+        nonlocal asr
+        if asr is None:
+            with Progress('benchmark: load pinned English evaluation ASR'):
+                asr = EvaluationASR(**plan['asr'], device=0)
+        return asr(path)
     def persist(count, total):
         if count % 32 == 0 or count == total:
             publish_tree(scores, output/'progress', label, identity)
-    metrics = evaluate_predictions(local/'predictions.jsonl', scores, transcribe=asr,
+    metrics = evaluate_predictions(local/'predictions.jsonl', scores, transcribe=transcribe,
                                    resume=True, evaluation_identity=identity,
                                    include_failed_in_bleu=True, on_record=persist)
-    metrics.update(split='test', selected_checkpoint_sha256=plan['checkpoint_sha256'],
-                   selected_best_update=plan['best_update'], training_updates=plan['run']['updates'],
-                   evaluation_scope='S2UT only, not four-system acceptance', audio_index=str(output/'audio-index.json'))
+    metrics.update(split='test', audio_index=str(output/'audio-index.json'))
+    if cascade:
+        metrics.update(evaluation_scope='Cascade only, not four-system acceptance',
+                       pipeline=plan['pipeline'], runtime=identity['runtime'])
+    else:
+        metrics.update(selected_checkpoint_sha256=plan['checkpoint_sha256'],
+                       selected_best_update=plan['best_update'], training_updates=plan['run']['updates'],
+                       evaluation_scope='S2UT only, not four-system acceptance')
     results = guarded(output/'results')
     atomic_write_json(results/'metrics.json', metrics, overwrite=True)
     atomic_write_jsonl(results/'per_sample.jsonl', read_jsonl(scores/'per_sample.jsonl'), overwrite=True)
     stream = io.StringIO(newline='')
     fields = ['pair_id','generation_status','evaluation_status','reference_raw','hypothesis_raw','sentence_bleu','evaluation_error']
+    if cascade:
+        fields += ['asr_ja_text','mt_en_text']
     writer = csv.DictWriter(stream, fieldnames=fields)
     writer.writeheader()
-    writer.writerows({key: row.get(key) for key in fields} for row in read_jsonl(scores/'per_sample.jsonl'))
+    predicted = {r['pair_id']: r for r in predictions}
+    writer.writerows({key: row.get(key, predicted[row['pair_id']].get(key)) for key in fields}
+                     for row in read_jsonl(scores/'per_sample.jsonl'))
     atomic_write_text(results/'per_sample.csv', stream.getvalue(), overwrite=True)
-    report = ('# S2UT full-test ASR-BLEU\n\n'
-              f"Run: `{plan['run']['name']}`; dev-best update: {plan['best_update']}; "
-              f"training reached: {plan['run']['updates']}.\n\n"
+    heading = ('# Cascade full-test ASR-BLEU\n\n'+f"Run: `{plan['run']['name']}`. No training checkpoints.\n\n"
+               if cascade else '# S2UT full-test ASR-BLEU\n\n'+
+               f"Run: `{plan['run']['name']}`; dev-best update: {plan['best_update']}; "
+               f"training reached: {plan['run']['updates']}.\n\n")
+    method = ('Pinned Whisper (JA ASR) -> NLLB (JA to EN) -> Qwen TTS (English). '
+              'No TT2, S2UT or self-trained vocoder restoration. '
+              if cascade else 'Official LJSpeech Unit HiFi-GAN, beam 10, pinned English Whisper. '
+              'No TT2, retraining or model selection on test. ')
+    report = (heading+
               f"Test samples: {len(predictions)}; ASR-BLEU: {metrics['bleu']:.4f}; "
               f"generation failures: {metrics['generation_failures']}; ASR failures: {metrics['asr_failures']}.\n\n"
               'All test references are retained in the BLEU denominator; failed hypotheses are empty. '
-              'Official LJSpeech Unit HiFi-GAN, beam 10, pinned English Whisper. '
-              'No TT2, retraining, model selection on test, BLASER or speaker-similarity evaluation. '
+              +method+'Pinned English Whisper for evaluation. No BLASER or speaker-similarity evaluation. '
               'This is not a four-system comparison/acceptance report.\n\n'
               'Generated WAV ZIPs: `../audio/`; sample/ZIP index: `../audio-index.json`. '
               'Use normal cell 9 to listen without a GPU.\n')

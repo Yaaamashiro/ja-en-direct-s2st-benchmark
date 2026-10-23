@@ -1,4 +1,4 @@
-"""Normal cells 6..9: one S2UT run, full test ASR-BLEU, saved audio."""
+"""Normal cells 6..9: single-system full test ASR-BLEU and saved audio."""
 import argparse
 import json
 import os
@@ -16,18 +16,114 @@ from direct_s2st.io import atomic_write_json, read_jsonl
 from direct_s2st.journal import digest
 from direct_s2st.progress import operation, track
 
-BENCHMARK_BACKEND_VERSION = 1
+BENCHMARK_BACKEND_VERSION = 2
 
 
-def load_plan(persistent):
-    pointer = read(persistent/'benchmarks/s2ut/latest.json')
+def load_plan(persistent, target='s2ut'):
+    if target not in ('s2ut', 'cascade'):
+        raise ValueError('unsupported single-system benchmark target')
+    pointer = read(persistent/'benchmarks'/target/'latest.json')
     path = Path(pointer['plan'])
     if raw_sha(path) != pointer['sha256']:
         raise ValueError('benchmark plan checksum changed; rerun normal cell 6')
     plan = read(path)
-    if plan.get('version') != 1 or plan.get('split') != 'test':
-        raise ValueError('not a full-test S2UT benchmark plan')
+    if (plan.get('version') != 1 or plan.get('split') != 'test'
+            or plan.get('system_id', 's2ut') != target):
+        raise ValueError('not a matching full-test benchmark plan')
     return path, plan
+
+
+@operation('cell 6: prepare cascade-only full-test benchmark')
+def prepare_cascade(persistent, data, local, revision):
+    if not re.fullmatch('[0-9a-f]{40}', revision):
+        raise ValueError('cascade evaluation requires an immutable execution revision')
+    from direct_s2st.config import load_config
+    configuration = load_config(ROOT/'configs/cascade/default.yaml')
+    # Only model settings: profile max_samples/training knobs must never limit
+    # this explicitly confirmed full-test evaluation.
+    pipeline = {key: configuration[key] for key in ('asr', 'mt', 'tts')}
+    for key in ('asr', 'mt', 'tts'):
+        if not re.fullmatch('[0-9a-f]{40}', pipeline[key]['revision']):
+            raise ValueError('cascade models require immutable revisions')
+    manifest = data/'common/test.jsonl'
+    rows = list(read_jsonl(manifest))
+    ids = [r['pair_id'] for r in rows]
+    if (not ids or len(set(ids)) != len(ids) or any(r['split'] != 'test' for r in rows)
+            or any(not re.fullmatch('[A-Za-z0-9_-]+', key) for key in ids)
+            or any(not isinstance(r.get('en_text'), str) or not r['en_text'].strip() for r in rows)):
+        raise ValueError('cascade evaluation requires all unique test IDs and English references')
+    body = dict(version=1, system_id='cascade', purpose='cascade_full_test_asr_bleu_not_four_system_acceptance',
+                split='test', ids=ids, common_root=str(data/'common'), common_sha256=raw_sha(manifest),
+                dataset_lock_sha256=raw_sha(data/'common/dataset-lock.json'),
+                pipeline=pipeline, execution_revision=revision,
+                asr=dict(model_id='openai/whisper-large-v3-turbo',
+                         revision='60be3615a4d667e1258e8ad29130467587c489aa'),
+                bleu_denominator='all_samples_failed_as_empty')
+    token = digest(body)[:24]
+    owned = ensure_local(local/'cascade'/token)
+    output = guarded(persistent/'benchmarks/cascade'/token)
+    mapping = stage_audio(data/'common', data/'.drive-audio-packs', owned/'inputs',
+                          splits=('test',), languages=('ja', 'en'))
+    atomic_write_json(owned/'input-map.json', dict(rows=mapping, sha256=digest(mapping)), overwrite=True)
+    plan = dict(body, local=str(owned), output=str(output), identity=digest(body),
+                run=dict(name='cascade-test-'+token))
+    atomic_write_json(output/'plan.json', plan, resume=True)
+    atomic_write_json(persistent/'benchmarks/cascade/latest.json',
+                      dict(plan=str(output/'plan.json'), sha256=raw_sha(output/'plan.json')), overwrite=True)
+    print(json.dumps(dict(target='cascade', test_samples=len(ids), output=str(output)), ensure_ascii=False), flush=True)
+    return plan
+
+
+@operation('cascade benchmark: restore measured inference environment')
+def cascade_environment(persistent, plan, invoke, *, prefix=Path('/content/s2st-runtime')):
+    from environment_recovery import ensure_environment
+    from direct_s2st.io import atomic_write_bytes
+    path = Path(plan['output'])/'runtime.json'
+    previous = read(path) if path.is_file() else None
+    if previous and (previous['sha256'] != digest(previous['body'])
+                     or previous['body']['plan'] != plan['identity']):
+        raise ValueError('cascade dependency receipt differs from saved evaluation')
+    expected = previous['body']['environment_sha256'] if previous else None
+    python = ensure_environment(ROOT, persistent, invoke, expected=expected, prefix=prefix)
+    checksum = raw_sha(prefix/'environment.json')
+    if expected and checksum != expected:
+        raise ValueError('cascade runtime differs; saved outputs retained')
+    body = dict(plan=plan['identity'], environment_sha256=checksum)
+    atomic_write_json(path, dict(body=body, sha256=digest(body)), resume=True)
+    atomic_write_bytes(Path(plan['output'])/'environment.json', (prefix/'environment.json').read_bytes(), resume=True)
+    os.environ.update(PYTHONPATH=str(ROOT/'src')+os.pathsep+str(prefix/'fairseq'),
+                      S2ST_CONFIG_ROOT=str(ROOT/'configs'),
+                      S2ST_BENCHMARK_ENVIRONMENT_SHA256=checksum)
+    return python
+
+
+@operation('cascade benchmark: execute without training checkpoints')
+def execute_cascade(persistent, action, invoke, revision):
+    path, plan = load_plan(persistent, 'cascade')
+    if plan['execution_revision'] != revision:
+        raise ValueError('cascade execution revision changed; rerun normal cell 6')
+    local = Path(plan['local'])
+    if not (local/'input-map.json').is_file():
+        raise ValueError('local test inputs lost; normal cell 1 -> 6 -> 7 -> 8 restores saved work')
+    common = Path(plan['common_root'])
+    if (raw_sha(common/'test.jsonl') != plan['common_sha256']
+            or raw_sha(common/'dataset-lock.json') != plan['dataset_lock_sha256']):
+        raise ValueError('cascade test metadata changed')
+    os.environ['S2ST_INPUT_MAP'] = str(local/'input-map.json')
+    python = cascade_environment(persistent, plan, invoke)
+    bf16_check = ('assert torch.cuda.is_bf16_supported(), "The pinned Qwen adapter requires a BF16-capable GPU"; '
+                  if action == 'run' else '')
+    invoke(python, '-c', 'from direct_s2st.inference_logging import configure_logging; configure_logging(); '
+           'import torch, torchaudio, soundfile, sacrebleu, accelerate, sentencepiece; '
+           'assert torch.cuda.is_available(), "Cascade/ASR evaluation requires a GPU"; '
+           +bf16_check+
+           'from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer; '
+           'from qwen_tts import Qwen3TTSModel; print("Cascade dependencies checked")')
+    phases = ('asr', 'mt', 'tts') if action == 'run' else ('evaluate',)
+    for phase in phases:
+        invoke(python, '-m', 'direct_s2st.cascade.benchmark_worker', '--plan', path, '--action', phase)
+    if action == 'evaluate':
+        print((Path(plan['output'])/'results/report.md').read_text(encoding='utf-8'), flush=True)
 
 
 def validate_test(run, data):
@@ -142,8 +238,8 @@ def execute(repo, persistent, action, invoke, revision):
 
 
 @operation('cell 9: listen to saved benchmark WAV without GPU or models')
-def listen(persistent, local, pair_id='', index=0):
-    _, plan = load_plan(persistent)
+def listen(persistent, local, pair_id='', index=0, *, target='s2ut'):
+    _, plan = load_plan(persistent, target)
     output = Path(plan['output'])
     document = read(output/'audio-index.json')
     if document['sha256'] != digest(document['body']) or document['body']['identity'] != plan['identity']:
@@ -162,7 +258,8 @@ def listen(persistent, local, pair_id='', index=0):
                      members=[selected['member']])
         if raw_sha(target/selected['member']) != selected['output_sha256']:
             raise ValueError('saved listening WAV differs from audio index')
-        audio['S2UT翻訳'] = str(target/selected['member'])
+        label = 'カスケード翻訳' if plan.get('system_id') == 'cascade' else 'S2UT翻訳'
+        audio[label] = str(target/selected['member'])
     # Original corpus is retained separately, not duplicated in every archive.
     from direct_s2st.drive_staging import read_common_manifest_row, copy_verified
     common = next(r for r in read_jsonl(Path(plan['common_root'])/'test.jsonl') if r['pair_id'] == selected['pair_id'])
@@ -199,6 +296,7 @@ def main():
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--local', type=Path, default=Path('/content/s2st-benchmark'))
     parser.add_argument('--run-name', default='')
+    parser.add_argument('--target', choices=('s2ut', 'cascade'), default='s2ut')
     parser.add_argument('--pair-id', default='')
     parser.add_argument('--index', type=int, default=0)
     args = parser.parse_args()
@@ -207,11 +305,16 @@ def main():
         print('実行:', *map(str, command), flush=True)
         subprocess.run(list(map(str, command)), check=True)
     if args.action == 'listen':
-        listen(args.persistent, args.local, args.pair_id, args.index)
+        listen(args.persistent, args.local, args.pair_id, args.index, target=args.target)
         return
     revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     if args.action == 'prepare':
-        prepare(args.persistent, args.data, args.local, args.run_name, revision)
+        if args.target == 'cascade':
+            prepare_cascade(args.persistent, args.data, args.local, revision)
+        else:
+            prepare(args.persistent, args.data, args.local, args.run_name, revision)
+    elif args.target == 'cascade':
+        execute_cascade(args.persistent, args.action, invoke, revision)
     else:
         execute(args.repo, args.persistent, args.action, invoke, revision)
 

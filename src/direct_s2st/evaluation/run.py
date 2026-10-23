@@ -33,6 +33,7 @@ def evaluate_predictions(
         raise ValueError('evaluation cannot mix runs/systems')
     from ..journal import Journal
     from ..hashing import sha256_file
+    from ..drive_staging import local_path
     identity = {'predictions': sha256_file(predictions_path), 'evaluation': evaluation_identity,
                 'speaker_enabled': speaker_similarity is not None, 'blaser_enabled': blaser is not None,
                 'audio': {}}
@@ -41,7 +42,7 @@ def evaluate_predictions(
     for raw in track(predictions, 'evaluation: verify input hashes'):
         Prediction.from_dict(raw)
         for field in ('output_audio', 'source_audio', 'reference_audio'):
-            if raw.get(field) and Path(raw[field]).is_file():
+            if raw.get(field) and local_path(raw[field]).is_file():
                 identity['audio'][raw[field]] = sha256_file(Path(raw[field]))
     journal = Journal(per_sample_path, identity, resume=resume, overwrite=overwrite)
     prior = journal.rows.copy()

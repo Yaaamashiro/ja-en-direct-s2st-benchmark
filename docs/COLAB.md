@@ -893,6 +893,46 @@ TT2をまだ再学習していない場合も、S2UTだけを評価できます�
 `TRAIN_CODE_REVISION`に更新し、通常のセル1 → 6 → 7で再実行してください。
 checkpointや準備済みデータの削除・再学習は不要です。
 
+### カスケードだけの正式test評価（通常セル6～9）
+
+セル1で`RUN_TRAINING=False`、`RUN_PREVIEW=False`、`RUN_BENCHMARK=True`、
+`BENCHMARK_TARGET='cascade'`、`CONFIRM_FULL_DATA=True`、`DATA_LIMIT=None`にします。
+対応版の完全SHAを`TRAIN_CODE_REVISION`に指定してセル1→6→7→8を実行します。
+`TRAIN_TARGET`、`BENCHMARK_RUN_NAME`、TT2/S2UTのvocoder設定はこの経路では使いません。
+
+- **セル6**: common/test全件・dataset lockを確認し、testの日英WAVだけを既存ZIPから
+  取得・検証。TT2/S2UT/Unit/Melの保存runやcheckpointを探さず、再学習・4A/4B再処理もしません。
+- **セル7**: `configs/cascade/default.yaml`のSHA固定モデルによる
+  Whisper日本語ASR → NLLB日英MT → Qwen英語TTS。モデルは段階ごとに別プロセスで動かし、
+  同時にGPUへ載せません。モデル/設定/共通test以外の入力は不要です。
+  参照日本語・参照英語をASR/MT/TTSの入力へ渡さず、ASR出力をMTへ、MT出力をTTSへ渡します。
+  現在の既存Qwen adapterはBF16固定なので、生成にはBF16対応CUDA GPUが必要です。
+  CPUへ暗黙fallbackしたり、別の音声合成モデルに置き換えたりはしません。
+- **セル8**: S2UT単独評価と同じ固定英語Whisper・英語正規化・sacreBLEUを使用。
+  失敗例は空仮説としてtest全件の母数に残します。BLASER/話者類似度は実行しません。
+- **セル9**: `BENCHMARK_TARGET='cascade'`のままID/番号を指定し、保存WAVをCPUで試聴。
+
+学習環境とは別の評価用環境receipt（`runtime.json`）と元の実依存manifest
+（`environment.json`）を保存します。切断後は通常のセル1→6→7→8で実依存を復元し、
+ASR/MTの32件ごとのjournal ZIP、32件グループのTTS WAV ZIP、評価ASR journalを検証・再利用します。
+保存前の実行中グループは再処理され得ます。モデル・参照・コードを変えた場合は別の評価IDです。
+CUDA OOM/device-side assertはprocess-fatalとし、残りを全件failed扱いで流しません。
+サンプル固有の失敗は原因と中間文を残して評価へ進めます。
+全件再利用できる段階ではモデルをロードせず、参照テキストで出力を補完することもありません。
+
+保存先は`<実験>/benchmarks/cascade/<評価ID>/`です。既存`benchmarks/s2ut/`は変更しません。
+`results/report.md`・`results/metrics.json`に単独評価レポート、
+`results/per_sample.csv`に正解英語・生成音声の英語ASR・sentence BLEUに加えて
+日本語ASR文（`asr_ja_text`）・MT英語文（`mt_en_text`）を保存します。
+`predictions.jsonl`には段階別の処理時間・失敗理由、`audio/`にはWAV ZIP、
+`audio-index.csv/json`にはIDとZIP内WAVの対応を残します。
+4方式acceptanceとは別のレポートです。従来の4方式比較は`BENCHMARK_TARGET='all'`で維持します。
+
+新規依存は追加せず、既存の`requirements/colab-inference.txt`に含まれる
+`qwen-tts==0.1.1`、`transformers==4.57.3`などの固定依存を使用し、モデル取得前にimportを確認します。
+CPU/モックでは通常セルの対象分岐・参照漏洩防止・ZIP復元・段階再利用・失敗の母数保持・
+依存receipt一致・S2UT保存先の非変更をテストします。実Colab/GPU・実Qwen全件生成は未検証です。
+
 ### テストの範囲
 
 工程別の保存単位・再開手順・旧データの制約は[中断・再開の範囲](RESUME.md)を参照してください。
