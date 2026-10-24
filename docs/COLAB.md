@@ -926,6 +926,46 @@ KFTT/JESCの差だけでコーパス品質が原因と断定するものでは�
 子プロセスの進捗・エラー本文はColabのセル出力へ中継します。単なる`CalledProcessError`で
 原因が見えなくなるのを防ぎ、失敗時にも保存結果の自動修復・再推論は行いません。
 
+### 正解日本語とASR日本語の翻訳比較（セル8B、GPU）
+
+正式なCascade test評価が保存済みなら、GPUランタイムで同じ実験設定の**セル1 → 8B**を
+実行します。8Aの実行変数には依存せず、8B内でも保存済みAll ASR-BLEU・ID・参照・SHAを
+検証します。セル3・6〜8の再実行やWhisper/TTS/音声再生成は不要です。
+`TRAIN_CODE_REVISION`は現在のままで、8B対応コードがなければ診断コードだけ別のローカル
+worktreeに取得します。セル1〜8Aの挙動と、既存の正式評価結果は変更しません。
+
+保存済みplanの同一NLLBで、各testサンプルの`ja_text`（正解日本語）と`asr_ja_text`
+（保存済み日本語ASR）をそれぞれ翻訳します。英語参照文はBLEU計算にだけ使います。
+All / KFTT / JESCごとに、保存済みMT BLEU・正解日本語からのMT BLEU・ASR日本語の再翻訳BLEU・
+両者の差・再翻訳と保存済みMTの一致件数・失敗件数を表示します。すべてcorpus BLEUで、
+失敗した翻訳は空仮説として選択サンプル全件の分母に残します。KFTT/JESC分類はmanifestの
+`corpus`を使用し、結合と再開は`pair_id`で検証します。
+
+`MT_DIAGNOSTIC_LIMIT=0`は全test、正数はpair_idのハッシュ順で固定抽出する診断用subsetです。
+`MT_DIAGNOSTIC_TARGET='auto'`は8Aと同じ対象選択です。`MT_DIAGNOSTIC_RUN_LABEL`を変更すると
+元の診断を残した別runになります。結果は`<実験>/diagnostics/cascade-gold-mt/<ID>/`の
+`metrics.json`・`per_sample.csv`・`report.md`に保存します。NLLBの言語トークン・dtype・実生成設定・
+依存バージョン・GPUも記録します。モデル・入力・実環境・コードが一致する場合だけ再開し、
+8件の翻訳分岐ごとに小さなJSONチャンクを永続化します。通常の中断では未保存分もflushし、
+ランタイム強制終了では最後の未保存最大7分岐を再処理する可能性があります。
+完了済みの診断はNLLBを再ロードせず再集計できます。CUDA/OOM等は全件failedとして流さず停止します。
+
+GPUと固定版のNLLB依存を事前に実import・CUDA演算で検証します。既存環境を優先し、
+`MT_DIAGNOSTIC_INSTALL_DEPS=True`で不足時だけ`/content/s2st-mt-diagnostic-runtime/`に
+専用Python 3.10.18・torch 2.7.1+cu126・Transformers 4.57.3等を構築します。
+`requirements/diagnostic-mt.txt`の固定版を使い、学習venv・Colabのシステムパッケージは変更しません。
+新しいNLLB重みとキャッシュは`/content/s2st-mt-diagnostic-cache/`だけに保存します。
+GPUがない場合は依存を導入せず停止し、CPUにはfallbackしません。
+
+生成条件は、[SHA固定の公式NLLB設定](https://huggingface.co/facebook/nllb-200-distilled-600M/blob/f8d333a098d19b4fd9a8b18f94170487ad3f821d/generation_config.json)と
+[Transformers 4.57.3 NLLB文書](https://huggingface.co/docs/transformers/v4.57.3/en/model_doc/nllb)を確認しています。
+元のadapterと同じ日本語`src_lang=jpn_Jpan`・英語`forced_bos_token_id`を使い、モデル既定の
+最大生成長200・beam/sampling/repetition設定・FP32・1文ずつの呼び出しを維持します。
+反復を見て都合のよい生成設定へ変更しません。EOS・生成長上限到達は診断情報として残し、
+元のMT出力条件を黙って修正しません。再翻訳が保存済みMTと異なる場合は、実環境・生成設定の
+記録を先に確認してください。正解日本語で低BLEUでも、対訳の破損を単独で証明するものではありません。
+これは原因切り分け用であり、正解テキストを使う値を正式な音声翻訳スコアへ置き換えません。
+
 ### カスケードだけの正式test評価（通常セル6～9）
 
 セル1で`RUN_TRAINING=False`、`RUN_PREVIEW=False`、`RUN_BENCHMARK=True`、

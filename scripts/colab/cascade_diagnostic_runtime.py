@@ -159,7 +159,7 @@ def stop_child(process):
             process.wait()
 
 
-def run_json(command, env):
+def run_json(command, env, *, name='8A', mode='CPU diagnostic', failure_note=None):
     """Relay stderr through Python so Colab actually displays logs/errors."""
     tail = deque(maxlen=60)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -182,12 +182,12 @@ def run_json(command, env):
     finally:
         reader.join(timeout=5)
     if status:
-        raise RuntimeError(f'8A CPU diagnostic exited with code {status}.\n'+''.join(tail)+
-                           '\nSaved results were not repaired or overwritten; no inference was attempted.')
+        note = failure_note or 'Saved results were not repaired or overwritten; no inference was attempted.'
+        raise RuntimeError(f'{name} {mode} exited with code {status}.\n'+''.join(tail)+'\n'+note)
     try:
         report = json.loads(output)
     except json.JSONDecodeError as error:
-        raise RuntimeError('8A helper did not return valid result JSON: '+output[-1200:]) from error
+        raise RuntimeError(name+' helper did not return valid result JSON: '+output[-1200:]) from error
     if not isinstance(report, dict) or report.get('all_score_matches_saved') is not True:
-        raise RuntimeError('8A helper did not confirm agreement with the saved formal All score')
+        raise RuntimeError(name+' helper did not confirm agreement with the saved formal All score')
     return report

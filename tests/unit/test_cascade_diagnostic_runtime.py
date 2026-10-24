@@ -91,6 +91,15 @@ def test_child_progress_and_errors_are_visible_in_notebook_output(capsys):
     assert 'specific missing artifact' in capsys.readouterr().out
 
 
+def test_gpu_diagnostic_error_does_not_claim_no_inference_was_attempted():
+    with pytest.raises(RuntimeError,match='8B NLLB GPU diagnostic') as caught:
+        runtime.run_json([sys.executable,'-B','-c','raise RuntimeError("CUDA fixture failure")'],
+                         runtime.cpu_environment(),name='8B',mode='NLLB GPU diagnostic',
+                         failure_note='Saved formal results unchanged; diagnostic chunks resumable.')
+    assert 'no inference was attempted' not in str(caught.value)
+    assert 'CUDA fixture failure' in str(caught.value)
+
+
 def test_child_success_keeps_result_json_separate_from_progress(capsys):
     report = dict(all_score_matches_saved=True, display='日本語CER', groups={'KFTT':{'samples':2}})
     code = "import json, sys; print('[progress] checked=2/2', file=sys.stderr, flush=True); print(json.dumps("+repr(report)+", ensure_ascii=False))"

@@ -221,11 +221,11 @@ def test_existing_cells_1_to_8_and_other_cells_are_unchanged_and_8a_is_immediate
     added = [c for c in new['cells'] if ''.join(c['source']).startswith('#@title 8A.')]
     # Compare other cells with the current base, without requiring deep Git history
     # or permanently freezing unrelated notebook cells to this feature's commit.
-    previous = [c for c in old['cells'] if not ''.join(c['source']).startswith('#@title 8A.')]
-    assert len(added) == 1 and [c for c in new['cells'] if c is not added[0]] == previous
+    previous = [c for c in old['cells'] if not ''.join(c['source']).startswith(('#@title 8A.','#@title 8B.'))]
+    assert len(added) == 1 and [c for c in new['cells'] if not ''.join(c['source']).startswith(('#@title 8A.','#@title 8B.'))] == previous
     i = new['cells'].index(added[0])
     assert ''.join(new['cells'][i-1]['source']).startswith('#@title 8. 共通評価')
-    assert ''.join(new['cells'][i+1]['source']).startswith('#@title 9.')
+    assert ''.join(new['cells'][i+1]['source']).startswith(('#@title 8B.','#@title 9.'))
     code = ''.join(added[0]['source'])
     ast.parse(code, feature_version=(3,10))
     assert "_diag_runtime['cpu_environment']()" in code
