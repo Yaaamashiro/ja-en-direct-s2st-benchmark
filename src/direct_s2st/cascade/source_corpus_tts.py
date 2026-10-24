@@ -1,12 +1,9 @@
-"""Proof gate and a read-only bridge to the actual corpus TTS implementation.
-
-The corpus repository currently DOES NOT persist its full effective config.
-A checked-in YAML is not proof of which overrides generated historical audio.
-This module therefore refuses inference without a generation-time receipt.
-"""
+"""Read-only corpus TTS bridge with documentary or explicit user confirmation."""
+import ast
 import contextlib
 import dataclasses
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -14,13 +11,113 @@ import subprocess
 import sys
 
 from .corpus_diagnostic import checksum, read
+from ..journal import digest
 from ..progress import operation,track
 
 ERROR = 'Cannot prove exact source-corpus Japanese TTS configuration'
 REPOSITORY = 'Yaaamashiro/ja-en-direct-s2st-corpus'
+CONFIRMED_REVISION = 'efe987934c48ee78b02132e97144815589ebeea7'
+CONFIRMED_FILES = {
+    'configs/colab-pro.yaml':'450fc2b17a27cc8ce3d38c17c943aa1593664454f6b6219a4a9bb8ccb6af0007',
+    'notebooks/colab_pro.ipynb':'3e6107581c8911f9a893889a83b03f64ab7212bd53c56c3659b440f3b65bec22',
+    'requirements/colab.txt':'aff1db9ed92c233ee43c174f6a1e309ae2d1590ac45e748a0180d22323bae70a',
+}
 TTS_FIELDS = {'model_id','revision','device','dtype','speaker','instruct','max_new_tokens',
               'do_sample','subtalker_do_sample','remove_invalid_values','renormalize_logits',
               'output_sample_rate','max_content_retries','batch_size'}
+
+
+def confirmed_notebook():
+    """The human confirmed unchanged notebook use; no historical file is invented.
+
+    This bootstrap is stdlib-only and loads no models or datasets. The actual
+    fixed notebook/YAML are checked and resolved after the isolated runtime is ready.
+    """
+    receipt=dict(schema='source-corpus-tts-user-confirmed-v1',repository=REPOSITORY,
+        code_revision=CONFIRMED_REVISION,config_relative_path='configs/colab-pro.yaml',
+        config_sha256=CONFIRMED_FILES['configs/colab-pro.yaml'],language='Japanese',
+        confirmation=dict(basis='user_confirmed_unchanged_corpus_notebook',
+            statement='The user confirmed running the corpus notebook without changing its settings.',
+            historical_execution_revision_verified=False,
+            note='Fixed repository settings reproduced on user confirmation; not a recovered generation-time receipt.'))
+    return dict(receipt=receipt,inputs_sha256={},receipt_sha256=digest(receipt),
+                receipt_hash_type='canonical_json',basis='user_confirmation',resolved=False)
+
+
+def check_confirmed_files(root):
+    """Git checkout newline conversion is immaterial; changed content is rejected."""
+    for relative,expected in CONFIRMED_FILES.items():
+        path=Path(root)/relative
+        if path.is_symlink() or not path.resolve().is_relative_to(Path(root).resolve()):
+            raise RuntimeError('8C confirmed corpus source may not redirect outside its checkout')
+        if hashlib.sha256(path.read_bytes().replace(b'\r\n',b'\n')).hexdigest()!=expected:
+            raise RuntimeError('8C confirmed notebook/config content differs from reviewed revision: '+relative)
+
+
+def notebook_batch_size(notebook,vram_gib):
+    """Read the reviewed Cell 5 constants; never execute a corpus notebook cell."""
+    cells=json.loads(Path(notebook).read_text(encoding='utf-8'))['cells']
+    matches=[ast.parse(''.join(c['source'])) for c in cells if c['cell_type']=='code'
+             and 'TTS_BATCH_SIZE = ' in ''.join(c['source']) and 'vram_gib' in ''.join(c['source'])]
+    if len(matches)!=1:
+        raise RuntimeError('8C corpus notebook batch cell is missing/ambiguous')
+    tree=matches[0]
+    assignments=[n for n in tree.body if isinstance(n,ast.Assign) and any(
+        isinstance(t,ast.Name) and t.id=='TTS_BATCH_SIZE' for t in n.targets)]
+    if len(assignments)!=1 or not isinstance(assignments[0].value,ast.Constant):
+        raise RuntimeError('8C unsupported corpus notebook TTS batch default')
+    default=assignments[0].value.value
+    branches=[n for n in tree.body if isinstance(n,ast.If) and isinstance(n.test,ast.Compare)
+              and ast.unparse(n.test.left)=="gpu['vram_gib']"]
+    if len(branches)!=1:
+        raise RuntimeError('8C unsupported corpus notebook GPU batch rule')
+    branch=branches[0]
+    if (len(branch.test.ops)!=1 or not isinstance(branch.test.ops[0],ast.Lt)
+            or len(branch.test.comparators)!=1 or not isinstance(branch.test.comparators[0],ast.Constant)):
+        raise RuntimeError('8C unsupported corpus notebook GPU threshold')
+    low=[n.value.value for n in branch.body if isinstance(n,ast.Assign) and isinstance(n.value,ast.Constant)
+         and any(isinstance(t,ast.Name) and t.id=='TTS_BATCH_SIZE' for t in n.targets)]
+    threshold=branch.test.comparators[0].value
+    if (type(default) is not int or default<=0 or len(low)!=1 or type(low[0]) is not int or low[0]<=0
+            or type(threshold) not in (int,float) or threshold<=0
+            or not isinstance(vram_gib,(int,float)) or isinstance(vram_gib,bool) or not 0<vram_gib<10000):
+        raise RuntimeError('8C invalid corpus notebook/runtime GPU batch values')
+    return (low[0] if vram_gib<threshold else default),dict(default=default,low_memory=low[0],threshold_gib=threshold)
+
+
+@operation('8C: resolve user-confirmed fixed corpus notebook settings')
+def resolve_confirmed(proven,root,runtime):
+    if proven.get('basis')!='user_confirmation' or proven.get('resolved') is not False:
+        raise RuntimeError('8C expected an unresolved user-confirmed notebook selection')
+    verify_code(root,proven)
+    import yaml
+    config=yaml.safe_load((Path(root)/'configs/colab-pro.yaml').read_text(encoding='utf-8'))
+    tts=dict(config['tts'])
+    batch,rule=notebook_batch_size(Path(root)/'notebooks/colab_pro.ipynb',runtime.get('vram_gib'))
+    tts['batch_size']=batch
+    requested=dict(tts)
+    if set(tts)!=TTS_FIELDS or tts['dtype']!='auto' or type(runtime.get('bf16_supported')) is not bool:
+        raise RuntimeError('8C confirmed source TTS settings/runtime are incomplete')
+    tts['dtype']='bfloat16' if runtime['bf16_supported'] else 'float16'
+    requirements={}
+    for line in (Path(root)/'requirements/colab.txt').read_text(encoding='utf-8').splitlines():
+        if '==' in line and not line.startswith('#'):
+            name,version=line.strip().split('==')
+            requirements[name.lower().replace('_','-')]=version
+    packages={}
+    for name in ('qwen-tts','transformers','numpy','soxr','torch'):
+        version=runtime.get('packages',{}).get(name)
+        expected='2.7.1' if name=='torch' else requirements[name]
+        if not isinstance(version,str) or version.split('+')[0]!=expected:
+            raise RuntimeError('8C runtime differs from confirmed corpus notebook dependency: '+name)
+        packages[name]=version
+    receipt=dict(proven['receipt'],config_sha256=checksum(Path(root)/'configs/colab-pro.yaml'),
+        effective_tts=tts,requested_tts=requested,attention=config['device']['attention'],packages=packages,
+        execution_package_basis='current reproduced runtime, checked against the fixed corpus notebook requirements',
+        batch_rule=dict(rule,observed_vram_gib=runtime['vram_gib'],effective_batch_size=batch))
+    inputs={str((Path(root)/p).resolve()):checksum(Path(root)/p) for p in CONFIRMED_FILES}
+    return dict(receipt=receipt,inputs_sha256=inputs,receipt_sha256=digest(receipt),
+                receipt_hash_type='canonical_json',basis='user_confirmation',resolved=True)
 
 
 @operation('8C: prove historical source-corpus Japanese TTS before GPU setup')
@@ -84,8 +181,14 @@ def verify_code(root, proven):
     if (git(root,'rev-parse','HEAD')!=doc['code_revision']
             or git(root,'status','--porcelain','--untracked-files=no','--','src','configs')):
         raise RuntimeError(ERROR+': source corpus checkout differs from recorded code; never reset the external checkout')
+    confirmed=proven.get('basis')=='user_confirmation'
+    if confirmed:
+        if doc['code_revision']!=CONFIRMED_REVISION:
+            raise RuntimeError('8C user confirmation is bound to the reviewed fixed corpus revision')
+        check_confirmed_files(root)
     config = root/doc['config_relative_path']
-    if not config.resolve().is_relative_to(root) or checksum(config)!=doc['config_sha256']:
+    if (not config.resolve().is_relative_to(root) or
+            (not (confirmed and proven.get('resolved') is False) and checksum(config)!=doc['config_sha256'])):
         raise RuntimeError(ERROR+': recorded corpus config SHA does not match the pinned checkout')
     files = [p for p in (root/'src/s2st_corpus').rglob('*.py')]
     if not files:

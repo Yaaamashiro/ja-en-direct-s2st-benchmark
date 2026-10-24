@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -58,6 +59,7 @@ def test_setup_permission_and_output_protection_precede_installs(tmp_path,monkey
 def test_cell_1_then_8c_missing_historical_receipt_stops_before_gpu_or_drive_writes(tmp_path,monkeypatch):
     nb=json.loads((ROOT/'notebooks/colab_training.ipynb').read_text(encoding='utf-8'))
     code=next(''.join(c['source']) for c in nb['cells'] if ''.join(c['source']).startswith('#@title 8C.'))
+    code=code.replace('FLORES_FLEURS_SOURCE_CONFIG_CONFIRMED = True','FLORES_FLEURS_SOURCE_CONFIG_CONFIRMED = False')
     # The real source has the new module even before committing. Emulate a clean
     # Git content check only; execute the real stdlib preflight subprocess.
     real_run=subprocess.run
@@ -66,6 +68,7 @@ def test_cell_1_then_8c_missing_historical_receipt_stops_before_gpu_or_drive_wri
         calls.append(command)
         if command[0]=='git':
             if 'rev-parse' in command:return SimpleNamespace(returncode=0,stdout='a'*40,stderr='')
+            if 'show' in command:return SimpleNamespace(returncode=0,stdout='FLORES_FLEURS_VERSION = 2',stderr='')
             return SimpleNamespace(returncode=0,stdout='',stderr='')
         assert '--preflight-source' in command
         return real_run(command,**kwargs)
@@ -79,18 +82,21 @@ def test_cell_1_then_8c_missing_historical_receipt_stops_before_gpu_or_drive_wri
     assert not any('pip' in command or 'nvidia-smi' in command for command in calls)
 
 
-def test_cell_1_then_8c_dispatches_without_8a_or_8b_variables(tmp_path,monkeypatch):
+@pytest.mark.parametrize('documentary',[False,True])
+def test_cell_1_then_8c_dispatches_without_8a_or_8b_variables(tmp_path,monkeypatch,documentary):
     from test_flores_fleurs_diagnostic import receipt
     provenance,_=receipt(tmp_path)
     official=tmp_path/'experiment';official.mkdir();(official/'original').write_text('preserved')
     before={str(p):p.read_bytes() for p in official.rglob('*') if p.is_file()}
     nb=json.loads((ROOT/'notebooks/colab_training.ipynb').read_text(encoding='utf-8'))
     code=next(''.join(c['source']) for c in nb['cells'] if ''.join(c['source']).startswith('#@title 8C.'))
-    code=code.replace("FLORES_FLEURS_SOURCE_PROVENANCE = ''",'FLORES_FLEURS_SOURCE_PROVENANCE = '+repr(str(provenance)))
+    if documentary:
+        code=code.replace("FLORES_FLEURS_SOURCE_PROVENANCE = ''",'FLORES_FLEURS_SOURCE_PROVENANCE = '+repr(str(provenance)))
     code=code.replace("'/content/s2st-flores-fleurs-code'",repr(str(tmp_path/'code-cache')))
     real_run=subprocess.run;real_path=runpy.run_path;calls=[]
     def run(command,**kwargs):
         if command[0]=='git':
+            if 'show' in command:return SimpleNamespace(returncode=0,stdout='FLORES_FLEURS_VERSION = 2',stderr='')
             return SimpleNamespace(returncode=0,stdout='a'*40 if 'rev-parse' in command else '',stderr='')
         calls.append('preflight');return real_run(command,**kwargs)
     def ensure(*args,**kwargs):
@@ -99,7 +105,10 @@ def test_cell_1_then_8c_dispatches_without_8a_or_8b_variables(tmp_path,monkeypat
     def result(args,env,**kwargs):
         assert calls==['preflight','ensure'];calls.append('inference-dispatch')
         assert args[args.index('--target')+1]=='cascade'
-        assert args[args.index('--source-provenance')+1]==str(provenance)
+        if documentary:
+            assert args[args.index('--source-provenance')+1]==str(provenance)
+        else:
+            assert '--source-provenance' not in args and '--confirm-corpus-notebook-defaults' in args
         assert args[args.index('--limit')+1]=='300'
         return dict(all_score_matches_saved=True,display='fixture external diagnostic',per_sample=[])
     def read_path(path):
@@ -112,3 +121,51 @@ def test_cell_1_then_8c_dispatches_without_8a_or_8b_variables(tmp_path,monkeypat
     exec(code,namespace)
     assert namespace['flores_fleurs_diagnostic']['all_score_matches_saved']
     assert {str(p):p.read_bytes() for p in official.rglob('*') if p.is_file()}==before
+
+
+def test_normal_cell_fetches_v2_when_training_and_cached_source_only_have_v1(tmp_path,monkeypatch):
+    repo=tmp_path/'repo';repo.mkdir()
+    real_run=subprocess.run
+    def git(*args):
+        return real_run(['git','-c','safe.directory='+str(repo),'-c','user.name=Test',
+            '-c','user.email=test@example.invalid','-C',str(repo),*args],capture_output=True,text=True,
+            encoding='utf-8',check=True).stdout.strip()
+    git('init')
+    nb=json.loads((ROOT/'notebooks/colab_training.ipynb').read_text(encoding='utf-8'))
+    code=next(''.join(c['source']) for c in nb['cells'] if ''.join(c['source']).startswith('#@title 8C.'))
+    files=['scripts/colab/flores_fleurs_diagnostic.py','scripts/colab/flores_fleurs_runtime.py',
+        'src/direct_s2st/cascade/flores_fleurs_diagnostic.py','src/direct_s2st/cascade/flores_fleurs_data.py',
+        'src/direct_s2st/cascade/source_corpus_tts.py','requirements/diagnostic-flores.txt',
+        'scripts/colab/mt_diagnostic_runtime.py','scripts/colab/cascade_diagnostic_runtime.py']
+    for name in files:
+        (repo/name).parent.mkdir(parents=True,exist_ok=True);(repo/name).write_text('# fixture\n',encoding='utf-8')
+    (repo/files[0]).write_text('FLORES_FLEURS_VERSION = 1\n',encoding='utf-8')
+    git('add','.');git('commit','-m','test: legacy diagnostic v1')
+    old=git('rev-parse','HEAD')
+    (repo/files[0]).write_text("FLORES_FLEURS_VERSION = 2\nimport json,sys\n"
+        "assert '--confirm-corpus-notebook-defaults' in sys.argv\n"
+        "assert '--source-provenance' not in sys.argv\n"
+        "print(json.dumps(dict(accepted=True,basis='user_confirmation') if '--preflight-source' in sys.argv "
+        "else dict(all_score_matches_saved=True,display='v2 success',per_sample=[])))\n",encoding='utf-8')
+    (repo/files[1]).write_text("import os,sys\ndef ensure(*a,**k):\n    return sys.executable,dict(os.environ),{'gpu':'fixture'}\n",encoding='utf-8')
+    shutil.copyfile(ROOT/files[-1],repo/files[-1])
+    git('add','.');git('commit','-m','test: user-confirmed diagnostic v2')
+    new=git('rev-parse','HEAD');git('branch','-f','main',new);git('remote','add','origin','.')
+    git('checkout','--detach',old)
+    calls=[]
+    def invoke(command,**kwargs):
+        calls.append(command)
+        if command[0]=='git':
+            directory=command[command.index('-C')+1]
+            return real_run(['git','-c','safe.directory='+str(directory),*command[1:]],**kwargs)
+        return real_run(command,**kwargs)
+    monkeypatch.setattr(subprocess,'run',invoke)
+    code=code.replace("'/content/s2st-flores-fleurs-code'",repr(str(tmp_path/'code-cache')))
+    namespace=dict(REPO=repo,PERSISTENT=tmp_path/'persistent',DATA=tmp_path/'persistent/data',
+                   TRAIN_CODE_REVISION=old,BENCHMARK_TARGET='s2ut')
+    exec(code,namespace)
+    assert namespace['_ff_revision']==new and git('rev-parse','HEAD')==old
+    assert namespace['flores_fleurs_diagnostic']['display']=='v2 success'
+    assert any('fetch' in c and 'main' in c for c in calls)
+    assert not any('reset' in c for c in calls)
+    assert not (tmp_path/'persistent').exists()

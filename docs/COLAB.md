@@ -1110,20 +1110,26 @@ source ASR 600件、MT 900件、英語TTS 900件、英語ASR 900件が追加さ�
 保存設定の日本語TTS batchが大きい場合は、それを収容できるVRAMも必要です。
 メモリ不足を回避するためにsource batchを勝手に小さくすることはありません。
 
-**元の日本語TTS条件が証明できない場合、8CはGPU環境構築より先に停止します。**
-`FLORES_FLEURS_SOURCE_PROVENANCE`に元の生成時provenanceのパスを指定します。
-空欄時は`CORPUS_ROOT/source-tts-provenance.json`と`production/source-tts-provenance.json`だけを
-確認します。`FLORES_FLEURS_SOURCE_CODE`はそのprovenanceに記録されたSHAの読み取り専用checkout。
-空欄なら別ローカルキャッシュへそのSHAのコードだけ取得し、既存corpus checkoutを変更しません。
+**この実験では「コーパスnotebookの設定を変更せず生成した」というユーザー確認を採用します。**
+`FLORES_FLEURS_SOURCE_CONFIG_CONFIRMED=True`が既定です。
+`FLORES_FLEURS_SOURCE_PROVENANCE`と`FLORES_FLEURS_SOURCE_CODE`は空欄のまま、
+GPUランタイムで**セル1→8C**を実行できます。追加セル・手動provenanceファイル作成は不要です。
+`TRAIN_CODE_REVISION`は従来のままで、旧8C v1しかない場合も診断コードだけv2へ取得し直します。
+HFの利用条件accept・認証は引き続き必要です。
 
-調査したcorpus repo `efe987934c48ee78b02132e97144815589ebeea7`では、
-`configs/colab-pro.yaml`と`src/s2st_corpus/runner.py`にQwenモデル・speaker・instruct・sampling・
-code predictor設定・16kHz変換があり、notebook/envからbatchが上書きされます。
-保存manifest/logのモデルSHA・実dtype・batchだけでは全生成引数や実行コードSHAを証明できません。
-現在のYAMLを過去の完全設定とみなしたり、英語Qwen adapterの言語だけ変えたりしません。
-現在確認できた保存物だけではこのgateを通せません。設定を埋めたファイルを後から作って
-「元のprovenance」と扱わないでください。証拠がなければ別条件の新規実験として設計し直す必要があります。
-receiptの必要項目と調査結果は[8Cの再現性メモ](FLORES_FLEURS_DIAGNOSTIC.md)を参照してください。
+確認の対象をcorpus repo `efe987934c48ee78b02132e97144815589ebeea7`に固定し、
+`configs/colab-pro.yaml`、`notebooks/colab_pro.ipynb`、依存ファイルのSHAを検証します。
+元のnotebook Cell 5から、VRAM 70GiB以上ならTTS batch 72、未満なら1というルールを読みます。
+dtypeの`auto`も元のルールで解決します（8C対応のBF16 GPUならbfloat16）。
+この設定を元のcorpus runnerへ渡し、instruct・sampling・max tokens・出力形式等を保持します。
+実batch、dtype、GPU、モデルSHA、設定SHAと確認の根拠をidentity/model-auditへ保存します。
+
+記録の根拠は`basis=user_confirmation`です。過去の実行ログや実行commitを復元できたという
+意味にはしません。元音声と同じ乱数や同じバイト列の再生成を保証するものでもありません。
+独自変更を加えて生成した別実験ではこの確認をTrueにせず、保存済み設定を指定してください。
+`FLORES_FLEURS_SOURCE_PROVENANCE`を明示した場合はそのファイルを優先して厳密に検証し、
+不一致・破損をユーザー確認で自動的に置き換えません。確認も保存記録もない場合は停止します。
+方式の区別と記録項目は[8Cの再現性メモ](FLORES_FLEURS_DIAGNOSTIC.md)を参照してください。
 
 成功済みstageは入力本文SHA・モデル/環境/データidentity・WAV SHAを検証して再利用します。
 失敗は同じセル8Cで再試行できます。日本語TTSは成功した各WAVを個別にSHA検証し、

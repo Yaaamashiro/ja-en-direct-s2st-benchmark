@@ -51,6 +51,7 @@ assert torch.ones(2,device='cuda',dtype=torch.bfloat16).sum().item()==2
 torch.cuda.synchronize()
 print(json.dumps(dict(python=platform.python_version(),packages={d.metadata['Name'].lower():d.version for d in m.distributions()},
     torch_cuda=torch.version.cuda,cudnn=torch.backends.cudnn.version(),gpu=torch.cuda.get_device_name(0),
+    vram_gib=torch.cuda.get_device_properties(0).total_memory/1024**3,bf16_supported=torch.cuda.is_bf16_supported(),
     capability=torch.cuda.get_device_capability(0),matmul_allow_tf32=torch.backends.cuda.matmul.allow_tf32,
     cudnn_allow_tf32=torch.backends.cudnn.allow_tf32),sort_keys=True))
 '''

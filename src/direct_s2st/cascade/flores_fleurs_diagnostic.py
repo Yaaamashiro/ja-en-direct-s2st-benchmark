@@ -176,6 +176,8 @@ class StageCache:
 
 
 def prepare(persistent, ctx, samples, dataset_audit, proven, code_audit, environment, protected=()):
+    if proven.get('basis')=='user_confirmation' and proven.get('resolved') is not True:
+        raise RuntimeError('8C confirmed notebook settings must be resolved before preparation')
     if not samples or len({r['sample_id'] for r in samples})!=len(samples):
         raise ValueError('8C requires distinct selected canonical sentences')
     if dataset_audit['counts']['matched']<300:
@@ -511,6 +513,7 @@ def report(root,*,overwrite=False):
     metrics,per_sample=summarize(plan['selected'],[values_for(s,root,plan,cache) for s in plan['selected']])
     display=['=== 8C: FLORES/FLEURS external Cascade sanity check ===',
         'Diagnostic only; official KFTT/JESC results unchanged. Corpus BLEU; failures included as empty.',
+        'Source TTS configuration basis: '+plan['source_proof'].get('basis','saved_generation_receipt'),
         'Synthetic source: original generation settings, attempt 0, without corpus CER-based acceptance/retry selection.',
         'Matched unique sentences: '+str(plan['dataset']['counts']['matched']),
         'Selected: '+str(len(per_sample)), 'Matching counts: '+json.dumps(plan['dataset']['counts']),

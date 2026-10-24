@@ -10,7 +10,7 @@ import sys
 sys.dont_write_bytecode=True
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'src'))
-FLORES_FLEURS_VERSION = 1
+FLORES_FLEURS_VERSION = 2
 
 
 def source_code(proven,cache,explicit=None):
@@ -32,12 +32,13 @@ def source_code(proven,cache,explicit=None):
 def main():
     from direct_s2st.inference_logging import configure_logging
     configure_logging()
-    from direct_s2st.cascade.source_corpus_tts import proof,verify_code,CorpusSource
+    from direct_s2st.cascade.source_corpus_tts import proof,verify_code,CorpusSource,confirmed_notebook,resolve_confirmed
     from direct_s2st.cascade.flores_fleurs_diagnostic import context,prepare,worker,report,STAGES
     from direct_s2st.cascade.flores_fleurs_data import OfficialData
     from direct_s2st.cascade.corpus_diagnostic import locate,read
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-provenance',type=Path)
+    parser.add_argument('--confirm-corpus-notebook-defaults',action='store_true')
     parser.add_argument('--preflight-source',action='store_true')
     parser.add_argument('--source-code',type=Path)
     parser.add_argument('--persistent',type=Path)
@@ -65,9 +66,12 @@ def main():
         factory=lambda p,d:CorpusSource(p['source_proof'],p['source_code']['root'],d)
         worker(args.diagnostic_root,args.worker_stage,data=OfficialData(args.cache),source_factory=factory)
         return
-    proven=proof(args.source_provenance)  # First: never spend CU inferring guessed source conditions.
+    # An explicit saved receipt is always checked, never silently replaced by confirmation.
+    proven=proof(args.source_provenance) if args.source_provenance else (
+        confirmed_notebook() if args.confirm_corpus_notebook_defaults else proof(None))
     if args.preflight_source:
-        print(json.dumps(dict(proven=True,receipt_sha256=proven['receipt_sha256'])))
+        print(json.dumps(dict(accepted=True,basis=proven.get('basis','saved_generation_receipt'),
+                              receipt_sha256=proven['receipt_sha256'])))
         return
     if not all((args.persistent,args.manifest,args.cache)):
         parser.error('--persistent, --manifest, --cache are required')
@@ -79,6 +83,12 @@ def main():
             path.resolve().is_relative_to(Path(os.environ['CORPUS_ROOT']).resolve())):
             raise RuntimeError('8C runtime caches must remain local, outside persistent data and corpus')
     code=source_code(proven,args.cache,args.source_code)
+    if proven.get('basis')=='user_confirmation':
+        proven=resolve_confirmed(proven,code,runtime)
+    settings=proven['receipt']['effective_tts']
+    print('[8C-source] '+json.dumps(dict(basis=proven.get('basis','saved_generation_receipt'),
+        revision=proven['receipt']['code_revision'],dtype=settings['dtype'],batch_size=settings['batch_size'])),
+        file=sys.stderr,flush=True)
     baseline=locate(args.persistent,args.target,comparison_config=args.comparison_config,
                     runs_root=args.runs_root,evaluation_root=args.evaluation_root)
     ctx=context(args.manifest,baseline)
