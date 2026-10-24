@@ -893,6 +893,28 @@ TT2をまだ再学習していない場合も、S2UTだけを評価できます�
 `TRAIN_CODE_REVISION`に更新し、通常のセル1 → 6 → 7で再実行してください。
 checkpointや準備済みデータの削除・再学習は不要です。
 
+### 保存済みCascade結果のKFTT/JESC別診断（セル8A）
+
+Cell 8A is a diagnostic-only analysis that recomputes Cascade metrics separately
+for KFTT/JESC from saved Cell 8 results. It performs no inference and does not
+modify the official benchmark result.
+
+セル8の直後の**8A「Cascade KFTT-only 診断」**で、All / KFTT / JESCの
+日本語ASR CER・MT corpus BLEU・最終ASR-BLEUを表示します。分類はmanifestの
+`corpus`、結合は`pair_id`を使用します。AllのASR-BLEUが正式保存値と一致することを
+確認し、元の評価と同じ失敗サンプルの扱いを維持します。結果行の欠落・重複・参照不一致は
+記録済みの生成失敗と区別して停止します。CERはNFKC正規化＋空白除去（句読点保持）の
+文字編集距離合計÷正解文字数合計です。MT BLEUはTTS失敗時にも保存済みMT文を利用します。
+
+通常は`CASCADE_DIAGNOSTIC_TARGET='auto'`でセル8の対象を選択し、別の保存済みCascade評価を
+確認するときだけ`CASCADE_DIAGNOSTIC_EVALUATION_ROOT`を指定します。CPUと既存の
+`sacrebleu==2.5.1`環境だけを使い、環境構築・ライブラリ導入・モデルロード・WAV/ZIP読取り・
+結果保存は行いません。`CASCADE_DIAGNOSTIC_FETCH_CODE=True`は不足する診断コードだけを
+実験/コーパス外のローカルGit作業ツリーへ取得する許可です。学習用checkoutや保存revisionは
+変更しません。KFTTの低スコア例を表で表示し、全件はノートブック変数
+`cascade_corpus_diagnostic['kftt_samples']`に保持します。
+KFTT/JESCの差だけでコーパス品質が原因と断定するものではありません。
+
 ### カスケードだけの正式test評価（通常セル6～9）
 
 セル1で`RUN_TRAINING=False`、`RUN_PREVIEW=False`、`RUN_BENCHMARK=True`、
