@@ -260,3 +260,13 @@ Qwenの従来greedy固定は適性確認が不十分だったため、ユーザ�
 協調的時間保護は独自の追加として明記する。EOSを実main talkerでdecode前に検証する。
 旧TTS結果は不変、旧ASR/MTはSHA固定の読み取り専用入力とし再推論しない。
 詳細と実GPU未確認事項は[監査記録](docs/CASCADE_TTS_AUDIT.md)を参照する。
+
+## 任意文の2方式比較（2026-10-24）
+
+通常セル10でQwen生成の共通日本語音声をCascadeと選択済みS2UT/TT2/S2T→TTSへ入力する。
+Cascade MTは正解ではなく擬似参照と明示し、候補モデルへは一切入力しない。
+新しい教師やmanifestを作らず、既存のsource-only frontend・dev-best・音声化方式を使用する。
+結果はinteractive/に分離、段階単位でSHA照合・再開する。GPUは逐次で、共通入力合成・
+モデル取得/ロード・評価ASRを除いた翻訳時間と、process RSS/Torch allocator peakを参考表示する。
+同一セッション/機器でない保存測定値を同一測定とみなさない。
+詳細と未検証事項は[説明](docs/INTERACTIVE_COMPARISON.md)を参照する。
