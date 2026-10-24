@@ -228,7 +228,7 @@ def test_existing_cells_1_to_8_and_other_cells_are_unchanged_and_8a_is_immediate
     assert ''.join(new['cells'][i+1]['source']).startswith('#@title 9.')
     code = ''.join(added[0]['source'])
     ast.parse(code, feature_version=(3,10))
-    assert "CUDA_VISIBLE_DEVICES=''" in code and "PYTHONDONTWRITEBYTECODE='1'" in code
+    assert "_diag_runtime['cpu_environment']()" in code
     assert not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in
                    ('run','cli','ensure_workspace','ensure_runtime','preview_launcher','run_cascade_benchmark') for n in ast.walk(ast.parse(code)))
 
@@ -265,7 +265,8 @@ def test_incompatible_scoring_package_is_rejected_without_install_or_inference(t
 
 
 @pytest.mark.parametrize('legacy_revision', [False, True])
-def test_normal_cell_bootstraps_only_local_code_and_keeps_all_experiment_files_unchanged(tmp_path, monkeypatch, legacy_revision):
+@pytest.mark.parametrize('benchmark_target', ['s2ut', 'cascade', 'all'])
+def test_normal_cell_bootstraps_only_local_code_and_keeps_all_experiment_files_unchanged(tmp_path, monkeypatch, legacy_revision, benchmark_target):
     common, output, *_ = fixture(tmp_path/'experiment', monkeypatch)
     result = diagnostic.diagnose(common, output)
     result['kftt_samples'][0]['asr_ja_text'] = '<script>untrusted text</script>'
@@ -282,15 +283,24 @@ def test_normal_cell_bootstraps_only_local_code_and_keeps_all_experiment_files_u
                           capture_output=True, text=True, encoding='utf-8', check=True).stdout.strip()
     git('init')
     (repo/'README').write_text('old source', encoding='utf-8')
-    git('add', 'README')
-    git('commit', '-m', 'test: initial local source')
-    old = git('rev-parse', 'HEAD')
     helper = repo/'scripts/colab/cascade_corpus_diagnostic.py'
     helper.parent.mkdir(parents=True)
     helper.write_text('CASCADE_DIAGNOSTIC_VERSION = 1\n', encoding='utf-8')
     module = repo/'src/direct_s2st/cascade/corpus_diagnostic.py'
     module.parent.mkdir(parents=True)
     module.write_text('# diagnostic code fixture\n', encoding='utf-8')
+    git('add', '.')
+    git('commit', '-m', 'test: old diagnostic without runtime checks')
+    old = git('rev-parse', 'HEAD')
+    helper.write_text("CASCADE_DIAGNOSTIC_VERSION = 2\nimport os, sys, json\n"
+                      "assert os.environ['CUDA_VISIBLE_DEVICES'] == ''\n"
+                      "assert os.environ['HF_HUB_OFFLINE'] == '1'\n"
+                      "assert os.environ['PYTHONDONTWRITEBYTECODE'] == '1'\n"
+                      "print('[progress] CPU fixture helper', file=sys.stderr, flush=True)\n"
+                      'print(json.dumps('+repr(result)+', ensure_ascii=False))\n', encoding='utf-8')
+    shutil.copyfile(ROOT/'scripts/colab/cascade_diagnostic_runtime.py', helper.with_name('cascade_diagnostic_runtime.py'))
+    (repo/'requirements').mkdir()
+    shutil.copyfile(ROOT/'requirements/diagnostic-cpu.txt', repo/'requirements/diagnostic-cpu.txt')
     git('add', '.')
     git('commit', '-m', 'test: add local diagnostic source')
     new = git('rev-parse', 'HEAD')
@@ -305,11 +315,8 @@ def test_normal_cell_bootstraps_only_local_code_and_keeps_all_experiment_files_u
             # Trust only this test's -C path; production Colab commands stay unchanged.
             directory = command[command.index('-C')+1]
             return actual_run(['git', '-c', 'safe.directory='+str(directory), *command[1:]], **kwargs)
-        assert command[1] == '-B'
-        assert kwargs['env']['CUDA_VISIBLE_DEVICES'] == ''
-        assert kwargs['env']['HF_HUB_OFFLINE'] == '1'
-        assert kwargs['env']['PYTHONDONTWRITEBYTECODE'] == '1'
-        return subprocess.CompletedProcess(command, 0, json.dumps(result, ensure_ascii=False))
+        assert command[1] == '-B' and kwargs['env']['CUDA_VISIBLE_DEVICES'] == ''
+        return actual_run(command, **kwargs)
     monkeypatch.setattr(subprocess, 'run', invoke)
     display_module = ModuleType('IPython.display')
     display_module.HTML, display_module.display = lambda html: html, rendered.append
@@ -321,15 +328,119 @@ def test_normal_cell_bootstraps_only_local_code_and_keeps_all_experiment_files_u
     def forbidden(*args, **kwargs):
         pytest.fail('8A must not call the experiment logger/runtime/model/evaluation helpers')
     namespace = dict(PERSISTENT=persistent, DATA=common.parent.parent, REPO=repo,
-                     TRAIN_CODE_REVISION=old if legacy_revision else new, BENCHMARK_TARGET='cascade', PYTHON=sys.executable,
+                     TRAIN_CODE_REVISION=old if legacy_revision else new, BENCHMARK_TARGET=benchmark_target, PYTHON=sys.executable,
                      run=forbidden, cli=forbidden, ensure_workspace=forbidden, ensure_runtime=forbidden,
                      preview_launcher=forbidden, run_cascade_benchmark=forbidden)
     exec(code, namespace)
     assert namespace['cascade_corpus_diagnostic']['groups']['KFTT']['samples'] == 2
     assert namespace['_diag_revision'] == new
+    assert namespace['_diag_target'] == ('all' if benchmark_target == 'all' else 'cascade')
     assert git('rev-parse', 'HEAD') == old
     assert any(command[:1] == ['git'] and 'fetch' in command for command in calls)
     assert any(command[:1] == ['git'] and 'worktree' in command for command in calls)
     assert not any('reset' in command for command in calls)
     assert snapshot(tmp_path/'experiment') == before
     assert len(rendered) == 1 and '<script>' not in rendered[0] and '&lt;script&gt;' in rendered[0]
+
+
+@pytest.mark.parametrize('filename', ['plan.json', 'results/metrics.json'])
+def test_malformed_metadata_shape_stops_read_only(tmp_path, monkeypatch, filename):
+    common, output, *_ = fixture(tmp_path, monkeypatch)
+    (output/filename).write_text('[]', encoding='utf-8')
+    before = snapshot(tmp_path)
+    with pytest.raises(RuntimeError, match='expected a saved JSON/YAML object'):
+        diagnostic.diagnose(common, output)
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize('field,value', [('ids', [{}]), ('ids', [None]), ('ids', ['a', 'a'])])
+def test_invalid_plan_ids_fail_with_actionable_error(tmp_path, monkeypatch, field, value):
+    common, output, *_ = fixture(tmp_path, monkeypatch)
+    plan = diagnostic.read(output/'plan.json')
+    plan[field] = value
+    atomic_write_json(output/'plan.json', plan, overwrite=True)
+    with pytest.raises(RuntimeError, match='invalid Cascade plan IDs'):
+        diagnostic.diagnose(common, output)
+
+
+@pytest.mark.parametrize('field,value', [('bleu', True), ('asr_success_rate', None),
+                                       ('asr_success_rate', float('nan')), ('samples', True)])
+def test_invalid_metrics_are_not_coerced_to_valid_scores(tmp_path, monkeypatch, field, value):
+    common, output, *_ = fixture(tmp_path, monkeypatch)
+    metrics = diagnostic.read(output/'results/metrics.json')
+    metrics[field] = value
+    (output/'results/metrics.json').write_text(json.dumps(metrics), encoding='utf-8')
+    with pytest.raises(RuntimeError):
+        diagnostic.diagnose(common, output)
+
+
+def test_code_fetch_permission_off_never_fetches_or_builds_environment(tmp_path, monkeypatch):
+    notebook = json.loads((ROOT/'notebooks/colab_training.ipynb').read_text(encoding='utf-8'))
+    code = next(''.join(c['source']) for c in notebook['cells'] if ''.join(c['source']).startswith('#@title 8A.'))
+    code = code.replace('CASCADE_DIAGNOSTIC_FETCH_CODE = True', 'CASCADE_DIAGNOSTIC_FETCH_CODE = False')
+    code = code.replace("'/content/s2st-diagnostic-code'", repr(str(tmp_path/'cache')))
+    def forbidden(*args, **kwargs):
+        pytest.fail('no Git commands, installation, or runtime creation authorized')
+    monkeypatch.setattr(subprocess, 'run', forbidden)
+    with pytest.raises(AssertionError, match='コード取得を許可'):
+        exec(code, dict(DATA=tmp_path/'data', PERSISTENT=tmp_path/'experiment', REPO=tmp_path/'repo',
+                        TRAIN_CODE_REVISION='a'*40))
+    assert not list(tmp_path.iterdir())
+
+
+def test_local_code_git_errors_preserve_the_actual_stderr(monkeypatch):
+    notebook = json.loads((ROOT/'notebooks/colab_training.ipynb').read_text(encoding='utf-8'))
+    code = next(''.join(c['source']) for c in notebook['cells'] if ''.join(c['source']).startswith('#@title 8A.'))
+    function = next(node for node in ast.parse(code).body if isinstance(node, ast.FunctionDef) and node.name == '_diag_git')
+    namespace = dict(subprocess=subprocess)
+    exec(compile(ast.Module(body=[function], type_ignores=[]), '<8A Git helper>', 'exec'), namespace)
+    def failed(command, **kwargs):
+        raise subprocess.CalledProcessError(128, command, stderr='fatal: named local Git error')
+    monkeypatch.setattr(subprocess, 'run', failed)
+    with pytest.raises(RuntimeError, match='named local Git error'):
+        namespace['_diag_git']('local-repo', 'fetch', 'origin', 'main')
+
+
+def test_normal_cell_real_cpu_helper_with_default_s2ut_setting(tmp_path, monkeypatch):
+    """Exercise the reported settings through the real CLI, locator and scorer."""
+    common, output, *_ = fixture(tmp_path/'experiment', monkeypatch)
+    persistent = tmp_path/'experiment/persistent'
+    atomic_write_json(persistent/'benchmarks/cascade/latest.json',
+                      dict(plan=str(output/'plan.json'), sha256=diagnostic.checksum(output/'plan.json')))
+    before = snapshot(tmp_path/'experiment')
+    repo = tmp_path/'repo'
+    files = ['scripts/colab/cascade_corpus_diagnostic.py', 'scripts/colab/cascade_diagnostic_runtime.py',
+             'requirements/diagnostic-cpu.txt', 'src/direct_s2st/__init__.py', 'src/direct_s2st/io.py',
+             'src/direct_s2st/journal.py', 'src/direct_s2st/progress.py',
+             'src/direct_s2st/cascade/__init__.py', 'src/direct_s2st/cascade/corpus_diagnostic.py',
+             'src/direct_s2st/evaluation/__init__.py', 'src/direct_s2st/evaluation/bleu.py']
+    for name in files:
+        (repo/name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT/name, repo/name)
+    git = ['git', '-c', 'safe.directory='+str(repo), '-c', 'user.name=Diagnostic Test',
+           '-c', 'user.email=test@example.invalid', '-C', str(repo)]
+    for args in (['init'], ['add', '.'], ['commit', '-m', 'test: real CPU diagnostic source']):
+        subprocess.run(git+args, capture_output=True, check=True)
+    revision = subprocess.check_output(git+['rev-parse', 'HEAD'], text=True).strip()
+    actual_run = subprocess.run
+    def invoke(command, **kwargs):
+        if command[0] == 'git':
+            directory = command[command.index('-C')+1]
+            assert 'fetch' not in command and 'worktree' not in command
+            return actual_run(['git', '-c', 'safe.directory='+str(directory), *command[1:]], **kwargs)
+        return actual_run(command, **kwargs)
+    monkeypatch.setattr(subprocess, 'run', invoke)
+    display_module = ModuleType('IPython.display')
+    display_module.HTML, display_module.display = lambda html: html, lambda html: None
+    monkeypatch.setitem(sys.modules, 'IPython.display', display_module)
+    notebook = json.loads((ROOT/'notebooks/colab_training.ipynb').read_text(encoding='utf-8'))
+    code = next(''.join(c['source']) for c in notebook['cells'] if ''.join(c['source']).startswith('#@title 8A.'))
+    code = code.replace("'/content/s2st-diagnostic-code'", repr(str(tmp_path/'code-cache')))
+    namespace = dict(PERSISTENT=persistent, DATA=common.parent.parent, REPO=repo,
+                     TRAIN_CODE_REVISION=revision, BENCHMARK_TARGET='s2ut', PYTHON=sys.executable)
+    exec(code, namespace)
+    report = namespace['cascade_corpus_diagnostic']
+    assert report['all_score_matches_saved'] and report['groups']['KFTT']['samples'] == 2
+    assert report['groups']['KFTT']['ja_asr_cer'] == .25
+    assert snapshot(tmp_path/'experiment') == before
+    assert not (tmp_path/'code-cache').exists()

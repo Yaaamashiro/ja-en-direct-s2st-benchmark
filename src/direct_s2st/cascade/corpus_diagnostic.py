@@ -21,8 +21,18 @@ SACREBLEU_VERSION = '2.5.1'  # Existing requirements/evaluation-core.txt; not a 
 
 
 def read(path):
-    with Path(path).open(encoding='utf-8-sig') as stream:
-        return json.load(stream)
+    try:
+        with Path(path).open(encoding='utf-8-sig') as stream:
+            return mapping(json.load(stream), str(path))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f'cannot read saved diagnostic metadata {path}: {error}; '
+                           'no restore, regeneration, or result writes attempted') from error
+
+
+def mapping(value, label):
+    if not isinstance(value, dict):
+        raise RuntimeError(label+': expected a saved JSON/YAML object')
+    return value
 
 
 def checksum(path):
@@ -213,7 +223,7 @@ def locate(persistent, target, *, comparison_config=None, runs_root=None, evalua
             raise RuntimeError('four-system mode needs the current Cell 8 COMPARE_CONFIG and RUNS values, or an explicit evaluation root')
         import yaml
         with (Path(comparison_config)/'cascade-eval.yaml').open(encoding='utf-8') as stream:
-            config = yaml.safe_load(stream)
+            config = mapping(yaml.safe_load(stream), 'current Cascade evaluation config')
         run_id = config.get('run_id')
         if not isinstance(run_id, str) or not re.fullmatch('[A-Za-z0-9_-]+', run_id):
             raise RuntimeError('current Cascade evaluation config has an invalid run_id')
@@ -265,8 +275,11 @@ def diagnose(manifest_path, evaluation_root):
         if run_id != plan['run']['name'] or identity.get('plan') != plan['identity'] or identity.get('predictions') != checksum(predictions_path):
             raise RuntimeError('Cascade metrics/plan/predictions identity mismatch')
         receipt = read(root/'progress'/('asr-'+digest(identity)[:24]+'.json'))
-        if (receipt['sha256'] != digest(receipt['body']) or receipt['body']['identity'] != identity
-                or receipt['body']['files']['per_sample.jsonl']['sha256'] != checksum(scores_root/'per_sample.jsonl')):
+        body = mapping(receipt.get('body'), 'saved Cell 8 score receipt body')
+        files = mapping(body.get('files'), 'saved Cell 8 score receipt files')
+        sample_file = mapping(files.get('per_sample.jsonl'), 'saved Cell 8 score receipt per_sample.jsonl')
+        if (receipt.get('sha256') != digest(body) or body.get('identity') != identity
+                or sample_file.get('sha256') != checksum(scores_root/'per_sample.jsonl')):
             raise RuntimeError('saved Cell 8 score receipt/checksum mismatch; no archive restore attempted')
     else:
         if metrics.get('bleu_denominator') not in (None, SUCCESS_ONLY):
@@ -277,7 +290,9 @@ def diagnose(manifest_path, evaluation_root):
             raise RuntimeError('saved Cascade evaluation is stale relative to its predictions')
     manifest = index(rows(manifest_path), 'common/test.jsonl')
     if plan:
-        if not isinstance(plan.get('ids'), list) or len(plan['ids']) != len(set(plan['ids'])):
+        if (not isinstance(plan.get('ids'), list)
+                or any(not isinstance(key, str) or not key for key in plan['ids'])
+                or len(plan['ids']) != len(set(plan['ids']))):
             raise RuntimeError('duplicate/invalid Cascade plan IDs')
         same_ids(manifest, plan['ids'], 'Cascade plan')
     predictions = index(rows(predictions_path), 'Cascade predictions')
@@ -286,15 +301,18 @@ def diagnose(manifest_path, evaluation_root):
     groups = dict(All=aggregate(samples, policy), KFTT=aggregate([r for r in samples if r['corpus'] == 'kftt'], policy),
                   JESC=aggregate([r for r in samples if r['corpus'] == 'jesc'], policy))
     all_metrics = groups['All']
-    if metrics.get('samples') != len(samples) or metrics.get('generation_failures') != all_metrics['generation_failures']:
+    if (any(type(metrics.get(field)) is not int for field in ('samples', 'generation_failures'))
+            or metrics['samples'] != len(samples) or metrics['generation_failures'] != all_metrics['generation_failures']):
         raise RuntimeError('saved Cell 8 counts differ from joined metadata')
-    if not math.isclose(float(metrics['asr_success_rate']), all_metrics['successful_samples']/len(samples), abs_tol=1e-12):
+    rate = metrics.get('asr_success_rate')
+    if (isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate)
+            or not math.isclose(rate, all_metrics['successful_samples']/len(samples), rel_tol=0, abs_tol=1e-12)):
         raise RuntimeError('saved Cell 8 ASR success counts differ')
     if 'asr_failures' in metrics and metrics['asr_failures'] != all_metrics['asr_failures']:
         raise RuntimeError('saved Cell 8 ASR failure counts differ')
     formal, recomputed = metrics.get('bleu'), all_metrics['final_asr_bleu']
     if (formal is None) != (recomputed is None) or (formal is not None and (
-            not isinstance(formal, (int, float)) or not math.isfinite(formal)
+            isinstance(formal, bool) or not isinstance(formal, (int, float)) or not math.isfinite(formal)
             or not math.isclose(formal, recomputed, rel_tol=0, abs_tol=1e-8))):
         raise RuntimeError(f'All ASR-BLEU differs from saved Cell 8: saved={formal}, recomputed={recomputed}. '
                            'No KFTT/JESC score was accepted; check result selection/scoring environment.')

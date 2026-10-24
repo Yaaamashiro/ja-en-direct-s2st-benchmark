@@ -10,7 +10,7 @@ for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding='utf-8')
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/'src'))
-CASCADE_DIAGNOSTIC_VERSION = 1
+CASCADE_DIAGNOSTIC_VERSION = 2
 
 
 def main():

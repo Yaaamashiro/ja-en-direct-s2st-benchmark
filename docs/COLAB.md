@@ -906,14 +906,25 @@ modify the official benchmark result.
 記録済みの生成失敗と区別して停止します。CERはNFKC正規化＋空白除去（句読点保持）の
 文字編集距離合計÷正解文字数合計です。MT BLEUはTTS失敗時にも保存済みMT文を利用します。
 
-通常は`CASCADE_DIAGNOSTIC_TARGET='auto'`でセル8の対象を選択し、別の保存済みCascade評価を
-確認するときだけ`CASCADE_DIAGNOSTIC_EVALUATION_ROOT`を指定します。CPUと既存の
-`sacrebleu==2.5.1`環境だけを使い、環境構築・ライブラリ導入・モデルロード・WAV/ZIP読取り・
-結果保存は行いません。`CASCADE_DIAGNOSTIC_FETCH_CODE=True`は不足する診断コードだけを
+通常は`CASCADE_DIAGNOSTIC_TARGET='auto'`で保存済みCascade評価を選択します。
+`BENCHMARK_TARGET='all'`の場合は4方式比較内のCascade、それ以外（セル1の既定の`s2ut`を含む）は
+Cascade単独評価の`latest.json`を使用し、学習・評価対象の設定自体は変更しません。別の保存済みCascade評価を
+確認するときだけ`CASCADE_DIAGNOSTIC_EVALUATION_ROOT`を指定します。CPUで処理し、既存の
+`sacrebleu==2.5.1`環境を優先します。既存の`PYTHON`、ローカルvenv、Colab Pythonを順に
+実import・短いCPU BLEU計算で確認し、`all`ではPyYAMLも確認します。利用可能な環境がなければ、
+不足依存とPythonのパスを表示します。`CASCADE_DIAGNOSTIC_INSTALL_CPU_DEPS=True`の場合だけ、
+既存環境が使えなければ`/content/s2st-diagnostic-deps/`へ固定版のCPU評価依存を導入・検証して
+再利用します。`requirements/diagnostic-cpu.txt`のwheelだけを`pip --isolated --no-deps --target`で
+導入し、NumPyはPython 3.13にもwheelがある2.1.3をこの隔離フォルダだけで使用します。
+sacreBLEU 2.5.1・正規化・tokenizerは正式評価と同じで、Allの保存値との照合も必須です。
+既存の学習venv・システムのパッケージ・Driveは変更しません。自動導入をOFFにした場合は不足時に停止します。
+GPU・モデルロード・保存済みWAV/評価ZIPの読取り・結果保存は行いません。`CASCADE_DIAGNOSTIC_FETCH_CODE=True`は不足する診断コードだけを
 実験/コーパス外のローカルGit作業ツリーへ取得する許可です。学習用checkoutや保存revisionは
 変更しません。KFTTの低スコア例を表で表示し、全件はノートブック変数
 `cascade_corpus_diagnostic['kftt_samples']`に保持します。
 KFTT/JESCの差だけでコーパス品質が原因と断定するものではありません。
+子プロセスの進捗・エラー本文はColabのセル出力へ中継します。単なる`CalledProcessError`で
+原因が見えなくなるのを防ぎ、失敗時にも保存結果の自動修復・再推論は行いません。
 
 ### カスケードだけの正式test評価（通常セル6～9）
 
