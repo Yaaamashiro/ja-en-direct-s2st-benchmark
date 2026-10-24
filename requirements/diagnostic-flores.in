@@ -1,0 +1,23 @@
+# 8C isolated Python 3.10 environment. Full resolved closure: diagnostic-flores.txt.
+# torch/torchaudio 2.7.1+cu126 are installed from PyTorch's official CUDA index.
+torch==2.7.1
+torchaudio==2.7.1
+transformers==4.57.3
+tokenizers==0.22.2
+sentencepiece==0.2.0
+huggingface-hub==0.36.2
+accelerate==1.12.0
+qwen-tts==0.1.1
+gradio==5.49.1
+onnxruntime==1.23.2
+einops==0.8.2
+sox==1.5.0
+numpy==2.2.6
+librosa==0.10.2.post1
+soundfile==0.13.1
+soxr==1.1.0
+jiwer==4.0.0
+pyarrow==20.0.0
+fsspec==2026.9.0
+sacrebleu==2.5.1
+PyYAML==6.0.2

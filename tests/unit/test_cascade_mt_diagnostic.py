@@ -209,12 +209,12 @@ def test_cell_8b_is_between_8a_and_9_and_all_other_cells_are_unchanged():
     git = ['git','-c','safe.directory='+ROOT.as_posix(),'-C',str(ROOT)]
     old = json.loads(subprocess.check_output(git+['show','HEAD:notebooks/colab_training.ipynb'],encoding='utf-8'))
     new = json.loads((ROOT/'notebooks/colab_training.ipynb').read_text(encoding='utf-8'))
-    skip = lambda cell: ''.join(cell['source']).startswith('#@title 8B.')
+    skip = lambda cell: ''.join(cell['source']).startswith(('#@title 8B.', '#@title 8C.'))
     assert [c for c in new['cells'] if not skip(c)] == [c for c in old['cells'] if not skip(c)]
     cell = next(c for c in new['cells'] if skip(c))
     i = new['cells'].index(cell)
     assert ''.join(new['cells'][i-1]['source']).startswith('#@title 8A.')
-    assert ''.join(new['cells'][i+1]['source']).startswith('#@title 9.')
+    assert ''.join(new['cells'][i+1]['source']).startswith('#@title 8C.')
     code = ''.join(cell['source'])
     ast.parse(code,feature_version=(3,10))
     assert not any(isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id in

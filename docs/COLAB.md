@@ -1076,6 +1076,81 @@ Qwen本体/音声tokenizerのロードとWAV生成を行います。CPUテスト
 運用確認は同じ実験の通常セル1→必要なら6→7で、試験合成成功後の正式音声を確認し、
 セル7を中断→再実行して保存済み件数と再利用ログを確認してください。追加セルは不要です。
 
+### 外部データの3条件診断（セル8C、GPU・再開可）
+
+**Cell 8C is an external diagnostic and is not part of the formal benchmark.
+It does not alter official KFTT/JESC results.** セル1と同じ実験設定でセル8Cを
+実行します。8A/8Bの実行変数や学習環境には依存しません。保存済みCascade評価の
+Allスコア・manifest・plan/モデルSHAを再確認し、そのASR/MT/TTS/英語評価ASRを使用します。
+
+`FLORES_FLEURS_LIMIT=300`（0のみ全一致文）。公式FLEURS `ja_jp` のvalidation/testを、
+公式FLORES+ `jpn_Jpan` のdev/devtest本文とNFKC＋Unicode空白統一だけで一意に照合します。
+英語は同じFLORES+ `(split,id)` で取得します。行番号・あいまい一致・翻訳による補完は使いません。
+一致する一意文が300未満なら停止します。重複録音は内容とID/パスのSHAで1件選び、
+文もcanonical IDのSHA順で固定選択します。未一致・曖昧一致・重複録音数を記録します。
+
+取得元と固定revision（2026-10-24に公式API/実Parquetスキーマ確認）：
+
+| データ | revision | 使用範囲 |
+|---|---|---|
+| `google/fleurs` | `70bb2e84b976b7e960aa89f1c648e09c59f894dd` | `parquet-data/ja_jp/{validation,test}-00000-of-00001.parquet` |
+| `openlanguagedata/flores_plus` | `e707e62e762a9e2faca3933aa315f4665cc3cd8f` | `{dev,devtest}/{jpn_Jpan,eng_Latn}.jsonl` |
+
+FLORES+は[公式ページ](https://huggingface.co/datasets/openlanguagedata/flores_plus)で
+利用条件をacceptし、ColabのHugging Faceログインまたは`HF_TOKEN`で認証してください。
+tokenは出力・結果保存しません。アクセス不可時は停止し、第三者mirrorに切り替えません。
+FLEURSは公式Parquetのテキスト列を先に範囲読み出しし、選択録音のWAVだけDriveへ保存します。
+Parquetのrow group単位で音声を読むため、ネットワークでは未選択録音を含むブロックの転送が
+発生することがあります。元Parquet全体をDriveへ複製しません。学習用途には使用しません。
+
+同じ日本語・英語参照でGold本文、FLEURS自然音声、元コーパス条件の合成日本語を比較します。
+モデルは工程ごとの別processで逐次ロードし、GPUから解放します。300文なら日本語合成300件、
+source ASR 600件、MT 900件、英語TTS 900件、英語ASR 900件が追加されます。
+8A/8Bより長時間です。Qwenの条件を保持するためCUDA/BF16対応GPUが必要です。
+保存設定の日本語TTS batchが大きい場合は、それを収容できるVRAMも必要です。
+メモリ不足を回避するためにsource batchを勝手に小さくすることはありません。
+
+**元の日本語TTS条件が証明できない場合、8CはGPU環境構築より先に停止します。**
+`FLORES_FLEURS_SOURCE_PROVENANCE`に元の生成時provenanceのパスを指定します。
+空欄時は`CORPUS_ROOT/source-tts-provenance.json`と`production/source-tts-provenance.json`だけを
+確認します。`FLORES_FLEURS_SOURCE_CODE`はそのprovenanceに記録されたSHAの読み取り専用checkout。
+空欄なら別ローカルキャッシュへそのSHAのコードだけ取得し、既存corpus checkoutを変更しません。
+
+調査したcorpus repo `efe987934c48ee78b02132e97144815589ebeea7`では、
+`configs/colab-pro.yaml`と`src/s2st_corpus/runner.py`にQwenモデル・speaker・instruct・sampling・
+code predictor設定・16kHz変換があり、notebook/envからbatchが上書きされます。
+保存manifest/logのモデルSHA・実dtype・batchだけでは全生成引数や実行コードSHAを証明できません。
+現在のYAMLを過去の完全設定とみなしたり、英語Qwen adapterの言語だけ変えたりしません。
+現在確認できた保存物だけではこのgateを通せません。設定を埋めたファイルを後から作って
+「元のprovenance」と扱わないでください。証拠がなければ別条件の新規実験として設計し直す必要があります。
+receiptの必要項目と調査結果は[8Cの再現性メモ](FLORES_FLEURS_DIAGNOSTIC.md)を参照してください。
+
+成功済みstageは入力本文SHA・モデル/環境/データidentity・WAV SHAを検証して再利用します。
+失敗は同じセル8Cで再試行できます。日本語TTSは成功した各WAVを個別にSHA検証し、
+同じbatchの他の文が失敗しても成功文を再生成しません。未処理・失敗文だけを元runnerへ渡します。
+設定上のbatch上限と元のseed関数は保持します。再試行の実batchメンバーとseedも記録します。
+日本語sourceは元runnerのattempt 0を使い、元コーパスのCERによる生成選別はしません。
+これは外部の音声品質を測るための明示的な診断差分で、全失敗は空の仮説として分母に残します。
+
+保存先は`<PERSISTENT>/diagnostics/flores-fleurs-cascade/<identity>/`。
+`metrics.json`、`report.md`、`per_sample.jsonl/csv`、各audit、選択WAV、stage checkpointを保存します。
+通常セルは`--overwrite`を8C helperへ明示し、このidentity内の派生レポートだけを再試行後に
+更新します。成功済みWAV・不変checkpoint・正式結果は上書きしません。
+セルには`flores_fleurs_diagnostic["per_sample"]`も残ります。
+表示BLEUは既存benchmarkのEnglish normalize＋sacreBLEUによる**corpus BLEU**です。
+source CERはNFKC＋空白除去・句読点保持、編集距離総和÷参照文字総数です。
+
+| 観測 | 次に疑う箇所（単独原因の証明ではありません） |
+|---|---|
+| Gold MT高 / Natural高 / Synthetic低 | 現在の合成日本語source音声 |
+| Gold MT高 / Natural低 / Synthetic低 | source ASR / Whisper・録音条件 |
+| Gold MT低 / Natural低 / Synthetic低 | NLLB、BLEU/reference/domainの相性 |
+| MT高 / final ASR-BLEUだけ低 | 英語target TTS / 英語評価ASR |
+
+既存のセル8/8A/8B、正式predictions、metrics、manifest、学習checkpointは書き換えません。
+新規依存は8C専用環境で固定し、既存学習Pythonへ追加しません。
+CPU fixtureでの再開・失敗・SHA検証の成功は、実GPUモデルによる3条件の成功を意味しません。
+
 ### セル10: 任意日本語文の2方式試聴・参考BLEU・性能比較
 
 セル1→10で使用します。Qwen生成の同じ日本語音声をCascadeと、
