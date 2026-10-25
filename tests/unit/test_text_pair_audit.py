@@ -391,10 +391,10 @@ def test_existing_notebook_cells_unchanged_and_8d_follows_8c():
         'show', '837f379f2a6f37e4c28f64f685d0a677090de9b4:notebooks/colab_training.ipynb'], encoding='utf-8'))
     new = [c for c in current['cells'] if ''.join(c['source']).startswith('#@title 8D.')]
     assert len(new) == 1
-    assert [c for c in current['cells'] if c not in new] == prior['cells']
+    assert [c for c in current['cells'] if c not in new and not ''.join(c['source']).startswith('#@title 8E.')] == prior['cells']
     position = current['cells'].index(new[0])
     assert ''.join(current['cells'][position-1]['source']).startswith('#@title 8C.')
-    assert ''.join(current['cells'][position+1]['source']).startswith('#@title 9.')
+    assert ''.join(current['cells'][position+1]['source']).startswith(('#@title 8E.', '#@title 9.'))
 
 
 def test_normal_8d_fetches_code_from_blank_runtime_without_touching_training_or_drive(tmp_path, monkeypatch):

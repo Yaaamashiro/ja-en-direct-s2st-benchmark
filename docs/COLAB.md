@@ -1210,3 +1210,31 @@ can bias the manual quality judgment.
 UIには標準Colabカーネルの`ipywidgets` 7/8とIPythonを使います。
 不足時はDrive出力を作る前に停止し、学習環境へ依存を自動導入しません。
 詳しい分類基準・入力検証・統計・検証記録は[TEXT_PAIR_AUDIT.md](TEXT_PAIR_AUDIT.md)を参照してください。
+
+
+## Cell 8E: FLEURS/FLORES 外部S2UT評価（GPU・再開可）
+
+GPUで **セル1 → 8E** を実行します。8Cを実行した `OUTPUT_BASE / MODE / EXPERIMENT` を指定します。
+既存セル2～8Dの再実行、S2UTの再学習、学習用testデータの差し替えは不要です。
+
+- `FLEURS_S2UT_RUN_NAME`: 空欄は通常セル6と同じ保存済みS2UT run自動選択。複数候補なら保存名を指定。
+- `FLEURS_S2UT_CASCADE_ID`: 空欄は保存済み8Cの300件評価を優先して最新を選択。明示するとその8C identityを使用。
+- `FLEURS_S2UT_RESUME=True`: 成功済みUnit・WAV・ASR journalをZIPから復元します。
+- `FLEURS_S2UT_RUN=True`: 実行。Falseはモデルを読み込まず保存8C入力の確認だけ。
+
+8Cのcanonical ID・FLORES/FLEURS ID・日英テキスト・SHA・自然音声receiptを照合し、
+**同じNatural音声、同じ英語reference、同じ英語評価Whisper**でASR-BLEUを測ります。
+`best`は元のDev unit loss基準を維持し、beam10・公式Unit HiFi-GAN・英語正規化・
+失敗込みBLEU分母も正式S2UT評価と同じです。新しい300件選択やreferenceの推論入力は行いません。
+
+結果は `diagnostics/flores-fleurs-s2ut/<identity>/report.md`、`metrics.json`、
+`per_sample.jsonl/csv`、WAV ZIPへ保存します。Cascade Naturalの数値は8C保存値を読み、
+再計算せず差を表示します。学習・8C・正式評価の保存結果は変更しません。
+
+S2UTは保存済みfairseq環境、評価Whisperは別の8C環境を自動復元します。
+8Cのnumpy2系をfairseqのnumpy1系に混ぜません。8C bootstrapのためL4/A100が対応し、
+T4は未対応です。新しいHFデータセット認証は不要ですが、公開vocoder/Whisperのダウンロードはあり得ます。
+初回に8C環境がない場合は既存の8C固定依存を導入します（Qwen等のパッケージを含みますが、
+8EでQwen/NLLBモデルをロード・実行しません）。
+
+実装・根拠・復元単位・検証範囲は [8Eの説明](S2UT_FLORES_FLEURS_DIAGNOSTIC.md) を参照してください。
