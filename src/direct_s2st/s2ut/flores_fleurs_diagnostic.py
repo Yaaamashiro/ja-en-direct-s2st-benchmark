@@ -175,12 +175,7 @@ def verify_source(ctx, *, audio=False):
                 raise ValueError('8C natural audio SHA mismatch')
 
 
-def prepare_plan(persistent, local, ctx, run, metadata, checkpoint, best_update, revision):
-    from ..vocoders.reference import BASE, CHECKPOINT_SHA256, CONFIG_SHA256
-    if not re.fullmatch('[0-9a-f]{40}', revision):
-        raise ValueError('8E requires immutable code revision')
-    if type(best_update) is not int or not 1 <= best_update <= run['updates']:
-        raise ValueError('invalid saved dev-best update')
+def implementation_files():
     package = Path(__file__).resolve().parents[1]
     repo = package.parents[1]
     implementations = [Path(__file__), package/'s2ut/external_generate.py',package/'s2ut/benchmark_worker.py',
@@ -188,10 +183,21 @@ def prepare_plan(persistent, local, ctx, run, metadata, checkpoint, best_update,
         package/'evaluation/run.py',package/'evaluation/transcribe.py',package/'evaluation/bleu.py',
         package/'cascade/whisper.py',package/'cascade/asr.py',package/'vocoders/inference.py',
         package/'vocoders/reference.py',repo/'scripts/colab/s2ut_flores_fleurs_diagnostic.py',
-        repo/'scripts/colab/flores_fleurs_runtime.py',repo/'requirements/diagnostic-flores.txt']
+        repo/'scripts/colab/flores_fleurs_runtime.py',repo/'requirements/diagnostic-flores.txt',
+        package/'s2ut/flores_fleurs_resume.py']
+    return {str(p):raw_sha(p) for p in implementations}
+
+
+def prepare_plan(persistent, local, ctx, run, metadata, checkpoint, best_update, revision, *, resume=False):
+    from ..vocoders.reference import BASE, CHECKPOINT_SHA256, CONFIG_SHA256
+    if not re.fullmatch('[0-9a-f]{40}', revision):
+        raise ValueError('8E requires immutable code revision')
+    if type(best_update) is not int or not 1 <= best_update <= run['updates']:
+        raise ValueError('invalid saved dev-best update')
+    files = implementation_files()
     body = dict(version=VERSION, purpose=PURPOSE, source=ctx, run=run, metadata=metadata,
                 workspace_base=str(Path(local).absolute()), persistent_base=str(Path(persistent).absolute()),
-                execution_files={str(p):raw_sha(p) for p in implementations},
+                execution_files=files,
                 checkpoint=str(checkpoint), checkpoint_sha256=raw_sha(checkpoint), best_update=best_update,
                 execution_revision=revision, beam=10, asr=ctx['asr'], normalization=NORMALIZATION,
                 ids=[r['pair_id'] for r in ctx['samples']],
@@ -208,6 +214,12 @@ def prepare_plan(persistent, local, ctx, run, metadata, checkpoint, best_update,
         raise ValueError('8E local workspace must be outside persistent experiments')
     guarded(output)
     guarded(owned)
+    if resume:
+        from .flores_fleurs_resume import adopt
+        previous = adopt(body, base, files)
+        if previous is not None:
+            verify_plan(previous)
+            return previous
     plan = dict(body, identity=digest(body), output=str(output), local=str(owned))
     atomic_write_json(output/'plan.json', plan, resume=True)
     return plan
@@ -226,9 +238,13 @@ def verify_plan(plan):
         raise ValueError('8E owned local/output paths changed')
     inside(output, output)
     verify_source(plan['source'])
-    for name, sha in {**plan['metadata'], **plan['execution_files']}.items():
+    for name, sha in plan['metadata'].items():
         if raw_sha(name) != sha:
             raise ValueError('checkpoint-bound inference metadata changed: '+name)
+    current_files = implementation_files()
+    if plan['execution_files'] != current_files:
+        from .flores_fleurs_resume import verify_execution
+        verify_execution(plan, current_files)
     if raw_sha(plan['checkpoint']) != plan['checkpoint_sha256']:
         raise ValueError('S2UT dev-best checkpoint SHA mismatch')
 
@@ -503,14 +519,45 @@ def verify_asr_runtime(plan, runtime):
     keys = ('torch', 'torchaudio', 'transformers', 'tokenizers', 'safetensors', 'numpy',
             'librosa', 'soundfile', 'soxr', 'sacrebleu', 'accelerate', 'huggingface-hub')
     saved, current = plan['source']['environment'], runtime
+    saved_packages = canonical_packages(saved['packages'])
+    current_packages = canonical_packages(current['packages'])
     for key in keys:
-        if saved['packages'].get(key) != current['packages'].get(key) or key not in saved['packages']:
-            raise ValueError('8E evaluation dependency differs from saved 8C: '+key)
+        if key not in saved_packages or key not in current_packages or saved_packages[key] != current_packages[key]:
+            raise ValueError('8E evaluation dependency differs from saved 8C: '+key+
+                             f' (saved={saved_packages.get(key)!r}, actual={current_packages.get(key)!r})')
     if saved['python'] != current['python']:
         raise ValueError('8E evaluation Python differs from 8C')
     for key in ('torch_cuda','cudnn','matmul_allow_tf32','cudnn_allow_tf32'):
         if saved.get(key) != current.get(key):
             raise ValueError('8E evaluation backend setting differs from 8C: '+key)
+
+
+def canonical_packages(packages):
+    """Distribution names use case-insensitive [-_.]+ aliases; versions do not."""
+    result = {}
+    for name, version in packages.items():
+        key = re.sub(r'[-_.]+','-',name).lower()
+        if key in result and result[key] != version:
+            raise ValueError('conflicting versions for canonical distribution name: '+key)
+        result[key] = version
+    return result
+
+
+def verify_saved_asr_dependencies(ctx):
+    """Reject incompatible saved 8C versions before expensive model inference."""
+    repo = Path(__file__).resolve().parents[3]
+    expected = {}
+    for line in (repo/'requirements/diagnostic-flores.txt').read_text(encoding='utf-8').splitlines():
+        if '==' in line and not line.startswith('#'):
+            name, version = line.split(';')[0].strip().split('==')
+            expected[name] = version
+    expected = canonical_packages(expected)
+    keys = ('torch','torchaudio','transformers','tokenizers','safetensors','numpy',
+            'librosa','soundfile','soxr','sacrebleu','accelerate','huggingface-hub')
+    expected.update(torch='2.7.1+cu126',torchaudio='2.7.1+cu126')
+    saved = ctx['environment']
+    verify_asr_runtime({'source':{'environment':saved}},
+                       dict(saved, python='3.10.18', packages={key:expected[key] for key in keys}))
 
 
 @operation('8E: merge verified durable and newer local ASR progress')

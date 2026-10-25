@@ -140,6 +140,20 @@ failures saved in a completed shard are retained as failures, not silently retri
 under a different decoding condition.
 
 Same settings: **Cell 1 → 8E** resumes, including after runtime replacement.
+
+The package-name repair (launcher version 2) normalizes distribution names using
+case-insensitive `[-_.]+` aliases, while requiring identical exact versions and
+Python/CUDA/cuDNN/TF32 settings. The saved 8C lock is checked before S2UT inference;
+the actual restored ASR environment is checked again before scoring.
+
+An interrupted pre-ASR `4e18c8f872561c57a6cb32f115164f5c331db972` plan can retain its
+identity, Unit shards and WAV ZIPs through an explicitly recorded execution overlay.
+Adoption requires identical scientific inputs/settings and reviewed code fingerprints:
+unchanged generation/vocoder/scoring/dependency code and unchanged scientific function
+bodies in the diagnostic. Original plan/archives remain byte-identical. The new report
+records both execution revisions. Different settings/checkpoints use separate identities.
+Already scored legacy results without an overlay are not adopted. Rerunning an adopted
+result preserves its ASR progress and completed report checksums.
 Completed reports are SHA-verified and displayed without rebuilding inference
 environments. Their saved checkpoint still must be restorable. Run only one
 8E execution per experiment/identity at a time. This does not provide a
@@ -177,7 +191,7 @@ failure-inclusive BLEU, dependency mismatch rejection, model-free completion res
 and unchanged existing notebook cells. Real L4 inference/model download/Drive
 remount has not been executed as part of local implementation testing.
 
-Final local verification (2026-10-25):
+Initial release local verification (`4e18c8f`, 2026-10-25):
 
 - Entire CPU suite: **1032 passed, 2 skipped, 8 GPU tests deselected**, 312.16 s.
 - New 8E tests: **43 passed** under Python 3.10.18 and Python 3.13.7.
@@ -206,3 +220,31 @@ Changed files:
 - Notebook compatibility assertions only in `test_cascade_corpus_diagnostic.py`,
   `test_cascade_mt_diagnostic.py`, `test_flores_fleurs_diagnostic.py`, and
   `test_text_pair_audit.py`.
+
+## Package-name repair verification
+
+The real saved 8C `identity.json` uses `huggingface_hub: 0.36.2`. The pinned
+requirements and installed distribution version also require `0.36.2`; this was
+a name-alias comparison error, not permission to change package versions.
+
+Regression coverage includes actual installed distribution metadata, underscore /
+hyphen / dot / case aliases, missing and conflicting names, genuine version
+mismatches, Python/CUDA/cuDNN/TF32 mismatches and rejection before checkpoint or
+model restoration. Recovery tests execute the original released Python source
+from Git, create real recovery ZIPs with lightweight inference doubles, then
+verify unchanged plan/Unit/WAV bytes with or without the previous VM/code cache.
+They cover ASR interruption after adoption, completed model-free resume through
+the normal launcher, altered model/reference/code rejection, and repaired Cell 8E
+bootstrap from Cell 1. Neural inference remains outside these CPU tests.
+
+Local repair verification (2026-10-25):
+
+- Full CPU regression suite: **1064 passed, 2 skipped, 8 GPU tests deselected**
+  (305.99 s; collected before the last normal-launcher integration test was added).
+- Final 8E suite including that integration test: **76 passed** on Python 3.13.
+- Python 3.10.18: **75 passed**, then **4 passed** for final normal-launcher /
+  Cell 1-bootstrap / notebook compatibility checks, including the added test.
+- Actual saved 8C Python/package preflight and local Python 3.10 `pip check`: passed.
+- Skips remain the unconfigured real eSpeak executable and Windows symlink privilege.
+- GPU/Colab model execution was not performed for this repair. Model settings,
+  package pins, original 8C artifacts and the 20 earlier notebook cells are unchanged.

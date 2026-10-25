@@ -10,7 +10,7 @@ import sys
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/'src'))
-S2UT_FLORES_FLEURS_VERSION = 1
+S2UT_FLORES_FLEURS_VERSION = 2
 
 
 def invoke(*command, env=None):
@@ -79,7 +79,8 @@ def training_context(persistent, requested, local):
 
 def launch(repo, persistent, local, requested='', cascade_id='', *, resume=True, execute=True):
     from direct_s2st.s2ut.flores_fleurs_diagnostic import (
-        choose_cascade, source_context, prepare_plan, verify_asr_runtime, verify_plan)
+        choose_cascade, source_context, prepare_plan, verify_asr_runtime, verify_plan,
+        verify_saved_asr_dependencies, implementation_files)
     from direct_s2st.benchmark_storage import read
     from direct_s2st.io import atomic_write_json
     from direct_s2st.progress import operation
@@ -97,6 +98,7 @@ def launch(repo, persistent, local, requested='', cascade_id='', *, resume=True,
     if not execute:
         return dict(cascade_root=str(root), samples=len(ctx['samples']),
                     display='8E実行はOFFです。保存済み8Cの入力確認まで完了しました。')
+    verify_saved_asr_dependencies(ctx)
     ensure_host_yaml(local)
     from inference_session import environment
     if not repo.is_dir():
@@ -106,7 +108,7 @@ def launch(repo, persistent, local, requested='', cascade_id='', *, resume=True,
     run, metadata, checkpoint, best = training_context(persistent, requested, local)
     # Complete model-free resume doesn't require reinstalling CUDA/Whisper.
     # Source SHA verification and saved checkpoint selection still run first.
-    plan = prepare_plan(persistent, local, ctx, run, metadata, checkpoint, best, revision)
+    plan = prepare_plan(persistent, local, ctx, run, metadata, checkpoint, best, revision, resume=resume)
     destination = Path(plan['output'])
     if (destination/'completion.json').is_file():
         if not resume:
@@ -146,6 +148,8 @@ def launch(repo, persistent, local, requested='', cascade_id='', *, resume=True,
     asr_env.update(PYTHONPATH=str(ROOT/'src'))
     atomic_write_json(destination/'evaluation-runtime.json', runtime, overwrite=True)
     invoke(asr_python, '-B', helper, '--worker-stage', 'evaluate', '--plan', destination/'plan.json', env=asr_env)
+    from direct_s2st.s2ut.flores_fleurs_resume import annotate_report
+    annotate_report(plan, implementation_files())
     from direct_s2st.drive_staging import raw_sha
     atomic_write_json(destination/'completion.json', dict(identity=plan['identity'],
         files={name:raw_sha(destination/name) for name in

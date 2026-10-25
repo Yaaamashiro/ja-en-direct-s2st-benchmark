@@ -41,8 +41,9 @@ def source_fixture(tmp_path, n=3):
     audit = dict(selected_samples=samples,selected=n,counts=dict(matched=500),
                  datasets=[dict(repository='google/fleurs',revision='a'*40),
                            dict(repository='openlanguagedata/flores_plus',revision='b'*40)])
-    environment = dict(python='3.10.18', packages={k:'v' for k in ('torch','torchaudio','transformers',
-        'tokenizers','safetensors','numpy','librosa','soundfile','soxr','sacrebleu','accelerate','huggingface-hub')})
+    environment = dict(python='3.10.18', packages=dict(torch='2.7.1+cu126',torchaudio='2.7.1+cu126',
+        transformers='4.57.3',tokenizers='0.22.2',safetensors='0.8.0',numpy='2.2.6',librosa='0.10.2.post1',
+        soundfile='0.13.1',soxr='1.1.0',sacrebleu='2.5.1',accelerate='1.12.0',huggingface_hub='0.36.2'))
     plan = dict(purpose=diag.CASCADE_PURPOSE,selected=samples,dataset=audit,
                 context=dict(evaluation_asr=diag.ASR),environment=environment,
                 implementation={k:raw_sha(ROOT/'src/direct_s2st'/k) for k in
@@ -323,6 +324,214 @@ def test_asr_runtime_same_versions_required_but_not_same_gpu(tmp_path):
     diag.verify_asr_runtime(plan,env)
     env['packages']['numpy']='different'
     with pytest.raises(ValueError,match='numpy'):diag.verify_asr_runtime(plan,env)
+
+
+@pytest.mark.parametrize('saved_name',['huggingface_hub','huggingface-hub','HuggingFace.Hub','huggingface___hub'])
+@pytest.mark.parametrize('actual_name',['huggingface_hub','huggingface-hub','HUGGINGFACE.HUB'])
+def test_distribution_aliases_preserve_exact_versions_without_editing_saved_metadata(tmp_path,saved_name,actual_name):
+    plan=experiment(tmp_path)
+    saved=plan['source']['environment']['packages'];saved[saved_name]=saved.pop('huggingface_hub')
+    before=copy.deepcopy(plan)
+    runtime=copy.deepcopy(plan['source']['environment'])
+    runtime['packages'][actual_name]=runtime['packages'].pop(saved_name)
+    diag.verify_asr_runtime(plan,runtime)
+    diag.verify_saved_asr_dependencies(plan['source'])
+    assert plan==before
+    runtime['packages'][actual_name]='0.36.1'
+    with pytest.raises(ValueError,match='saved=.*0.36.2.*actual=.*0.36.1'):
+        diag.verify_asr_runtime(plan,runtime)
+
+
+def test_missing_and_conflicting_distribution_versions_fail_closed(tmp_path):
+    plan=experiment(tmp_path);runtime=copy.deepcopy(plan['source']['environment'])
+    del runtime['packages']['huggingface_hub']
+    with pytest.raises(ValueError,match='huggingface-hub'):diag.verify_asr_runtime(plan,runtime)
+    del plan['source']['environment']['packages']['huggingface_hub']
+    with pytest.raises(ValueError,match='huggingface-hub'):diag.verify_asr_runtime(plan,runtime)
+    with pytest.raises(ValueError,match='conflicting versions'):
+        diag.canonical_packages({'huggingface_hub':'0.36.2','HuggingFace-Hub':'0.36.1'})
+    assert diag.canonical_packages({'huggingface_hub':'0.36.2','HuggingFace-Hub':'0.36.2'})=={'huggingface-hub':'0.36.2'}
+
+
+def test_real_metadata_uses_same_canonical_distribution_keys():
+    import importlib.metadata as metadata
+    values={d.metadata['Name']:d.version for d in metadata.distributions()}
+    actual=diag.canonical_packages(values)
+    assert actual['huggingface-hub']==metadata.version('huggingface-hub')
+
+
+def test_incompatible_saved_dependency_is_rejected_before_checkpoint_or_models(tmp_path,monkeypatch):
+    persistent,root=source_fixture(tmp_path)
+    ctx=diag.source_context(root);ctx['environment']['packages']['numpy']='1.26.4'
+    monkeypatch.setattr(diag,'source_context',lambda *a,**kw:ctx)
+    monkeypatch.setattr(launcher,'ensure_host_yaml',lambda *a:pytest.fail('no dependency installation'))
+    monkeypatch.setattr(launcher,'training_context',lambda *a:pytest.fail('no checkpoint restore'))
+    with pytest.raises(ValueError,match='numpy'):
+        launcher.launch(tmp_path/'repo',persistent,tmp_path/'local')
+
+
+def legacy_plan(tmp_path):
+    """Use the actual released source, not a hand-edited identity fixture."""
+    import importlib.util
+    from direct_s2st.s2ut import flores_fleurs_resume as repair
+    plan=experiment(tmp_path)
+    root=tmp_path/'legacy'
+    files=repair.relative_files(diag.implementation_files())
+    for relative in set(files)-{repair.SELF}:
+        value=subprocess.check_output(['git','-c','safe.directory='+str(ROOT),'-C',str(ROOT),
+                                       'show',repair.BASE_REVISION+':'+relative])
+        path=root/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(value)
+    spec=importlib.util.spec_from_file_location('direct_s2st.s2ut._legacy_fleurs',root/repair.DIAGNOSTIC)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    previous=module.prepare_plan(plan['persistent_base'],plan['workspace_base'],plan['source'],plan['run'],
+        plan['metadata'],plan['checkpoint'],plan['best_update'],repair.BASE_REVISION)
+    return module,previous
+
+
+def adopt_plan(previous,**changes):
+    args=dict(persistent=previous['persistent_base'],local=previous['workspace_base'],ctx=previous['source'],
+        run=previous['run'],metadata=previous['metadata'],checkpoint=previous['checkpoint'],
+        best_update=previous['best_update'],revision='d'*40,resume=True)
+    args.update(changes)
+    return diag.prepare_plan(**args)
+
+
+@pytest.mark.parametrize('lose_vm',[False,True])
+def test_released_plan_retains_units_wavs_identity_and_resumes_asr(tmp_path,monkeypatch,lose_vm):
+    from direct_s2st.s2ut import flores_fleurs_resume as repair
+    module,previous=legacy_plan(tmp_path)
+    module.prepare_external(previous);module.units(previous,runner=runner_fixture([]))
+    calls=[];install_vocoder(monkeypatch,calls);module.audio(previous)
+    before=snapshot(previous['output']);source=snapshot(previous['source']['root'])
+    if lose_vm:
+        shutil.rmtree(previous['local'])
+        shutil.rmtree(tmp_path/'legacy')  # previous code checkout also disappears
+    adopted=adopt_plan(previous)
+    assert adopted==previous
+    diag.verify_plan(adopted)
+    diag.prepare_external(adopted)
+    diag.units(adopted,runner=lambda *a,**kw:pytest.fail('reuse released Unit shards'))
+    diag.audio(adopted)
+    assert calls==['vocoder']
+    assert all(Path(p).read_bytes()==value for p,value in before.items())
+    assert source==snapshot(previous['source']['root'])
+    receipt=repair.verify_execution(adopted,diag.implementation_files())
+    assert receipt['execution_revision']=='d'*40 and receipt['scientific_settings_unchanged']
+    seen=[]
+    def interrupted(**kw):
+        def transcribe(path):
+            seen.append(path)
+            if len(seen)==2:raise KeyboardInterrupt('ASR interruption after adoption')
+            return 'the very old book is on the table'
+        return transcribe
+    with pytest.raises(KeyboardInterrupt):diag.evaluate(adopted,asr_factory=interrupted)
+    assert adopt_plan(previous)==adopted
+    resumed=[]
+    diag.evaluate(adopted,asr_factory=lambda **kw:lambda p:(resumed.append(p) or 'the very old book is on the table'))
+    assert len(resumed)==2
+    repair.annotate_report(adopted,diag.implementation_files())
+    metrics=read(Path(adopted['output'])/'metrics.json')
+    assert metrics['code_revision']=='d'*40 and metrics['original_code_revision']==repair.BASE_REVISION
+    assert metrics['execution_overlay']==receipt
+    atomic_write_json(Path(adopted['output'])/'completion.json',dict(identity=adopted['identity']))
+    assert adopt_plan(previous)==adopted
+    assert all(Path(p).read_bytes()==value for p,value in before.items())
+
+
+@pytest.mark.parametrize('change',['checkpoint','reference','asr_progress','completed','no_progress'])
+def test_release_adoption_does_not_mix_different_or_scored_results(tmp_path,change):
+    module,previous=legacy_plan(tmp_path)
+    if change!='no_progress':
+        module.prepare_external(previous);module.units(previous,runner=runner_fixture([]))
+    args={}
+    if change=='checkpoint':Path(previous['checkpoint']).write_bytes(b'another model')
+    elif change=='reference':
+        ctx=copy.deepcopy(previous['source']);ctx['samples'][0]['en_reference']='different';args['ctx']=ctx
+    elif change=='asr_progress':atomic_write_json(Path(previous['output'])/'progress/asr.json',{})
+    elif change=='completed':atomic_write_json(Path(previous['output'])/'completion.json',{})
+    other=adopt_plan(previous,**args)
+    assert other['identity']!=previous['identity']
+    assert not (Path(previous['output'])/'execution-overlays').exists()
+
+
+@pytest.mark.parametrize('change',['original_hash','scientific_scope','dependency','receipt'])
+def test_execution_overlay_rejects_unreviewed_changes(tmp_path,change):
+    from direct_s2st.s2ut import flores_fleurs_resume as repair
+    module,previous=legacy_plan(tmp_path)
+    module.prepare_external(previous);module.units(previous,runner=runner_fixture([]))
+    adopted=adopt_plan(previous);files=diag.implementation_files()
+    if change=='receipt':
+        path=repair.receipt_path(adopted,files);document=read(path)
+        document['body']['base_identity']='0'*64
+        atomic_write_json(path,document,overwrite=True)
+        with pytest.raises(ValueError,match='receipt differs'):repair.verify_execution(adopted,files)
+    elif change=='original_hash':
+        value=copy.deepcopy(adopted)
+        key=next(p for p in value['execution_files'] if Path(p).as_posix().endswith('s2ut/flores_fleurs_diagnostic.py'))
+        value['execution_files'][key]='0'*64
+        with pytest.raises(ValueError,match='not the reviewed'):repair.review(value,files)
+    else:
+        copied={}
+        current=repair.relative_files(files)
+        for relative,(path,sha) in current.items():
+            target=tmp_path/'changed'/relative;target.parent.mkdir(parents=True,exist_ok=True)
+            data=path.read_bytes()
+            if (change=='dependency' and relative=='requirements/diagnostic-flores.txt'):
+                data=data.replace(b'0.36.2',b'0.36.1')
+            if change=='scientific_scope' and relative==repair.DIAGNOSTIC:
+                data=data.replace(b'def units(plan,',b'def units_unreviewed(plan,')
+            target.write_bytes(data);copied[str(target)]=raw_sha(target)
+        with pytest.raises(ValueError,match='code changed|scope'):
+            repair.review(adopted,copied)
+
+
+@pytest.mark.parametrize('key',['python','torch_cuda','cudnn','matmul_allow_tf32','cudnn_allow_tf32'])
+def test_runtime_backend_checks_are_not_weakened_by_name_repair(tmp_path,key):
+    plan=experiment(tmp_path);runtime=copy.deepcopy(plan['source']['environment'])
+    runtime[key]='different'
+    with pytest.raises(ValueError,match='Python|backend setting'):
+        diag.verify_asr_runtime(plan,runtime)
+
+
+def test_normal_cell_bootstrap_requires_repaired_launcher():
+    nb=read(ROOT/'notebooks/colab_training.ipynb')
+    code=next(''.join(c['source']) for c in nb['cells'] if ''.join(c['source']).startswith('#@title 8E.'))
+    assert code.count('S2UT_FLORES_FLEURS_VERSION = 2')==2
+    assert 'S2UT_FLORES_FLEURS_VERSION = 1' not in code
+
+
+def test_normal_launcher_adopts_released_waveforms_then_returns_completed_report(tmp_path,monkeypatch):
+    import inference_session
+    import flores_fleurs_runtime
+    module,previous=legacy_plan(tmp_path)
+    module.prepare_external(previous);module.units(previous,runner=runner_fixture([]))
+    vocoder_calls=[];install_vocoder(monkeypatch,vocoder_calls);module.audio(previous)
+    saved=snapshot(previous['output'])
+    monkeypatch.setattr(launcher,'training_context',lambda *a:(previous['run'],previous['metadata'],
+        Path(previous['checkpoint']),previous['best_update']))
+    monkeypatch.setattr(subprocess,'check_output',lambda *a,**kw:'d'*40+'\n')
+    monkeypatch.setattr(inference_session,'environment',lambda *a:'fairseq-python')
+    runtime=copy.deepcopy(previous['source']['environment'])
+    runtime['packages']['huggingface-hub']=runtime['packages'].pop('huggingface_hub')
+    monkeypatch.setattr(flores_fleurs_runtime,'ensure',lambda *a,**kw:('asr-python',{},runtime))
+    stages=[]
+    def invoke(*command,env=None):
+        if '-c' in command:return
+        stage=command[command.index('--worker-stage')+1];stages.append(stage)
+        plan=read(Path(command[command.index('--plan')+1]));assert plan==previous
+        if stage=='evaluate':
+            diag.evaluate(plan,asr_factory=lambda **kw:lambda p:'the very old book is on the table')
+        else:
+            {'prepare':diag.prepare_external,'units':lambda p:diag.units(p,
+                runner=lambda *a,**kw:pytest.fail('no Unit regeneration')),'audio':diag.audio}[stage](plan)
+    monkeypatch.setattr(launcher,'invoke',invoke)
+    repo=tmp_path/'repo';repo.mkdir()
+    result=launcher.launch(repo,previous['persistent_base'],previous['workspace_base'],resume=True)
+    assert result['output_root']==previous['output'] and result['metrics']['code_revision']=='d'*40
+    assert all(Path(p).read_bytes()==value for p,value in saved.items())
+    assert vocoder_calls==['vocoder'] and stages==['prepare','units','audio','evaluate']
+    monkeypatch.setattr(inference_session,'environment',lambda *a:pytest.fail('completed resume needs no runtime'))
+    assert launcher.launch(repo,previous['persistent_base'],previous['workspace_base'],resume=True)==result
 
 
 def test_cli_help_and_inspect_preflight_need_no_site_packages(tmp_path):
