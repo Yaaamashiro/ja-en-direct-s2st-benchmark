@@ -498,6 +498,9 @@ def test_normal_cell_bootstrap_requires_repaired_launcher():
     code=next(''.join(c['source']) for c in nb['cells'] if ''.join(c['source']).startswith('#@title 8E.'))
     assert code.count('S2UT_FLORES_FLEURS_VERSION = 2')==2
     assert 'S2UT_FLORES_FLEURS_VERSION = 1' not in code
+    assert 'DIAGNOSTIC_RESULT_CONTRACT_VERSION = 2' in code
+    assert "result_kind='external_s2ut' if FLEURS_S2UT_RUN else 'external_s2ut_inspect'" in code
+    assert "_fe_execution_revision = '32cc967f01808d5abc82df2d709b5c8262a9e961'" in code
 
 
 def test_normal_launcher_adopts_released_waveforms_then_returns_completed_report(tmp_path,monkeypatch):
@@ -603,6 +606,14 @@ def test_normal_launcher_separates_environments_and_completion_resume_is_model_f
     monkeypatch.setattr(inference_session,'environment',lambda *a:pytest.fail('no rebuild'))
     second=launcher.launch(repo,persistent,local,resume=True)
     assert first==second and calls==['prepare','units','audio','vocoder','isolated-8c-runtime','evaluate']
+    # Real child stdout/stderr receiver: no mocked run_json and no fabricated
+    # formal-score agreement flag on an independent external evaluation.
+    import cascade_diagnostic_runtime
+    child=tmp_path/'completed-result.json';atomic_write_json(child,second)
+    received=cascade_diagnostic_runtime.run_json([sys.executable,'-B','-c',
+        'from pathlib import Path; print(Path('+repr(str(child))+').read_text(encoding="utf-8"))'],
+        cascade_diagnostic_runtime.cpu_environment(),name='8E',result_kind='external_s2ut')
+    assert received==first and 'all_score_matches_saved' not in received
     with pytest.raises(ValueError,match='enable resume'):
         launcher.launch(repo,persistent,local,resume=False)
 
@@ -613,13 +624,19 @@ def test_cell1_then_8e_without_cell2_or_existing_runtime(tmp_path,monkeypatch):
     code=next(''.join(c['source']) for c in nb['cells'] if ''.join(c['source']).startswith('#@title 8E.'))
     code=code.replace("'/content/ja-en-direct-s2st-benchmark'",repr(str(ROOT)))
     code=code.replace("'/content/drive/MyDrive'",repr(str(tmp_path)))
+    cache=tmp_path/'code';revision='32cc967f01808d5abc82df2d709b5c8262a9e961'
+    code=code.replace("'/content/s2st-flores-fleurs-s2ut-code'",repr(str(cache)))
+    for relative in ('scripts/colab/s2ut_flores_fleurs_diagnostic.py','src/direct_s2st/s2ut/flores_fleurs_diagnostic.py',
+        'src/direct_s2st/s2ut/external_generate.py','scripts/colab/flores_fleurs_runtime.py','src/direct_s2st/s2ut/flores_fleurs_resume.py'):
+        path=cache/revision/relative;path.parent.mkdir(parents=True,exist_ok=True);path.touch()
     persistent,_=source_fixture(tmp_path)
     namespace={};exec(config,namespace)
     namespace.update(OUTPUT_BASE=str(persistent.parent.parent),EXPERIMENT=persistent.name,MODE=persistent.parent.name)
     assert not any(k in namespace for k in ('REPO','PERSISTENT','DATA'))
     def git(command,**kw):
         assert command[0]=='git' and not any(v in command for v in ('fetch','checkout','reset'))
-        return SimpleNamespace(returncode=0,stdout='' if 'status' in command else 'c'*40,stderr='')
+        return SimpleNamespace(returncode=0,stdout='' if 'status' in command else
+            revision if Path(command[2])==cache/revision else 'c'*40,stderr='')
     monkeypatch.setattr(subprocess,'run',git)
     import runpy
     old=runpy.run_path
@@ -630,12 +647,84 @@ def test_cell1_then_8e_without_cell2_or_existing_runtime(tmp_path,monkeypatch):
                 captured.append((args,env))
                 assert '--resume' in args and args[args.index('--persistent')+1]==str(persistent)
                 assert '--limit' not in args
+                assert Path(args[2])==cache/revision/'scripts/colab/s2ut_flores_fleurs_diagnostic.py'
+                assert kwargs['result_kind']=='external_s2ut'
                 return dict(display='test 8E',metrics={})
-            return dict(run_json=run_json)
+            return dict(run_json=run_json,DIAGNOSTIC_RESULT_CONTRACT_VERSION=2)
         return old(path,*a,**kw)
     monkeypatch.setattr(runpy,'run_path',run_path)
     exec(code,namespace)
     assert len(captured)==1 and namespace['flores_fleurs_s2ut']['display']=='test 8E'
+
+
+@pytest.mark.parametrize('execute,warm,stale_transport',[(True,True,False),(False,True,False),
+                                                      (True,False,False),(True,True,True)])
+def test_notebook_uses_real_json_receiver_and_keeps_scientific_checkout(tmp_path,monkeypatch,capsys,
+                                                                       execute,warm,stale_transport):
+    notebook=read(ROOT/'notebooks/colab_training.ipynb')
+    config=next(''.join(c['source']) for c in notebook['cells'] if ''.join(c['source']).startswith('#@title 1.'))
+    code=next(''.join(c['source']) for c in notebook['cells'] if ''.join(c['source']).startswith('#@title 8E.'))
+    cache=tmp_path/'code';primary=tmp_path/'repo'
+    revision='32cc967f01808d5abc82df2d709b5c8262a9e961';new_revision='d'*40
+    code=code.replace("'/content/ja-en-direct-s2st-benchmark'",repr(str(primary)))
+    code=code.replace("'/content/drive/MyDrive'",repr(str(tmp_path)))
+    code=code.replace("'/content/s2st-flores-fleurs-s2ut-code'",repr(str(cache)))
+    if not execute:code=code.replace('FLEURS_S2UT_RUN = True','FLEURS_S2UT_RUN = False')
+    persistent,_=source_fixture(tmp_path)
+    namespace={};exec(config,namespace)
+    namespace.update(OUTPUT_BASE=str(persistent.parent.parent),EXPERIMENT=persistent.name,MODE=persistent.parent.name)
+    report=(dict(output_root=str(persistent/'diagnostics/flores-fleurs-s2ut/saved'),display='保存済み8E結果',
+        metrics=dict(purpose=diag.PURPOSE,condition='natural',sample_count=3,bleu=12.5,
+                     cascade_natural_asr_bleu=21.153432814483,difference=12.5-21.153432814483)) if execute else
+        dict(cascade_root=str(persistent/'diagnostics/flores-fleurs-cascade/saved'),samples=3,display='入力確認のみ'))
+    required=('scripts/colab/s2ut_flores_fleurs_diagnostic.py','src/direct_s2st/s2ut/flores_fleurs_diagnostic.py',
+        'src/direct_s2st/s2ut/external_generate.py','scripts/colab/flores_fleurs_runtime.py',
+        'src/direct_s2st/s2ut/flores_fleurs_resume.py')
+    def checkout(root,scientific=False,old_transport=False):
+        for relative in required+('scripts/colab/cascade_diagnostic_runtime.py',):
+            path=root/relative;path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_bytes((ROOT/relative).read_bytes())
+        if old_transport:
+            path=root/'scripts/colab/cascade_diagnostic_runtime.py'
+            path.write_text(path.read_text(encoding='utf-8').replace('DIAGNOSTIC_RESULT_CONTRACT_VERSION = 2',
+                                                                    'DIAGNOSTIC_RESULT_CONTRACT_VERSION = 1'),encoding='utf-8')
+        if scientific:
+            # Real stdlib child emits the saved external-result schema. The JSON
+            # receiver and the complete notebook code run without run_json mocks.
+            (root/required[0]).write_text('import json,sys\nprint("[progress] saved report returned",file=sys.stderr)\n'
+                'print(json.dumps('+repr(report)+',ensure_ascii=False))\n',encoding='utf-8')
+    checkout(primary,old_transport=stale_transport)
+    if warm:checkout(cache/revision,scientific=True)
+    fetched=[];last_fetch={}
+    def git(command,**kw):
+        assert command[0]=='git'
+        root=Path(command[2]);args=command[3:]
+        if args[0]=='init':(root/'.git').mkdir(parents=True)
+        elif args[0]=='fetch':
+            fetched.append(args[-1]);last_fetch[str(root)]=new_revision if args[-1]=='main' else args[-1]
+        elif args[0]=='worktree':checkout(Path(args[-2]),scientific=args[-1]==revision)
+        result=''
+        if args[0]=='rev-parse':
+            result=last_fetch[str(root)] if args[1].startswith('FETCH_HEAD') else (
+                root.name if root.name in (revision,new_revision) else 'c'*40)
+        return SimpleNamespace(returncode=0,stdout=result,stderr='')
+    monkeypatch.setattr(subprocess,'run',git)
+    exec(code,namespace)
+    assert namespace['flores_fleurs_s2ut']==report
+    assert namespace['_fe_execution_code']==cache/revision
+    assert namespace['_fe_args'][2]==str(cache/revision/required[0])
+    assert 'all_score_matches_saved' not in report
+    assert report['display'] in capsys.readouterr().out
+    assert fetched==(['main'] if stale_transport else [])+([] if warm else [revision])
+
+
+def test_scientific_implementation_files_are_byte_equivalent_to_pinned_release():
+    from direct_s2st.s2ut.flores_fleurs_resume import relative_files
+    revision='32cc967f01808d5abc82df2d709b5c8262a9e961'
+    for relative,(path,_) in relative_files(diag.implementation_files()).items():
+        released=subprocess.check_output(['git','-c','safe.directory='+str(ROOT),'-C',str(ROOT),
+                                         'show',revision+':'+relative])
+        assert path.read_bytes().replace(b'\r\n',b'\n')==released
 
 
 def test_saved_dev_best_selection_and_unit_permutation_verification(tmp_path,monkeypatch):

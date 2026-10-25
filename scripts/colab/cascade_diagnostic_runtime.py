@@ -2,6 +2,7 @@
 from collections import deque
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -9,6 +10,8 @@ import runpy
 import tempfile
 import threading
 import uuid
+
+DIAGNOSTIC_RESULT_CONTRACT_VERSION = 2
 
 
 def select_target(mode, benchmark_target):
@@ -159,8 +162,44 @@ def stop_child(process):
             process.wait()
 
 
-def run_json(command, env, *, name='8A', mode='CPU diagnostic', failure_note=None):
+def validate_result(report, result_kind, name):
+    """8A rechecks a formal score; 8E produces an independent external score."""
+    if not isinstance(report, dict):
+        raise RuntimeError(name+' helper did not return a result object')
+    if result_kind == 'saved_formal_all':
+        if report.get('all_score_matches_saved') is not True:
+            raise RuntimeError(name+' helper did not confirm agreement with the saved formal All score')
+        return
+    def text(key):
+        return isinstance(report.get(key), str) and bool(report[key].strip())
+    valid = text('display')
+    if result_kind == 'external_s2ut_inspect':
+        valid = valid and text('cascade_root') and type(report.get('samples')) is int and report['samples'] > 0
+    else:
+        metrics = report.get('metrics')
+        valid = valid and text('output_root') and isinstance(metrics, dict)
+        if valid:
+            valid = (metrics.get('purpose') == 'external_flores_fleurs_s2ut_natural_not_formal_benchmark'
+                     and metrics.get('condition') == 'natural'
+                     and type(metrics.get('sample_count')) is int and metrics['sample_count'] > 0
+                     and all(type(metrics.get(k)) in (int, float) and math.isfinite(metrics[k])
+                             for k in ('bleu', 'cascade_natural_asr_bleu', 'difference')))
+            if valid:
+                # sacreBLEU can report 100.00000000000004 for an exact match.
+                # Accept floating-point roundoff without changing saved scores.
+                valid = (0 <= metrics['bleu'] <= 100+1e-8 and 0 <= metrics['cascade_natural_asr_bleu'] <= 100+1e-8
+                         and math.isclose(metrics['difference'], metrics['bleu']-metrics['cascade_natural_asr_bleu'],
+                                          rel_tol=1e-10, abs_tol=1e-8))
+    if not valid:
+        raise RuntimeError(name+' helper did not return a valid external S2UT '+
+                           ('inspection' if result_kind == 'external_s2ut_inspect' else 'evaluation report'))
+
+
+def run_json(command, env, *, name='8A', mode='CPU diagnostic', failure_note=None,
+             result_kind='saved_formal_all'):
     """Relay stderr through Python so Colab actually displays logs/errors."""
+    if result_kind not in ('saved_formal_all','external_s2ut','external_s2ut_inspect'):
+        raise ValueError('unknown diagnostic result contract: '+str(result_kind))
     tail = deque(maxlen=60)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                stdin=subprocess.DEVNULL, text=True, encoding='utf-8',
@@ -188,6 +227,5 @@ def run_json(command, env, *, name='8A', mode='CPU diagnostic', failure_note=Non
         report = json.loads(output)
     except json.JSONDecodeError as error:
         raise RuntimeError(name+' helper did not return valid result JSON: '+output[-1200:]) from error
-    if not isinstance(report, dict) or report.get('all_score_matches_saved') is not True:
-        raise RuntimeError(name+' helper did not confirm agreement with the saved formal All score')
+    validate_result(report, result_kind, name)
     return report

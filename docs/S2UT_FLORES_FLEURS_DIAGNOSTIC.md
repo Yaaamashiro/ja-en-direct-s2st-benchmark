@@ -248,3 +248,47 @@ Local repair verification (2026-10-25):
 - Skips remain the unconfigured real eSpeak executable and Windows symlink privilege.
 - GPU/Colab model execution was not performed for this repair. Model settings,
   package pins, original 8C artifacts and the 20 earlier notebook cells are unchanged.
+
+## Completed-result display repair
+
+The shared `run_json` receiver previously required the 8A-only
+`all_score_matches_saved=True` field for 8E as well. 8E produces a new external
+score, so that assertion is inappropriate even when its worker, report and
+completion receipt all succeeded. The result receiver now uses explicit
+contracts: `saved_formal_all` (unchanged default for 8A/B/C), `external_s2ut`, and
+`external_s2ut_inspect`. External reports must contain their expected purpose,
+Natural condition, positive sample count, finite BLEU/baseline/difference and
+display/output fields; no fabricated formal-score agreement flag is inserted.
+
+Normal Cell 8E loads the repaired display code separately while keeping scientific
+execution pinned to `32cc967f01808d5abc82df2d709b5c8262a9e961` at its existing
+`/content/s2st-flores-fleurs-s2ut-code/<SHA>` path. The actual code-byte fingerprints
+and absolute execution paths therefore retain the prior evaluation identity,
+including a `4e18c8f` plan already adopted through the package-name repair. Cache
+loss fetches that exact scientific SHA; stale display code fetches the current
+wrapper. No new dependencies or scientific implementation changes are required.
+
+With the same settings and resume enabled, the original launcher verifies the
+completed report checksums and returns it without loading inference models or
+rerunning Unit/vocoder/ASR stages. Existing result files are not rewritten. The
+20 earlier notebook cells are unchanged.
+
+Regression tests exercise real subprocess stdout/stderr JSON reception, an actual
+completed launcher result, full notebook execution with the real receiver (warm
+cache, cold cache, stale display wrapper, inspect-only), wrong report rejection,
+continued strict formal-score checking and byte equivalence of every scientific
+implementation file to the pinned release. Model work is replaced with local test
+fixtures; Colab GPU inference is not part of these tests.
+
+Local display-repair verification (2026-10-25):
+
+- Full CPU regression suite: **1086 passed, 2 skipped, 8 GPU tests deselected**
+  (283.74 s; before the last perfect-BLEU roundoff case was added).
+- Final related runtime/8E tests: **128 passed** on both Python 3.10.18 and 3.13.
+  This includes sacreBLEU's actual exact-match value `100.00000000000004`;
+  validation accepts numerical roundoff without rounding or rewriting saved scores.
+- A `python -S` parent and child verify stdlib-only result transport; local
+  Python 3.10 `pip check` reports no broken requirements.
+- All scientific implementation files compare byte-for-byte (with checkout LF
+  normalization) against `32cc967`. The 20 earlier notebook cells are unchanged.
+- Saved-result/worker logic and dependency pins have no implementation changes.

@@ -114,6 +114,67 @@ def test_child_invalid_output_is_not_presented_as_verified_report(output):
         runtime.run_json([sys.executable, '-B', '-c', code], runtime.cpu_environment())
 
 
+def external_result():
+    return dict(output_root='/saved/diagnostics/flores-fleurs-s2ut/identity',
+                display='外部評価結果：S2UT ASR-BLEU 12.5',
+                metrics=dict(purpose='external_flores_fleurs_s2ut_natural_not_formal_benchmark',
+                             condition='natural',sample_count=300,bleu=12.5,
+                             cascade_natural_asr_bleu=21.153432814483,difference=12.5-21.153432814483))
+
+
+@pytest.mark.parametrize('inspect',[False,True])
+def test_external_s2ut_real_child_json_has_no_formal_all_score_flag(capsys,inspect):
+    report=(dict(cascade_root='/saved/8c',samples=300,display='入力確認完了') if inspect else external_result())
+    code="import json,sys; print('[progress] 8E status=completed',file=sys.stderr,flush=True); print(json.dumps("+repr(report)+",ensure_ascii=False))"
+    result=runtime.run_json([sys.executable,'-B','-c',code],runtime.cpu_environment(),name='8E',
+                            result_kind='external_s2ut_inspect' if inspect else 'external_s2ut')
+    assert result==report and 'all_score_matches_saved' not in result
+    assert 'status=completed' in capsys.readouterr().out
+    with pytest.raises(RuntimeError,match='formal All score'):
+        runtime.run_json([sys.executable,'-B','-c',code],runtime.cpu_environment())
+
+
+@pytest.mark.parametrize('change',['no_metrics','no_output','no_display','wrong_purpose','wrong_condition',
+    'empty_samples','bool_samples','nan_bleu','string_bleu','negative_bleu','out_of_range','wrong_difference'])
+def test_external_result_contract_rejects_incomplete_or_wrong_score(change):
+    report=external_result()
+    if change=='no_metrics':report.pop('metrics')
+    elif change=='no_output':report.pop('output_root')
+    elif change=='no_display':report['display']=''
+    else:
+        key,value={'wrong_purpose':('purpose','formal benchmark'),'wrong_condition':('condition','synthetic'),
+            'empty_samples':('sample_count',0),'bool_samples':('sample_count',True),'nan_bleu':('bleu',float('nan')),
+            'string_bleu':('bleu','12.5'),'negative_bleu':('bleu',-1),'out_of_range':('bleu',101),
+            'wrong_difference':('difference',0)}[change]
+        report['metrics'][key]=value
+    code='import json; print(json.dumps('+repr(report).replace('nan','float("nan")')+'))'
+    with pytest.raises(RuntimeError,match='valid external S2UT'):
+        runtime.run_json([sys.executable,'-B','-c',code],runtime.cpu_environment(),name='8E',result_kind='external_s2ut')
+
+
+def test_inspection_and_evaluation_contracts_cannot_be_substituted():
+    with pytest.raises(RuntimeError,match='inspection'):
+        runtime.validate_result(external_result(),'external_s2ut_inspect','8E')
+    with pytest.raises(RuntimeError,match='evaluation report'):
+        runtime.validate_result(dict(cascade_root='/saved',samples=300,display='ok'),'external_s2ut','8E')
+
+
+def test_perfect_real_sacrebleu_roundoff_is_accepted_without_rounding_saved_values():
+    import sacrebleu
+    text='the very old book is on the table'
+    score=sacrebleu.corpus_bleu([text],[[text]]).score
+    report=external_result();report['metrics'].update(bleu=score,cascade_natural_asr_bleu=score,difference=0.0)
+    code='import json; print(json.dumps('+repr(report)+'))'
+    assert runtime.run_json([sys.executable,'-B','-c',code],runtime.cpu_environment(),name='8E',
+                            result_kind='external_s2ut')==report
+
+
+def test_unknown_result_kind_stops_before_subprocess(monkeypatch):
+    monkeypatch.setattr(runtime.subprocess,'Popen',lambda *a,**kw:pytest.fail('no child for invalid contract'))
+    with pytest.raises(ValueError,match='result contract'):
+        runtime.run_json(['unused'],{},result_kind='anything')
+
+
 def test_keyboard_interrupt_stops_only_the_diagnostic_child(monkeypatch):
     class InterruptedOutput(io.StringIO):
         def read(self, *args):
