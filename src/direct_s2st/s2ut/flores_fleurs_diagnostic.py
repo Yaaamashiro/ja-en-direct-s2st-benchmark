@@ -226,6 +226,9 @@ def prepare_plan(persistent, local, ctx, run, metadata, checkpoint, best_update,
 
 
 def verify_plan(plan):
+    if plan.get('purpose') == 'external_flores_fleurs_s2ut_synthetic_not_formal_benchmark':
+        from .flores_fleurs_synthetic import verify_plan as verify_synthetic
+        return verify_synthetic(plan)
     body = {k:v for k,v in plan.items() if k not in ('identity', 'local', 'output')}
     output = Path(plan['output'])
     if (digest(body) != plan['identity'] or plan['purpose'] != PURPOSE or plan['version'] != VERSION
@@ -642,8 +645,7 @@ def evaluate(plan, *, asr_factory=None):
     return save_report(plan, metrics, list(read_jsonl(scores/'per_sample.jsonl')))
 
 
-@operation('8E: persist external comparison metrics and reports')
-def save_report(plan, metrics, scores):
+def report_rows(plan, scores):
     from .benchmark_worker import ordered
     local, output = Path(plan['local']), Path(plan['output'])
     scores = ordered(scores, plan['ids'])
@@ -667,6 +669,16 @@ def save_report(plan, metrics, scores):
             evaluation_asr_status=score['evaluation_status'],
             status='success' if score['evaluation_status']=='success' else 'failed',
             error=score.get('evaluation_error') or audio.get('error') or unit.get('error')))
+    return rows
+
+
+@operation('8E: persist external comparison metrics and reports')
+def save_report(plan, metrics, scores):
+    if plan.get('purpose') == 'external_flores_fleurs_s2ut_synthetic_not_formal_benchmark':
+        from .flores_fleurs_synthetic import save_report as save_synthetic
+        return save_synthetic(plan, metrics, scores)
+    local, output = Path(plan['local']), Path(plan['output'])
+    rows = report_rows(plan, scores)
     unit_failures = sum(r['generation_status'] != 'success' for r in rows)
     metrics.update(purpose=PURPOSE, condition='natural', sample_count=len(rows),
         generation_failures=unit_failures,

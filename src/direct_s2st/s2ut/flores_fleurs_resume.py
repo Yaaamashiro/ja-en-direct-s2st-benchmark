@@ -24,10 +24,13 @@ BASE_FILES = {
 }
 SCIENCE = ('source_context','prepare_external','verify_external','parse_units','shard_records',
            'units','audio','restore_audio','evaluate','restore_asr_progress','save_report',
-           'VERSION','PURPOSE','NORMALIZATION','ASR','SAMPLE_FIELDS')
+           'VERSION','PURPOSE','NORMALIZATION','ASR','SAMPLE_FIELDS','report_rows')
 LAUNCH_SCOPES = ('invoke','ensure_host_yaml','training_context','main')
 REVIEWED_SCOPES = {
-    DIAGNOSTIC:(SCIENCE,'3f03a2651cdf5d913e51eababf176595a584cde56d87e912ebc26f14f1dc0b69'),
+    # 8F adds a purpose-specific report dispatch and extracts the same row
+    # renderer. Natural inputs, inference/vocoding/ASR and metric definitions
+    # are unchanged; regression tests retain the released Natural behavior.
+    DIAGNOSTIC:(SCIENCE,'ad29deb89a59253d510df3a7463306dd521a86d6043a057cfa939e82fef5f471'),
     LAUNCHER:(LAUNCH_SCOPES,'8d5745e1ea96bab9051a401587ea199b1004e464a7e15f457d25248b051e01db'),
 }
 

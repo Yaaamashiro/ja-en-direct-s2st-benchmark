@@ -1255,3 +1255,30 @@ Unit生成・音声復元・ASR評価は再実行しません。
 表示修正だけで評価identityが変わることを防ぎます。キャッシュがない場合は同じSHAのコードを取得します。
 8Eは独立した外部評価なので、8A用の「正式Allスコアと同じ」という確認フラグを作りません。
 学習・推論条件・保存済みレポートは変更しません。
+
+## Cell 8F: FLEURS/FLORES Synthetic S2UT評価
+
+完了済み8Eがある同じ実験で **セル1 → 8F** を実行します。8C・8Eや学習セルの再実行は不要です。
+8Cで保存済みの300件のSynthetic Japanese WAVを再利用し、Natural 8Eと同じ
+S2UT run・Dev-best checkpoint・beam10・公式Unit HiFi-GAN・評価Whisperで評価します。
+日本語TTS生成、データの再選択、モデル再学習は行いません。
+
+- `FLEURS_SYNTHETIC_NATURAL_ID`: 通常は空欄。対応する完了済み8Eを選びます。
+  複数の8Cに対応するNatural評価がある場合は、8Eの保存フォルダ名を指定してください。
+- `FLEURS_SYNTHETIC_RESUME=True`: 保存済みのSynthetic Unit/WAV/ASR段階を再開します。
+- `FLEURS_SYNTHETIC_RUN=True`: 新規Synthetic評価を実行。Falseはモデルを読み込まず保存メタデータだけ確認します。
+
+開始済み8Fがあれば、そのplanのコードSHAとNatural 8E identityも復元します。
+表示側のmainが更新されても同じ実行コード・絶対パスを取得して再開するため、
+コード取得だけで別の評価IDになって最初から計算することを防ぎます。
+複数のNatural評価に対応する8Fがある場合はNATURAL_IDを明示し、不正な保存planは停止します。
+
+入力WAVは8Cの正式結果と生成記録のSHAに照合し、既存8EのID・日本語・英語referenceとも全件照合します。
+欠損や不一致、別checkpointの場合は停止します。source WAV以外の科学的条件を変更しません。
+既存の8E関数を共用するため処理ログの一部は8E表記ですが、8Fのplan/出力はSynthetic専用です。
+
+結果は `diagnostics/flores-fleurs-s2ut-synthetic/<identity>/report.md`、`metrics.json`、
+`per_sample.csv/jsonl`、音声ZIPに保存します。Natural/SyntheticそれぞれのCascade・S2UT BLEU、
+S2UT Synthetic−Natural、比率、Cascade Synthetic−Naturalを表示します。
+Original KFTT/JESC testは保存済み正式artifactを検証できる場合だけ追加し、値を推測・固定しません。
+原因の自動断定は行いません。詳細は [8Fの説明](S2UT_SYNTHETIC_FLORES_FLEURS_DIAGNOSTIC.md) を参照してください。

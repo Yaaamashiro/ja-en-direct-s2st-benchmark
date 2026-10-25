@@ -175,6 +175,18 @@ def test_unknown_result_kind_stops_before_subprocess(monkeypatch):
         runtime.run_json(['unused'],{},result_kind='anything')
 
 
+@pytest.mark.parametrize('field',['purpose','condition','sample_count','bleu','s2ut_synthetic_minus_natural','cascade_synthetic_minus_natural'])
+def test_synthetic_comparison_contract_checks_its_own_fields(field):
+    report=dict(output_root='/saved/synthetic',display='8F comparison',metrics=dict(
+        purpose='external_flores_fleurs_s2ut_synthetic_not_formal_benchmark',condition='synthetic',sample_count=300,
+        bleu=4.0,s2ut_synthetic_bleu=4.0,s2ut_natural_bleu=.5,s2ut_synthetic_minus_natural=3.5,
+        cascade_natural_bleu=21.15,cascade_synthetic_bleu=20.97,cascade_synthetic_minus_natural=20.97-21.15))
+    runtime.validate_result(report,'external_s2ut_synthetic','8F')
+    report['metrics'][field]=None
+    with pytest.raises(RuntimeError,match='Synthetic S2UT comparison'):
+        runtime.validate_result(report,'external_s2ut_synthetic','8F')
+
+
 def test_keyboard_interrupt_stops_only_the_diagnostic_child(monkeypatch):
     class InterruptedOutput(io.StringIO):
         def read(self, *args):

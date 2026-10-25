@@ -391,7 +391,7 @@ def test_existing_notebook_cells_unchanged_and_8d_follows_8c():
         'show', '837f379f2a6f37e4c28f64f685d0a677090de9b4:notebooks/colab_training.ipynb'], encoding='utf-8'))
     new = [c for c in current['cells'] if ''.join(c['source']).startswith('#@title 8D.')]
     assert len(new) == 1
-    assert [c for c in current['cells'] if c not in new and not ''.join(c['source']).startswith('#@title 8E.')] == prior['cells']
+    assert [c for c in current['cells'] if c not in new and not ''.join(c['source']).startswith(('#@title 8E.','#@title 8F.'))] == prior['cells']
     position = current['cells'].index(new[0])
     assert ''.join(current['cells'][position-1]['source']).startswith('#@title 8C.')
     assert ''.join(current['cells'][position+1]['source']).startswith(('#@title 8E.', '#@title 9.'))

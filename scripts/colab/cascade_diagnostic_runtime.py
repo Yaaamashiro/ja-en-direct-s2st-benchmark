@@ -12,6 +12,7 @@ import threading
 import uuid
 
 DIAGNOSTIC_RESULT_CONTRACT_VERSION = 2
+S2UT_SYNTHETIC_RESULT_CONTRACT_VERSION = 1
 
 
 def select_target(mode, benchmark_target):
@@ -162,10 +163,33 @@ def stop_child(process):
             process.wait()
 
 
+def validate_synthetic_result(report,name):
+    metrics=report.get('metrics')
+    valid=(isinstance(report.get('display'),str) and bool(report['display'].strip())
+           and isinstance(report.get('output_root'),str) and bool(report['output_root'].strip())
+           and isinstance(metrics,dict))
+    fields=('bleu','s2ut_natural_bleu','s2ut_synthetic_bleu','s2ut_synthetic_minus_natural',
+            'cascade_natural_bleu','cascade_synthetic_bleu','cascade_synthetic_minus_natural')
+    if valid:
+        valid=(metrics.get('purpose')=='external_flores_fleurs_s2ut_synthetic_not_formal_benchmark'
+               and metrics.get('condition')=='synthetic' and type(metrics.get('sample_count')) is int
+               and metrics['sample_count']>0 and all(type(metrics.get(k)) in (int,float) and math.isfinite(metrics[k]) for k in fields))
+    if valid:
+        valid=(all(0<=metrics[k]<=100+1e-8 for k in ('bleu','s2ut_natural_bleu','s2ut_synthetic_bleu','cascade_natural_bleu','cascade_synthetic_bleu'))
+            and math.isclose(metrics['bleu'],metrics['s2ut_synthetic_bleu'],rel_tol=1e-10,abs_tol=1e-8)
+            and math.isclose(metrics['s2ut_synthetic_minus_natural'],metrics['s2ut_synthetic_bleu']-metrics['s2ut_natural_bleu'],rel_tol=1e-10,abs_tol=1e-8)
+            and math.isclose(metrics['cascade_synthetic_minus_natural'],metrics['cascade_synthetic_bleu']-metrics['cascade_natural_bleu'],rel_tol=1e-10,abs_tol=1e-8))
+    if not valid:raise RuntimeError(name+' helper did not return a valid Synthetic S2UT comparison report')
+
+
 def validate_result(report, result_kind, name):
     """8A rechecks a formal score; 8E produces an independent external score."""
     if not isinstance(report, dict):
         raise RuntimeError(name+' helper did not return a result object')
+    if result_kind=='external_s2ut_synthetic':
+        return validate_synthetic_result(report,name)
+    if result_kind=='external_s2ut_synthetic_inspect':
+        return validate_result(report,'external_s2ut_inspect',name)
     if result_kind == 'saved_formal_all':
         if report.get('all_score_matches_saved') is not True:
             raise RuntimeError(name+' helper did not confirm agreement with the saved formal All score')
@@ -198,7 +222,8 @@ def validate_result(report, result_kind, name):
 def run_json(command, env, *, name='8A', mode='CPU diagnostic', failure_note=None,
              result_kind='saved_formal_all'):
     """Relay stderr through Python so Colab actually displays logs/errors."""
-    if result_kind not in ('saved_formal_all','external_s2ut','external_s2ut_inspect'):
+    if result_kind not in ('saved_formal_all','external_s2ut','external_s2ut_inspect',
+                           'external_s2ut_synthetic','external_s2ut_synthetic_inspect'):
         raise ValueError('unknown diagnostic result contract: '+str(result_kind))
     tail = deque(maxlen=60)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

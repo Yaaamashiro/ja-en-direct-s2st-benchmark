@@ -30,7 +30,7 @@ def wav(path):
     sf.write(path,np.sin(np.arange(1600)/10)*.1,16000,subtype='PCM_16')
 
 
-def source_fixture(tmp_path, n=3):
+def source_fixture(tmp_path, n=3, *, synthetic=False):
     persistent = tmp_path/'drive/experiment'
     samples = [dict(sample_id=f'flores:devtest:{i}',flores_split='devtest',flores_id=str(i),
         fleurs_split='test',fleurs_id=str(i+500),ja_text=f'日本語{i}。',
@@ -48,6 +48,9 @@ def source_fixture(tmp_path, n=3):
                 context=dict(evaluation_asr=diag.ASR),environment=environment,
                 implementation={k:raw_sha(ROOT/'src/direct_s2st'/k) for k in
                     ('cascade/asr.py','cascade/whisper.py','evaluation/transcribe.py','evaluation/bleu.py')})
+    if synthetic:
+        plan['source_proof']=dict(receipt=dict(effective_tts=dict(batch_size=2)),basis='saved generation receipt')
+        plan['implementation']['cascade/flores_fleurs_diagnostic.py']=raw_sha(ROOT/'src/direct_s2st/cascade/flores_fleurs_diagnostic.py')
     root = persistent/'diagnostics/flores-fleurs-cascade'/digest(plan)[:24]
     atomic_write_json(root/'identity.json',plan)
     atomic_write_json(root/'dataset-audit.json',audit)
@@ -64,14 +67,34 @@ def source_fixture(tmp_path, n=3):
                           dict(body=body,sha256=digest(body)))
         rows.append(dict(sample,natural_input_audio_status='success',natural_input_audio_path=str(path),
                          natural_audio_path=str(path),natural_input_audio_sha256=raw_sha(path)))
+    if synthetic:
+        from direct_s2st.cascade.flores_fleurs_diagnostic import source_groups
+        items={}
+        for sample,row in zip(samples,rows):
+            path=root/'synthetic-source'/sample['flores_id']/'source.wav'
+            path.parent.mkdir(parents=True,exist_ok=True)
+            sf.write(path,np.sin(np.arange(2400)/13)*.1,16000,subtype='PCM_16')
+            audio=diag.audio_audit(path)
+            row.update(synthetic_input_audio_status='success',synthetic_input_audio_path=str(path),
+                synthetic_audio_path=str(path),synthetic_source_audio=str(path),synthetic_input_audio_sha256=audio['sha256'])
+            items[sample['sample_id']]=dict(sample_id=sample['sample_id'],status='success',audio=[audio])
+        for group in source_groups(samples,2):
+            key=digest([s['sample_id'] for s in group])
+            request=dict(run=digest(plan),sample_id=key,condition='synthetic',stage='input_audio_group',
+                         inputs=dict(samples=group,source=plan['source_proof'],batch_size=2))
+            body=dict(request=request,status='success',items=[items[s['sample_id']] for s in group],
+                      audio=[w for s in group for w in items[s['sample_id']]['audio']])
+            atomic_write_json(root/'stage-results'/(digest([key,'synthetic','input_audio_group'])+'.json'),
+                              dict(body=body,sha256=digest(body)))
     atomic_write_jsonl(root/'per_sample.jsonl',rows)
     atomic_write_json(root/'metrics.json',dict(purpose=diag.CASCADE_PURPOSE,identity_sha256=digest(plan),
-        metrics=dict(samples=n,natural_final_ASR_BLEU=21.153432814483),per_sample=rows))
+        metrics=dict(samples=n,natural_final_ASR_BLEU=21.153432814483,
+                     **({'synthetic_final_ASR_BLEU':20.9756} if synthetic else {})),per_sample=rows))
     return persistent,root
 
 
-def experiment(tmp_path, n=3):
-    persistent,source = source_fixture(tmp_path,n)
+def experiment(tmp_path, n=3, *, synthetic=False):
+    persistent,source = source_fixture(tmp_path,n,synthetic=synthetic)
     prepared = persistent/'data/s2ut/fairseq'
     prepared.mkdir(parents=True)
     (prepared/'config.yaml').write_text(yaml.safe_dump(dict(input_channels=1,input_feat_per_channel=80,
@@ -370,11 +393,11 @@ def test_incompatible_saved_dependency_is_rejected_before_checkpoint_or_models(t
         launcher.launch(tmp_path/'repo',persistent,tmp_path/'local')
 
 
-def legacy_plan(tmp_path):
+def legacy_plan(tmp_path, *, n=3, synthetic=False):
     """Use the actual released source, not a hand-edited identity fixture."""
     import importlib.util
     from direct_s2st.s2ut import flores_fleurs_resume as repair
-    plan=experiment(tmp_path)
+    plan=experiment(tmp_path,n,synthetic=synthetic)
     root=tmp_path/'legacy'
     files=repair.relative_files(diag.implementation_files())
     for relative in set(files)-{repair.SELF}:
@@ -548,9 +571,10 @@ def test_notebook_all_old_cells_identical_and_one_8e_after_8d():
     prior=json.loads(subprocess.check_output(['git','-c','safe.directory='+str(ROOT),'-C',str(ROOT),
         'show','1a2c552e30834ac7284aa913177f68b166dba678:notebooks/colab_training.ipynb'],encoding='utf-8'))
     added=[c for c in current['cells'] if ''.join(c['source']).startswith('#@title 8E.')]
-    assert len(added)==1 and [c for c in current['cells'] if c not in added]==prior['cells']
+    assert len(added)==1 and [c for c in current['cells'] if c not in added and not ''.join(c['source']).startswith('#@title 8F.')]==prior['cells']
     i=current['cells'].index(added[0]);assert ''.join(current['cells'][i-1]['source']).startswith('#@title 8D.')
-    assert ''.join(current['cells'][i+1]['source']).startswith('#@title 9.')
+    assert ''.join(current['cells'][i+1]['source']).startswith('#@title 8F.')
+    assert ''.join(current['cells'][i+2]['source']).startswith('#@title 9.')
     code=''.join(added[0]['source']);ast.parse(code,feature_version=(3,10))
     assert 'LIMIT' not in code and 'TRAIN_TARGET' not in code and 'RUN_BENCHMARK' not in code
     for cell in current['cells']:
@@ -718,13 +742,19 @@ def test_notebook_uses_real_json_receiver_and_keeps_scientific_checkout(tmp_path
     assert fetched==(['main'] if stale_transport else [])+([] if warm else [revision])
 
 
-def test_scientific_implementation_files_are_byte_equivalent_to_pinned_release():
+def test_scientific_implementation_files_are_byte_equivalent_to_pinned_release(tmp_path):
     from direct_s2st.s2ut.flores_fleurs_resume import relative_files
+    from direct_s2st.s2ut.flores_fleurs_resume import scope_sha
+    from direct_s2st.s2ut.flores_fleurs_synthetic import INFERENCE_SCOPES,INFERENCE_SHA256
     revision='32cc967f01808d5abc82df2d709b5c8262a9e961'
     for relative,(path,_) in relative_files(diag.implementation_files()).items():
         released=subprocess.check_output(['git','-c','safe.directory='+str(ROOT),'-C',str(ROOT),
                                          'show',revision+':'+relative])
-        assert path.read_bytes().replace(b'\r\n',b'\n')==released
+        if relative=='src/direct_s2st/s2ut/flores_fleurs_diagnostic.py':
+            prior=tmp_path/'natural_release.py';prior.write_bytes(released)
+            assert scope_sha(path,INFERENCE_SCOPES)==scope_sha(prior,INFERENCE_SCOPES)==INFERENCE_SHA256
+        elif relative!='src/direct_s2st/s2ut/flores_fleurs_resume.py':
+            assert path.read_bytes().replace(b'\r\n',b'\n')==released
 
 
 def test_saved_dev_best_selection_and_unit_permutation_verification(tmp_path,monkeypatch):
