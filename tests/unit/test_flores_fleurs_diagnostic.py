@@ -309,9 +309,9 @@ def test_new_cell_order_and_all_existing_notebook_cells_are_identical():
         'show','36451d53ad92d1d172fa4c4334dfae3a7966d805:notebooks/colab_training.ipynb'],encoding='utf-8'))
     new=[c for c in b['cells'] if ''.join(c['source']).startswith('#@title 8C.')]
     assert len(new)==1
-    assert [c for c in b['cells'] if c not in new]==previous['cells']
+    assert [c for c in b['cells'] if c not in new and not ''.join(c['source']).startswith('#@title 8D.')]==previous['cells']
     i=b['cells'].index(new[0]);assert ''.join(b['cells'][i-1]['source']).startswith('#@title 8B.')
-    assert ''.join(b['cells'][i+1]['source']).startswith('#@title 9.')
+    assert ''.join(b['cells'][i+1]['source']).startswith(('#@title 8D.', '#@title 9.'))
     code=''.join(new[0]['source']);ast.parse(code,feature_version=(3,10))
     assert code.index('_ff_preflight =')<code.index("_ff_runtime['ensure']")
     assert 'FLORES_FLEURS_LIMIT = 300' in code

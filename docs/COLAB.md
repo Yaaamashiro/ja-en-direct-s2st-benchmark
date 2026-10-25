@@ -1173,3 +1173,40 @@ GPU推論は逐次実行します。性能値は初回1文の簡易測定で、�
 既存の学習snapshot・再開処理、CPU/GPU工程分離、VM消失後の自動構築・環境再利用をCPU/モックでテストします。
 実Colabでの環境構築・GPU学習・Drive切断復帰・実音声4方式E2Eは未検証です。
 Python 3.10/Linux向けの学習＋推論依存解決は確認済みです。
+## Cell 8D: 日英テキスト対の人手盲検監査（CPU）
+
+**セル1 → セル8D**で開始・再開できます。セル2/3/8Cの実行、GPU、Hugging Face認証は不要です。
+セル1は既存の`OUTPUT_BASE`と`EXPERIMENT=experiment-001`を指定し、他の学習設定は変更不要です。
+8DがDrive接続と必要な診断コードの取得だけを行い、学習環境やモデルを構築しません。
+
+Cell 8D is a blinded human audit of JA–EN text-pair quality.
+It performs no model inference and does not alter official benchmark results.
+Do not inspect corpus identity before completing annotation, because doing so
+can bias the manual quality judgment.
+
+`TEXT_AUDIT_PER_STRATUM=100`・`TEXT_AUDIT_SEED=20261025`が既定です。
+実験の`data/common/{train,test}.jsonl`と`dataset-lock.json`からのみ抽出し、
+`train/test × KFTT/JESC`各層100件、通常計400件を混ぜて表示します。
+コーパスは保存済みの明示的なmetadataで確認し、pair IDの接頭辞から推測しません。
+不足した由来を厳密joinで確認できない行は理由付きで除外し、必要populationの由来を証明できなければ停止します。
+
+画面で日本語と英語を読み、5ラベルのいずれかを人手で判定してください。
+任意のflags・confidence・noteはラベルを押す**前**に設定します。
+ラベルボタンは**即保存して次へ**進みます。ラベル選択欄＋`Save & Next`でも保存できます。
+`Previous`で戻った場合だけ既存判定を明示的に修正できます。
+全文判定まではコーパス・split・ID・自動スコア・層別品質率を画面に出しません。
+`Show provenance`はraw/TTS本文だけを表示します。
+
+判定は1件ごとにDriveの`diagnostics/text-pair-audit/<identity>/annotations.jsonl`へatomic保存します。
+切断後も同じ設定で**セル1 → 8D**を再実行すると最初の未判定から再開します。
+入力manifest・本文・抽出数・seed・版が変われば別の監査となり、旧判定は流用しません。
+同じ監査を複数runtimeから同時に操作しないでください。
+
+全件完了後に`report.md`・`summary.json`・`per_stratum.csv`・`per_sample.csv`へ
+層別件数、uncertainを除く品質率、Wilson 95% CI、flags頻度を保存・表示します。
+途中のsummary/reportは判定数・残り件数だけです。盲検を保つため、完了まで内部のidentity/queue/samplingファイルを開かないでください。
+この監査だけでDirect S2ST性能の原因を確定するものではありません。
+
+UIには標準Colabカーネルの`ipywidgets` 7/8とIPythonを使います。
+不足時はDrive出力を作る前に停止し、学習環境へ依存を自動導入しません。
+詳しい分類基準・入力検証・統計・検証記録は[TEXT_PAIR_AUDIT.md](TEXT_PAIR_AUDIT.md)を参照してください。
