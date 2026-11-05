@@ -18,7 +18,9 @@ import zipfile
 
 from .io import atomic_write_json, read_jsonl
 from .journal import digest
-from .progress import operation, track
+from .progress import operation, track, _output_lock
+from .audio_pack_runtime import (DiskBudget, PackProgress, archive_lock, check_stop,
+                                 completed_packs, validate_workers)
 
 
 _maps = {}
@@ -176,12 +178,117 @@ def require_audio_packs(common, persistent, *, splits=('train', 'dev', 'test'),
     return checked
 
 
+def _stage_audio_pack(selected, namespace_root, persistent, input_hash, split, language,
+                      start, pack_files, create, local, stop, budget):
+    from .preparation import file_stamp
+    from .translatotron2.mel_storage import verify_feature
+    archive = audio_archive_path(persistent, input_hash, split, language, start, pack_files)
+    seconds = dict(zip_build=0., originals=0., drive_copy=0., readback=0., reuse_verify=0.)
+    check_stop(stop)
+    with archive_lock(archive):
+        directory = namespace_root / digest(start)[:2]
+        if directory.is_symlink():
+            raise ValueError('audio pack bucket must not be a symlink')
+        directory.mkdir(parents=True, exist_ok=True)
+        expected = {str(row['pair_id']): row[f'{language}_sha256'].lower() for row in selected}
+        if len(expected) != len(selected) or any(len(h) != 64 or any(c not in '0123456789abcdef' for c in h) for h in expected.values()):
+            raise ValueError('audio staging requires unique IDs and manifest SHA256')
+        archive = audio_archive_path(persistent, input_hash, split, language, start, pack_files)
+        receipt = archive.with_suffix('.json')
+        plan = archive.with_suffix('.plan.json')
+        if not create and not receipt.is_file():
+            raise missing_audio_pack(archive)
+        if not receipt.exists() and archive.exists() and plan.is_file():
+            saved = json.loads(plan.read_text(encoding='utf-8'))
+            if saved['sha256'] != digest(saved['body']) or saved['body']['expected'] != expected:
+                raise ValueError('corrupt audio publication plan')
+            verify_feature(archive, saved['body']['archive_sha256'])
+            atomic_write_json(receipt, saved)
+        if receipt.is_file():
+            document = json.loads(receipt.read_text(encoding='utf-8'))
+            body = document['body']
+            if document['sha256'] != digest(body) or body['expected'] != expected:
+                raise ValueError('corrupt/stale audio pack receipt')
+            tick = time.monotonic()
+            verify_feature(archive, body['archive_sha256'])
+            seconds['reuse_verify'] += time.monotonic() - tick
+            built = False
+        else:
+            if not create:
+                raise missing_audio_pack(archive)
+            # An unpublished archive is not trusted and is not replaced.
+            if archive.exists():
+                raise RuntimeError(f'Uncommitted audio pack retained: {archive}; inspect before retrying')
+            amount = sum(Path(read_common_manifest_row(raw, language)[f'{language}_audio']).stat().st_size
+                         for raw in selected) + 1024**2
+            with budget.reserve(amount), tempfile.TemporaryDirectory(prefix='audio-pack-', dir=local) as work:
+                temp_zip = Path(work) / 'audio.zip'
+                entries = {}
+                zip_started = time.monotonic()
+                with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_STORED) as pack:
+                    for raw in selected:
+                        check_stop(stop)
+                        original_started = time.monotonic()
+                        row = read_common_manifest_row(raw, language)
+                        source = Path(row[f'{language}_audio'])
+                        stamp = file_stamp(source)
+                        name = digest([raw['pair_id'], language])[:32] + '.wav'
+                        h = hashlib.sha256()
+                        with source.open('rb') as stream, pack.open(name, 'w') as target:
+                            while block := stream.read(1024**2):
+                                check_stop(stop)
+                                capacity(local, len(block))
+                                target.write(block)
+                                h.update(block)
+                        if h.hexdigest() != expected[str(raw['pair_id'])] or file_stamp(source) != stamp:
+                            raise ValueError(f'audio checksum/stamp mismatch: {raw["pair_id"]}')
+                        entries[name] = dict(source=str(source), stamp=stamp, sha256=h.hexdigest())
+                        seconds['originals'] += time.monotonic() - original_started
+                seconds['zip_build'] += time.monotonic() - zip_started
+                check_stop(stop)
+                checksum = raw_sha(temp_zip)
+                body = dict(expected=expected, entries=entries, archive_sha256=checksum)
+                atomic_write_json(plan, dict(body=body, sha256=digest(body)), resume=True)
+                # Immutable publication: copied bytes are verified before
+                # the final name, then the completion receipt is written.
+                fd, name = tempfile.mkstemp(dir=directory, prefix='.publish-')
+                os.close(fd)
+                pending = Path(name)
+                try:
+                    capacity(directory, temp_zip.stat().st_size)
+                    check_stop(stop)
+                    tick = time.monotonic()
+                    shutil.copyfile(temp_zip, pending)
+                    seconds['drive_copy'] += time.monotonic() - tick
+                    tick = time.monotonic()
+                    copied_hash = raw_sha(pending)
+                    seconds['readback'] += time.monotonic() - tick
+                    if copied_hash != checksum:
+                        raise ValueError('audio pack readback mismatch')
+                    check_stop(stop)
+                    if archive.exists():
+                        raise FileExistsError(archive)
+                    os.replace(pending, archive)
+                finally:
+                    pending.unlink(missing_ok=True)
+            atomic_write_json(receipt, dict(body=body, sha256=digest(body)))
+            built = True
+        names = {digest([raw['pair_id'], language])[:32] + '.wav': expected[str(raw['pair_id'])]
+                 for raw in selected}
+        if (set(body['entries']) != set(names)
+                or any(e['sha256'] != names[name] for name, e in body['entries'].items())):
+            raise ValueError('audio pack entries differ from common manifest')
+        return body, built, archive.stat().st_size, len(selected), seconds
+
+
 @operation('Drive inputs: resumable WAV archive staging')
 def stage_audio(common, persistent, local, *, splits=('train', 'dev', 'test'), languages=('ja', 'en'),
-                pack_files=128, create=True, materialize=True):
-    from .preparation import file_stamp
-    from .translatotron2.mel_storage import guarded_root, verify_feature
+                pack_files=128, create=True, materialize=True, workers=2):
+    from .translatotron2.mel_storage import guarded_root
     common, persistent, local = Path(common), guarded_root(persistent), ensure_local(local)
+    validate_workers(workers)
+    active_workers = workers if create and not materialize else 1
+    budget = DiskBudget(local, capacity)
     if pack_files < 1 or pack_files > 512:
         raise ValueError('audio pack_files must be between 1 and 512')
     if local.is_relative_to(persistent) or persistent.is_relative_to(local):
@@ -190,7 +297,6 @@ def stage_audio(common, persistent, local, *, splits=('train', 'dev', 'test'), l
         require_audio_packs(common, persistent, splits=splits, languages=languages, pack_files=pack_files)
     output = {}
     built = reused = 0
-    last_report = float('-inf')
     for split in splits:
         # Resolve paths only when BUILDING a new shard. Completed shards need no
         # stat/open of their original WAVs, including after a runtime reset.
@@ -201,140 +307,71 @@ def stage_audio(common, persistent, local, *, splits=('train', 'dev', 'test'), l
             namespace_root = persistent / namespace[:2] / namespace
             if namespace_root.is_symlink():
                 raise ValueError('audio pack directory must not be a symlink')
-            for start in track(range(0, len(items), pack_files), f'stage WAV ZIPs: {split}/{language}'):
-                directory = namespace_root / digest(start)[:2]
-                if directory.is_symlink():
-                    raise ValueError('audio pack bucket must not be a symlink')
-                directory.mkdir(parents=True, exist_ok=True)
-                selected = items[start:start + pack_files]
-                expected = {str(row['pair_id']): row[f'{language}_sha256'].lower() for row in selected}
-                if len(expected) != len(selected) or any(len(h) != 64 or any(c not in '0123456789abcdef' for c in h) for h in expected.values()):
-                    raise ValueError('audio staging requires unique IDs and manifest SHA256')
-                archive = audio_archive_path(persistent, input_hash, split, language, start, pack_files)
-                receipt = archive.with_suffix('.json')
-                plan = archive.with_suffix('.plan.json')
-                if not create and not receipt.is_file():
-                    raise missing_audio_pack(archive)
-                if not receipt.exists() and archive.exists() and plan.is_file():
-                    saved = json.loads(plan.read_text(encoding='utf-8'))
-                    if saved['sha256'] != digest(saved['body']) or saved['body']['expected'] != expected:
-                        raise ValueError('corrupt audio publication plan')
-                    verify_feature(archive, saved['body']['archive_sha256'])
-                    atomic_write_json(receipt, saved)
-                if receipt.is_file():
-                    document = json.loads(receipt.read_text(encoding='utf-8'))
-                    body = document['body']
-                    if document['sha256'] != digest(body) or body['expected'] != expected:
-                        raise ValueError('corrupt/stale audio pack receipt')
-                    verify_feature(archive, body['archive_sha256'])
-                    reused += 1
-                else:
-                    if not create:
-                        raise missing_audio_pack(archive)
-                    # An unpublished archive is not trusted and is not replaced.
-                    if archive.exists():
-                        raise RuntimeError(f'Uncommitted audio pack retained: {archive}; inspect before retrying')
-                    with tempfile.TemporaryDirectory(prefix='audio-pack-', dir=local) as work:
-                        temp_zip = Path(work) / 'audio.zip'
-                        entries = {}
-                        with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_STORED) as pack:
-                            for raw in track(selected, 'stage WAVs: read/verify originals'):
-                                row = read_common_manifest_row(raw, language)
-                                source = Path(row[f'{language}_audio'])
-                                stamp = file_stamp(source)
-                                name = digest([raw['pair_id'], language])[:32] + '.wav'
-                                h = hashlib.sha256()
-                                with source.open('rb') as stream, pack.open(name, 'w') as target:
-                                    while block := stream.read(1024**2):
-                                        capacity(local, len(block))
-                                        target.write(block)
-                                        h.update(block)
-                                if h.hexdigest() != expected[str(raw['pair_id'])] or file_stamp(source) != stamp:
-                                    raise ValueError(f'audio checksum/stamp mismatch: {raw["pair_id"]}')
-                                entries[name] = dict(source=str(source), stamp=stamp, sha256=h.hexdigest())
-                        checksum = raw_sha(temp_zip)
-                        body = dict(expected=expected, entries=entries, archive_sha256=checksum)
-                        atomic_write_json(plan, dict(body=body, sha256=digest(body)), resume=True)
-                        # Immutable publication: copied bytes are verified before
-                        # the final name, then the completion receipt is written.
-                        fd, name = tempfile.mkstemp(dir=directory, prefix='.publish-')
-                        os.close(fd)
-                        pending = Path(name)
-                        try:
-                            capacity(directory, temp_zip.stat().st_size)
-                            shutil.copyfile(temp_zip, pending)
-                            if raw_sha(pending) != checksum:
-                                raise ValueError('audio pack readback mismatch')
-                            if archive.exists():
-                                raise FileExistsError(archive)
-                            os.replace(pending, archive)
-                        finally:
-                            pending.unlink(missing_ok=True)
-                    atomic_write_json(receipt, dict(body=body, sha256=digest(body)))
-                    built += 1
-                names = {digest([raw['pair_id'], language])[:32] + '.wav': expected[str(raw['pair_id'])]
-                         for raw in selected}
-                if (set(body['entries']) != set(names)
-                        or any(e['sha256'] != names[name] for name, e in body['entries'].items())):
-                    raise ValueError('audio pack entries differ from common manifest')
-                now = time.monotonic()
-                if now - last_report >= 10 or start + pack_files >= len(items):
-                    print(f'[audio-packs] mode={"CPU publish" if not materialize else "local staging"} '
-                          f'split={split}/{language} zip={start // pack_files + 1}/{(len(items) + pack_files - 1) // pack_files} '
-                          f'audio={min(start + pack_files, len(items))}/{len(items)} '
-                          f'built={built} reused={reused} zip_size_max={pack_files} originals_preserved=true',
-                          file=sys.stderr, flush=True)
-                    last_report = now
-                if not materialize:
-                    # CPU stage keeps only immutable Drive ZIPs, not all WAVs on
-                    # this disposable VM. Switching runtimes cannot lose them.
-                    continue
-                pack_local = local / namespace / f'{start:08d}'
-                pack_local.mkdir(parents=True, exist_ok=True)
-                committed = pack_local / 'complete.json'
-                reusable = False
-                if committed.is_file():
-                    state = json.loads(committed.read_text(encoding='utf-8'))
-                    reusable = state.get('identity') == digest(body) and all(
-                        (pack_local / name).is_file() and raw_sha(pack_local / name) == e['sha256']
-                        for name, e in body['entries'].items())
-                if not reusable:
-                    capacity(local, sum(e['stamp']['size'] for e in body['entries'].values()) * 2)
-                    zipped = pack_local / 'download.zip'
-                    copy_verified(archive, zipped, body['archive_sha256'])
-                    with zipfile.ZipFile(zipped) as pack:
-                        if set(pack.namelist()) != set(body['entries']) or len(pack.namelist()) != len(body['entries']):
-                            raise ValueError('audio pack member mismatch')
-                        for name, entry in body['entries'].items():
-                            if Path(name).name != name or not name.endswith('.wav'):
-                                raise ValueError('unsafe audio pack member')
-                            target = pack_local / name
-                            with pack.open(name) as source, target.open('wb') as out:
-                                shutil.copyfileobj(source, out)
-                            if raw_sha(target) != entry['sha256']:
-                                raise ValueError('unpacked audio checksum mismatch')
-                    atomic_write_json(committed, dict(identity=digest(body)), overwrite=True)
-                    zipped.unlink()  # our verified local download only
-                for name, entry in body['entries'].items():
-                    register(output, entry['source'], pack_local / name, entry['stamp'])
-                corpus = os.environ.get('CORPUS_ROOT')
-                for raw in selected:
-                    name = digest([raw['pair_id'], language])[:32] + '.wav'
-                    entry = body['entries'][name]
-                    # Portable aliases are derived lexically from the accepted
-                    # common row; no access to old/new Drive WAV paths is needed.
-                    aliases = [Path(raw[f'{language}_audio'])]
-                    relative = raw.get(f'{language}_audio_corpus_relative')
-                    if corpus and relative:
-                        if Path(relative).is_absolute() or '..' in Path(relative).parts:
-                            raise ValueError('unsafe corpus-relative audio alias')
-                        aliases.append(Path(corpus).absolute() / relative)
-                    for alias in aliases:
-                        if alias.is_absolute():
-                            stamp = dict(entry['stamp'], path=str(alias))
-                            register(output, alias, pack_local / name, stamp)
-    print(f'[drive-staging] built_zip={built} reused_zip={reused} local_audio={len(output)} '
-          'originals_preserved=true', file=sys.stderr, flush=True)
+            namespace_root.mkdir(parents=True, exist_ok=True)
+            stop = threading.Event()
+            starts = range(0, len(items), pack_files)
+            def process(start):
+                return _stage_audio_pack(items[start:start + pack_files], namespace_root, persistent,
+                                         input_hash, split, language, start, pack_files, create,
+                                         local, stop, budget)
+            with PackProgress(f'{split}/{language}', len(starts), active_workers, len(items)) as reporter:
+                for start, result in completed_packs(starts, process, active_workers, stop, reporter):
+                    body, was_built, _, _, _ = result
+                    built += int(was_built)
+                    reused += int(not was_built)
+                    selected = items[start:start + pack_files]
+                    archive = audio_archive_path(persistent, input_hash, split, language, start, pack_files)
+                    if not materialize:
+                        # CPU stage keeps only immutable Drive ZIPs, not all WAVs on
+                        # this disposable VM. Switching runtimes cannot lose them.
+                        continue
+                    pack_local = local / namespace / f'{start:08d}'
+                    pack_local.mkdir(parents=True, exist_ok=True)
+                    committed = pack_local / 'complete.json'
+                    reusable = False
+                    if committed.is_file():
+                        state = json.loads(committed.read_text(encoding='utf-8'))
+                        reusable = state.get('identity') == digest(body) and all(
+                            (pack_local / name).is_file() and raw_sha(pack_local / name) == e['sha256']
+                            for name, e in body['entries'].items())
+                    if not reusable:
+                        capacity(local, sum(e['stamp']['size'] for e in body['entries'].values()) * 2)
+                        zipped = pack_local / 'download.zip'
+                        copy_verified(archive, zipped, body['archive_sha256'])
+                        with zipfile.ZipFile(zipped) as pack:
+                            if set(pack.namelist()) != set(body['entries']) or len(pack.namelist()) != len(body['entries']):
+                                raise ValueError('audio pack member mismatch')
+                            for name, entry in body['entries'].items():
+                                if Path(name).name != name or not name.endswith('.wav'):
+                                    raise ValueError('unsafe audio pack member')
+                                target = pack_local / name
+                                with pack.open(name) as source, target.open('wb') as out:
+                                    shutil.copyfileobj(source, out)
+                                if raw_sha(target) != entry['sha256']:
+                                    raise ValueError('unpacked audio checksum mismatch')
+                        atomic_write_json(committed, dict(identity=digest(body)), overwrite=True)
+                        zipped.unlink()  # our verified local download only
+                    for name, entry in body['entries'].items():
+                        register(output, entry['source'], pack_local / name, entry['stamp'])
+                    corpus = os.environ.get('CORPUS_ROOT')
+                    for raw in selected:
+                        name = digest([raw['pair_id'], language])[:32] + '.wav'
+                        entry = body['entries'][name]
+                        # Portable aliases are derived lexically from the accepted
+                        # common row; no access to old/new Drive WAV paths is needed.
+                        aliases = [Path(raw[f'{language}_audio'])]
+                        relative = raw.get(f'{language}_audio_corpus_relative')
+                        if corpus and relative:
+                            if Path(relative).is_absolute() or '..' in Path(relative).parts:
+                                raise ValueError('unsafe corpus-relative audio alias')
+                            aliases.append(Path(corpus).absolute() / relative)
+                        for alias in aliases:
+                            if alias.is_absolute():
+                                stamp = dict(entry['stamp'], path=str(alias))
+                                register(output, alias, pack_local / name, stamp)
+    with _output_lock:
+        print(f'[drive-staging] built_zip={built} reused_zip={reused} local_audio={len(output)} '
+              f'temporary_reserved_peak_bytes={budget.peak} originals_preserved=true', file=sys.stderr, flush=True)
     return output
 
 
