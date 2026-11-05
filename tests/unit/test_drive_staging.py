@@ -59,7 +59,7 @@ def test_audio_publication_interruption_adopts_verified_orphan(tmp_path, monkeyp
             raise KeyboardInterrupt()
         return real(path, *args, **kwargs)
     monkeypatch.setattr(stage, 'atomic_write_json', interrupt)
-    options = dict(splits=('train',), languages=('en',))
+    options = dict(splits=('train',), languages=('en',), workers=1)
     with pytest.raises(KeyboardInterrupt):
         stage.stage_audio(common, persistent, local, **options)
     original = next(persistent.rglob('*.zip'))
@@ -142,7 +142,7 @@ def test_interrupted_cpu_zip_publish_resumes_without_rereading_published_sources
                 raise KeyboardInterrupt()  # second ZIP published, receipt not yet.
         return real(path, *args, **kwargs)
     monkeypatch.setattr(stage, 'atomic_write_json', interrupt)
-    options = dict(splits=('train',), languages=('en',), pack_files=1, materialize=False)
+    options = dict(splits=('train',), languages=('en',), pack_files=1, materialize=False, workers=1)
     with pytest.raises(KeyboardInterrupt):
         stage.stage_audio(common, persistent, tmp_path/'cpu-1', **options)
     before = {p: p.read_bytes() for p in persistent.rglob('*.zip')}
