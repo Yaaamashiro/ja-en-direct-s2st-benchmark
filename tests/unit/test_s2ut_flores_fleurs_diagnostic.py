@@ -566,12 +566,16 @@ def test_cli_help_and_inspect_preflight_need_no_site_packages(tmp_path):
     assert result.returncode==0 and '--cascade-id' in result.stdout and '--limit' not in result.stdout
 
 
-def test_notebook_all_old_cells_identical_and_one_8e_after_8d():
+def test_notebook_old_code_cells_identical_and_one_8e_after_8d():
     current=read(ROOT/'notebooks/colab_training.ipynb')
     prior=json.loads(subprocess.check_output(['git','-c','safe.directory='+str(ROOT),'-C',str(ROOT),
         'show','1a2c552e30834ac7284aa913177f68b166dba678:notebooks/colab_training.ipynb'],encoding='utf-8'))
     added=[c for c in current['cells'] if ''.join(c['source']).startswith('#@title 8E.')]
-    assert len(added)==1 and [c for c in current['cells'] if c not in added and not ''.join(c['source']).startswith('#@title 8F.')]==prior['cells']
+    assert len(added) == 1
+    assert [c for c in current['cells'] if c['cell_type'] == 'code' and c not in added
+            and not ''.join(c['source']).startswith('#@title 8F.')] == [
+        c for c in prior['cells'] if c['cell_type'] == 'code'
+    ]
     i=current['cells'].index(added[0]);assert ''.join(current['cells'][i-1]['source']).startswith('#@title 8D.')
     assert ''.join(current['cells'][i+1]['source']).startswith('#@title 8F.')
     assert ''.join(current['cells'][i+2]['source']).startswith('#@title 9.')

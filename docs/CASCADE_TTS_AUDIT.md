@@ -1,117 +1,71 @@
-# Cascade Qwen TTS 設定監査・EOS対策（2026-10-24）
+# Cascade Qwen TTS configuration audit and EOS handling (2026-10-24)
 
-## 判断の前提
+## Decision criteria
 
-公式との差分は「公式値・従来値・理由・妥当性・検証範囲」を確認してから採用する。
-公式値が不明な場合は推測を公式仕様と呼ばない。品質に影響する変更は別評価とし、
-結果がよかった生成だけを選ぶことや、設定の自動フォールバックは行わない。
-この変更はCascade/S2T→TTS共通のQwen adapterが対象。TT2/S2UT本体・学習設定は変更しない。
+Review the official and previous values, rationale, suitability, and verification scope before adopting a deviation. Treat unknown official values as unknown. Changes that can affect quality get a separate evaluation. Evaluate every generation attempt under the configured policy, with no automatic fallback or selection of favorable outputs. This change concerns the Qwen adapter shared by Cascade and S2T→TTS.
 
-Colabの観測では、短い英訳 `The victim"s name is Sebastian Jones.` に対し、
-main talkerのgeneration_stepが7566→7621と進み、8192上限へ近づいていた。
-停止していたのではなく、長すぎる音声コード生成を続けていたことは確認できる。
-これは**まだ最終的なEOS例外の観測ではなく、EOS未生成の原因を断定する証拠でもない**。
-内側の`max_new_tokens=15`は残り15 codebookを出すsubtalkerであり、主系列の長さではない。
+In Colab, the short translation `The victim"s name is Sebastian Jones.` advanced the main talker's generation step from 7566 to 7621, approaching its 8192-token cap. The process was still generating an unusually long audio code sequence. The observation did not capture a final EOS exception or establish why EOS had not appeared. The inner `max_new_tokens=15` applies to the subtalker that generates the remaining 15 codebooks.
 
-## 公式との差分と採否
+## Comparison with official settings
 
-基準は[固定モデルのgeneration_config.json](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/blob/f00cf133b78d3c2c35857faba3b1be9b98c4f971/generation_config.json)、
-[model config](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/blob/f00cf133b78d3c2c35857faba3b1be9b98c4f971/config.json)、
-[codec config](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/blob/f00cf133b78d3c2c35857faba3b1be9b98c4f971/speech_tokenizer/config.json)、
-固定`qwen-tts==0.1.1` wheel内のソース。変更可能なupstream mainだけを互換性の根拠にしない。
+The reference sources are the pinned [generation config](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/blob/f00cf133b78d3c2c35857faba3b1be9b98c4f971/generation_config.json), [model config](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/blob/f00cf133b78d3c2c35857faba3b1be9b98c4f971/config.json), [codec config](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/blob/f00cf133b78d3c2c35857faba3b1be9b98c4f971/speech_tokenizer/config.json), and the source inside the pinned `qwen-tts==0.1.1` wheel. Compatibility checks use immutable sources.
 
-| 設定 | 公式/従来 | 採用する設定 | 理由と妥当性の判断 |
+| Setting | Official and previous values | Adopted value | Rationale and verification scope |
 |---|---|---|---|
-| main/subtalker sampling | 公式は両方True。従来は両方False | 両方True | 従来は決定的評価のためgreedy固定だったが、音声モデルでの適性確認が不足。公式へ戻す。今回のEOS問題を必ず解消するとは未確認。旧WAVとは別評価にする |
-| samplingの他パラメータ | top_k=50、top_p=1、temperature=0.9、repetition_penalty=1.05。subtalkerも50/1/0.9 | 公式と同じ値を明示 | 任意のtemperature/penalty探索による品質変更を避ける。固定artifactと実際のtalker呼出引数の両方を検査 |
-| RNG | 公式モデルの生成設定に文ごとのseed固定はない | base seed=17と正確なMT入力文のSHA256から文ごとに導出 | 再開・順序・試験合成による乱数消費の影響を避ける工学的追加。参照文は使わない。周囲のPython/NumPy/Torch/CUDA RNGは復元。GPU/ライブラリを跨ぐbitwise同一性までは保証しない |
-| max_new_tokens | 公式8192、従来も8192 | 既存の受理上限120秒に対応する1500音声frame＋EOS=1501 | codecの実rateは24000/1920=12.5Hz。「12Hz」という名前から12で計算しない。従来も120秒超WAVは最終的に失敗だったため、その上限を生成前に適用。EOS強制挿入・切り詰めWAVの成功扱いはしない |
-| main生成時間 | 公式に本ベンチマーク用の時間上限なし | 600秒、トークン生成後の協調的チェック | 12秒で55 main tokenという今回の観測なら1500 tokenは約330秒。余裕を持たせた運用上の保護であり、最適値の実測ではない。遅い環境で正当な生成を失敗にし得る差分なのでplanに保存する |
-| dtype | 公式でBF16使用 | BF16を維持 | 今回は変更しない。非対応GPUで黙ってFP16/CPUへ落とさず、ロード前に停止 |
-| attention | 公式例はFlashAttention 2を推奨、従来はSDPA | SDPAを維持 | 追加ビルド依存を避け、既存固定環境の互換性を保つ。FA2とbitwise同一とは主張しない。今回FA2追加による速度・数値変更は行わない |
-| voice/language | CustomVoiceのOno_Annaは日本語話者、英語はサポート言語 | Ono_Anna/Englishを維持 | 話者変更と生成方式変更を同時に行わず、比較条件を保つ。英語のアクセント/音質が最適とは保証しない。これがEOS問題の原因という証拠はない |
-| モデル・SDK | 固定CustomVoice revision、qwen-tts 0.1.1 | 同じSHA/依存を維持 | 別モデルや新版SDKを混ぜない。root・speech_tokenizerを含む完全snapshotをローカルからロード |
+| Main and subtalker sampling | Official: both True. Previous: both False. | Both True | Greedy decoding was chosen for deterministic evaluation without sufficient verification for this speech model. Restoring official sampling requires a separate evaluation from old WAVs. Whether it resolves this EOS issue remains unverified. |
+| Other sampling parameters | top_k=50, top_p=1, temperature=0.9, repetition_penalty=1.05. Subtalker uses 50/1/0.9. | Explicit official values | Avoids a separate temperature or penalty search that could change quality. Checks both the pinned artifacts and actual talker arguments. |
+| RNG | The official generation config has no per-sentence seed. | Derive from base seed 17 and the SHA-256 of the exact MT input text. | Makes resume, ordering, and preflight synthesis independent of random number consumption. References are excluded. Restores surrounding Python, NumPy, Torch, and CUDA RNG state. Bitwise equality across GPUs or libraries is unverified. |
+| max_new_tokens | Official and previous: 8192. | 1500 audio frames plus EOS, for 1501 tokens, to match the existing 120-second acceptance limit. | Codec rate is 24000/1920 = 12.5 Hz. Previously, WAVs over 120 seconds already failed acceptance. Applying the limit before generation avoids excess work. Forced EOS and truncated WAVs do not count as successful. |
+| Main generation time | No official time limit for this benchmark. | 600 seconds, checked cooperatively at token boundaries. | The observed rate of 55 main tokens in 12 seconds would take about 330 seconds for 1500 tokens. The 600-second guard includes slack and may reject valid generations on slow hardware. The plan records it. |
+| Dtype | Official example uses BF16. | BF16 | Stops before model load if the GPU cannot support BF16. |
+| Attention | Official example recommends FlashAttention 2. Previous code uses SDPA. | SDPA | Avoids an additional build dependency and retains compatibility with the pinned environment. Bitwise equality with FA2 is unverified. |
+| Voice and language | CustomVoice's Ono_Anna is a Japanese speaker, and English is supported. | Ono_Anna / English | Holds voice constant when evaluating the generation change. English accent and audio quality are unverified. The observation does not establish a link between voice and the EOS issue. |
+| Model and SDK | Pinned CustomVoice revision and qwen-tts 0.1.1. | Same SHA and dependencies | Loads the complete local snapshot, including the model root and speech_tokenizer. |
 
-公式へ戻すsamplingと、独自の安全上限・seed固定は区別する。
-このpolicyを「公式設定と完全同一」「EOS問題を実機で解消済み」とは呼ばない。
-[upstream issue #341](https://github.com/QwenLM/Qwen3-TTS/issues/341)にもgreedyの退化報告があるが、
-別モデル種別/環境の報告であり、今回の原因の証明には使わない。
+Sampling follows the official configuration. The time and token limits and fixed seeds are benchmark-specific controls. Actual GPU tests are needed to confirm the EOS behavior. [Upstream issue #341](https://github.com/QwenLM/Qwen3-TTS/issues/341) reports greedy degeneration for a different model type and environment.
 
-## 実装上の確認事項
+## Implementation checks
 
-`qwen-tts==0.1.1`は公開SDKから受けた任意のkwargsを、そのままmain talkerへ転送しない。
-単に`stopping_criteria`を公開APIへ渡す対策では監視が動かない。
-adapterの呼出中だけ、**そのインスタンスのmain talker.generate**にobserverを接続する。
-SDK全体の書き換えやsubtalkerへの誤接続はしない。
+`qwen-tts==0.1.1` does not forward arbitrary public SDK kwargs to the main talker. Passing `stopping_criteria` to the public API therefore does not install the observer. The adapter attaches the observer to the instance's main `talker.generate` only for the duration of the call.
 
-- audio EOSは固定model configの2150。text EOS 151673と混同しない。
-- 実際に渡されたsampling引数・上限・audio EOSを検査する。
-- Hugging Face本来のEOS停止判定を維持し、実トークン数とno_advanceをstderrへ表示。
-  `checked=N/1501`の分母は生成予定量ではなく安全上限。EOSが出れば1501未満でも正常終了し、残りtoken数やETAの予測には使わない。
-- 戻り系列末尾のaudio EOSを**codec decode前**に確認。未確認ならdecode/成功WAV保存をしない。
-- 上限到達・EOS未確認は個別失敗。CUDA/依存/API契約不一致は全体停止。
-- main token数、seed、policy、EOS有無、停止理由、生成秒数を`tts_generation`へ記録。
-- 成功済みWAVの再利用でも、SHA/形式だけでなく同じpolicy/入力seed/EOS記録を要求する。
-- 例外・KeyboardInterruptでもインスタンスのgenerate、RNG、adapter lockを復元する。
+- The pinned model's audio EOS is 2150. Its text EOS is 151673.
+- Verify the actual sampling arguments, token limit, and audio EOS.
+- Retain Hugging Face EOS stopping and log the actual token count and `no_advance` to stderr. In `checked=N/1501`, 1501 is a safety cap. Valid EOS can arrive sooner. The denominator does not provide an ETA or remaining token estimate.
+- Check audio EOS at the end of the returned sequence before codec decode. Decode and save a successful WAV only when verified.
+- Hitting the cap or missing EOS is a sample-level failure. CUDA, dependency, or API contract failures stop the run.
+- Record main token count, seed, policy, EOS status, stop reason, and duration in `tts_generation`.
+- Before reusing successful WAVs, verify SHA, format, policy, input seed, and the EOS record.
+- Restore the instance's generate method, RNG state, and adapter lock on exceptions and KeyboardInterrupt.
 
-時間保護は**hard timeoutではない**。CUDA kernelが返らない場合や最初のtoken前、
-codec decode中は即時割込みできない。kernelが戻った後のmain token境界で検査する。
-正常EOSが出て終了した場合は、それ以前に時間上限を超えていてもEOS成功を優先する。
-OS子プロセスの強制killと復旧は今回追加していない。
+The time guard is cooperative. A blocked CUDA kernel, work before the first token, and codec decode cannot be interrupted immediately. The check runs at main token boundaries after the kernel returns. If generation returns a valid EOS, that success takes precedence over the time cap. The guard does not kill or recover OS child processes.
 
-## 旧評価を保持する通常セルの流れ
+## Standard cells for a separate evaluation
 
-ユーザーの「公式設定で別評価を作る」承認に基づく。
+The user approved creating a separate evaluation with official sampling settings.
 
-1. 対応コードを取得した通常セル1→6で、新policyを含む別の評価ID/planを作る。
-2. 完了済みASR/MTのplan・pointer・runtime SHAを新planの`text_source`に固定する。
-   同じtest ID、manifest、ASR/MTモデル条件であることを確認する。
-3. セル7では旧ZIP/journal/入力対応/依存環境を読み取り専用で検証し、Whisper/NLLBはロードしない。
-   欠落・破損・依存不一致なら停止し、旧textを自動再生成しない。
-4. 固定非参照文で試験合成後、新しいTTSを全件生成する。旧WAVは再利用しない。
-5. セル8で新WAVを評価、セル9で試聴。失敗を空仮説として全test件数を母数に含める従来BLEU定義は維持。
+1. Run standard Cells 1 → 6 with the updated code to create a new evaluation ID and plan that include the policy.
+2. Pin the completed ASR/MT plan, pointers, and runtime SHA in the new plan's `text_source`. Check matching test IDs, manifest, and ASR/MT model settings.
+3. In Cell 7, verify old ZIPs, journals, input associations, and dependencies in read-only mode. Stop on missing, corrupted, or incompatible inputs. Whisper and NLLB are not loaded to regenerate the old text.
+4. Run preflight synthesis on a fixed non-reference sentence, then generate the full TTS set using the new policy.
+5. Evaluate the new WAVs in Cell 8 and listen in Cell 9. The existing BLEU definition counts failed samples as empty hypotheses across the full test set.
 
-旧plan・ASR/MT・runtime・WAV・レポートは元フォルダに残る。
-`latest.json`だけは新評価を指すよう更新し、直前のpointer bytesを新評価の`previous-latest.json`へ保存する。
-途中再開は同じ新policyのセル1→必要なら6→7→8。新評価内の成功WAVのみ再利用する。
-失敗行は通常の再実行時に再試行するが、sampling条件を自動変更したり、成功候補を選別したりしない。
+The original folders retain the old plan, ASR/MT data, runtime, WAVs, and report. `latest.json` points to the new evaluation and its previous bytes are saved to the new evaluation's `previous-latest.json`. To resume, use Cells 1 → 6 if needed → 7 → 8 with the same new policy. Only successful WAVs from that evaluation are reused. A standard rerun retries failed rows under the same sampling settings.
 
-新policyへ旧greedy WAVを取り込むため、旧loader-only overlayの安全ガードを緩めることは禁止。
-元のeditable依存build位置も維持する。旧build復元の明示allowlistは従来の
-`f9f1520047bca2c0e977b581cab70168892091e2`のまま。
-別の未知revisionの依存環境を再利用する場合は自動許可せず、追加レビューが必要。
-依存のreceiptやplanを書き換えて検査を回避しない。
+The old loader-only overlay must still reject importing greedy WAVs into the new policy. Retain the original editable dependency build location. The explicit allowlist for restoring the old build contains `f9f1520047bca2c0e977b581cab70168892091e2`. Reusing an unrecognized dependency revision requires review. Do not edit dependency receipts or plans to bypass validation.
 
-## 再開・表示の追加修正
+## Resume and display fixes
 
-- グループ進捗にASR文字列を含む巨大なtupleを表示せず、part IDだけを表示する。
-  同じASR文がログに出続けること自体はASR再実行/停止の証拠ではない。
-- Driveへ公開済みpartと、その後のローカル再試行journalを照合して復元する。
-  旧成功行/WAVは不変。旧失敗行の新結果と追加ローカル成功だけを保持する。
-- 先頭partを再開しただけで、すでに保存済みの後続partをaudio-indexから消さない。
-- 32件単位ZIPを維持。VM消失時は未公開の最後の最大31件が再生成され得る。
+- Group progress displays part IDs and omits the large tuple that contained ASR text. Repeated ASR text alone does not establish that ASR reran or that the process stalled.
+- Restore by reconciling published Drive parts with the local retry journal. Preserve old successful rows and WAVs, plus newer results for previously failed rows and new local successes.
+- Resuming the first part retains later published parts in the audio index.
+- ZIPs still contain 32 items per part. Losing the VM can require regenerating up to 31 unpublished items in the last part.
 
-## 検証と未確認の境界
+## Verification and limitations
 
-追加CPUテストは、実Transformersの小型モデルによるEOS/StoppingCriteria動作、
-固定SDK wheelのkwargs転送構造、EOSなし/最終tokenのEOS/時間保護/不正引数、
-RNGと例外復元、PCM変換前の異常検出、公式artifact契約、旧評価のbytes/mtime不変、
-ASR/MT破損時のfail-closed、ZIP復元、再試行中断、index非縮小、通常セル分岐を含む。
-小型モデルとSDK境界のdoubleを使ったテストは、本物のQwen推論を意味しない。
+CPU coverage includes EOS and StoppingCriteria with a small real Transformers model, pinned SDK keyword forwarding, missing EOS, EOS on the last token, the time guard, invalid arguments, RNG and exception recovery, validation before PCM conversion, official artifact contracts, old evaluation bytes and modification times, stopping on corrupt ASR/MT, ZIP recovery, interrupted retries, index preservation, and standard notebook branches. These tests use a small model and SDK boundary doubles.
 
-実GPUテストは`tests/gpu/test_cascade_qwen_preflight.py`へ分離。
-`S2ST_RUN_QWEN_GPU_TEST=1`で固定L4/重みのEOS付き試験合成、
-`S2ST_RUN_QWEN_AB_TEST=1`で非参照の固定3文についてbounded greedy/sampling診断を行う。
-A/Bは両条件を同じseed・20秒相当token/180秒協調時間上限で実行し、成功・失敗を両方記録する。
-短い診断budgetで失敗しても正式120秒budgetで失敗するとは限らない。
-診断の旧greedy設定はテスト内だけで使用し、正式policy/評価には混ぜない。
+Real GPU tests are in `tests/gpu/test_cascade_qwen_preflight.py`. Use `S2ST_RUN_QWEN_GPU_TEST=1` for preflight synthesis with EOS using the pinned L4 and weights. Use `S2ST_RUN_QWEN_AB_TEST=1` for bounded greedy and sampling on three fixed non-reference sentences. Both conditions use the same seed, a 20-second-equivalent token budget, and a 180-second cooperative time budget. Both successes and failures are recorded. A short-budget failure can still succeed with the formal 120-second audio budget. The old greedy diagnostic is test-only.
 
-今回、実Colabの操作・CU消費・Qwen実重みのGPU試験は行っていない。
-実機の長時間生成/音質改善は別途確認が必要。依存追加・pip更新・CUDA/attention実装切替はしていない。
-固定SDK wheelソースと、実Transformers 4.57.3のgeneration APIを検査し、
-workerは固定依存環境receiptとの一致を引き続き要求する。
+Colab, compute units, and GPU inference with real Qwen weights were not used. Long generations and audio quality need hardware verification. Dependencies, pip, CUDA, and the attention backend were retained. The pinned SDK source and actual Transformers 4.57.3 generation API were checked. The worker continues to require the pinned dependency receipt.
 
-最終CPU検証: `pytest -q -m 'not gpu'`で **749 passed / 2 skipped / 7 deselected**。
-Python 3.13/CPU上での結果で、7件のGPUテストは実行していない。
-Swig/weight_normの既存非推奨警告6件、失敗0件。`git diff --check`も成功。
-この結果はColab Python 3.10/L4での実重みE2E確認の代わりにはならない。
+The final CPU run used `pytest -q -m 'not gpu'` on Python 3.13 and reported **749 passed, 2 skipped, and 7 deselected**. There were six existing Swig and weight_norm deprecation warnings and zero failures. `git diff --check` passed. Real-weight end-to-end verification on Colab Python 3.10 and L4 remains pending.

@@ -1,56 +1,38 @@
-# Colab中断・再開の範囲
+# Colab interruption and resume
 
-同じ実験名、同じ出力先、同じコードrevision・設定でセル1を実行し、
-止まった工程のセルを再実行します。ローカル環境が消えていればセル3相当が自動実行されます。
-`RECHECK_AUDIO=False`、上書きはOFFのままにしてください。
-「再開」は最後に永続保存された単位からの再実行であり、メモリ上の処理位置の復元ではありません。
+Run Cell 1 with the same experiment name, output path, code revision, and settings, then rerun the interrupted stage. A missing local environment triggers the equivalent of Cell 3 automatically. Keep `RECHECK_AUDIO=False` and overwrite disabled. Resume replays work from the last durable unit of progress. In-memory state is lost.
 
-## 工程別の確認結果
+## Recovery by stage
 
-| 工程 | 保存・再利用する単位 | 中断時に再実行する範囲 |
+| Stage | Saved and reusable unit | Work repeated after interruption |
 |---|---|---|
-| セル1〜3・ランタイム構築 | 保存済みrevision/環境lock、構築済みコンポーネント | 新VMではPython環境やライブラリの構築が必要。ビルド途中の命令は再実行 |
-| 4A・コーパス取込 | 音声パス解決、WAV/SHA256検証をレコード単位で記録 | 未保存レコード。マニフェスト読込み・メタデータ確認は必要 |
-| 4A・音素化 | サンプル単位の音素列 | 未保存サンプル。最終TSV/inventoryは保存結果から再構成 |
-| 4A・Mel準備 | 入力WAVヘッダ、生成済み分散NPY、分割ZIP | 未保存NPYと作成途中のZIP。NPYは256フォルダへ分散、新規ZIPは原則512件または256MiBで分割（単一の巨大NPYは例外） |
-| 4A・最終検証 | サンプル単位の検証成功記録 | 未保存サンプル。最終fingerprintのファイルハッシュ処理は再実行 |
-| 4A.5・CPU音声ZIP準備（通常用） | 128本単位の不変ZIPと完了記録（英語・日本語、全split） | 未公開ZIP。切断後も同じCPUセルで再開。原本WAV・完了ZIPを上書きせず、全音声のローカル展開はしない |
-| 4B・HuBERT | 抽出済みUnitとサンプル単位の記録 | 未保存サンプル/バッチ。モデル読込みは再実行 |
-| 4B・学習データ準備 | サンプル単位のUnit読込み・WAVヘッダ結果、最終TSV/辞書 | 未保存サンプル。テキストラベル作成・TSV整合性確認は再走査 |
-| 5・学習（TT2/S2UT/vocoder） | 確認済みの学習checkpoint/snapshot | 最後の永続保存後の更新。初回保存前なら最初から。ローカル読込みキャッシュは新VMで再構築 |
-| 5・TT2入力の並行取得 | 各WAV/Mel ZIPのローカル検証済み完了記録 | 同じVMでは完了ZIPを再利用。新VMでは復元updateから必要なZIPを取得して学習と先読みを並行。途中コピーは公開しない |
-| 学習成果の復元・モデル取得 | 完成した成果物・ファイルのハッシュ確認 | コピー/ダウンロード途中のファイルは再取得する場合あり。バイト位置からの再開は保証しない |
-| 推論（TT2/Cascade/S2T）・音声合成 | 成功したサンプルと結果journal | 未保存・失敗サンプル。モデル読込み・入力ハッシュ確認は再実行 |
-| S2UT推論 | fairseq生成を約32サンプルずつのシャードに分け、成功シャードを保存 | 実行途中のシャード。各シャードでモデルを読み直すため、その分のオーバーヘッドあり |
-| 評価 | サンプル単位の評価journal | 未保存・失敗サンプル。有効な追加指標が失敗したサンプルも再試行（そのサンプルのASRを含む） |
-| 完了判定・集計 | WAV検証成功記録、同一内容のCSV/JSON/Markdown | 未検証WAV。整合性・学習checkpoint確認と集計計算は再実行。途中まで書かれた同一内容の出力は再利用 |
+| Cells 1–3, runtime setup | Saved revision, environment lock, built components | A fresh VM rebuilds Python and dependencies. Interrupted build commands rerun. |
+| 4A, corpus import | Per-record audio resolution and WAV/SHA-256 verification | Unsaved records, manifest loading, and metadata checks |
+| 4A, phonemes | Per-sample phoneme sequence | Unsaved samples. Rebuild final TSVs and inventory from saved results. |
+| 4A, mel preparation | Input WAV headers, distributed NPYs, split ZIPs | Unsaved NPYs and incomplete ZIPs. NPYs use 256 folders. New ZIPs normally split at 512 items or 256 MiB, with a large-single-NPY exception. |
+| 4A, final verification | Per-sample successful verification | Unsaved samples and file hashing for the final fingerprint |
+| 4A.5, CPU audio ZIP preparation (standard notebook) | Immutable 128-WAV ZIPs and receipts for both languages and all splits | Unpublished ZIPs. Rerun the same CPU cell. Originals and completed ZIPs are preserved, and full local extraction is unnecessary. |
+| 4B, HuBERT | Extracted units and per-sample records | Unsaved samples or batches and model loading |
+| 4B, training data preparation | Per-sample unit reads and WAV headers, final TSVs and dictionaries | Unsaved samples, text-label creation, and TSV consistency scans |
+| 5, TT2/S2UT/vocoder training | Verified checkpoints and snapshots | Updates since the latest durable save. Before the first save, restart from the beginning. Rebuild local read cache on a fresh VM. |
+| 5, concurrent TT2 input retrieval | Local verified receipt for each WAV/mel ZIP | Reuse completed ZIPs on the same VM. A fresh VM fetches inputs from the restored update and prefetches during training. Partial copies remain unpublished. |
+| Training artifact restore and model retrieval | Complete artifacts and file hash checks | Interrupted copies or downloads may restart at the file boundary. |
+| TT2/Cascade/S2T inference and synthesis | Successful samples and result journal | Unsaved and failed samples, model loading, and input hashing |
+| S2UT inference | Successful fairseq shards of about 32 samples | Interrupted shard. Each shard reloads the model. |
+| Evaluation | Per-sample evaluation journal | Unsaved and failed samples. A failure in an enabled additional metric also retries that sample, including ASR. |
+| Acceptance and aggregation | Successful WAV verification records and identical CSV/JSON/Markdown output | Unverified WAVs, consistency and training checkpoint checks, and aggregation. Reuse partially published identical output. |
 
-サンプルcheckpointは通常64件または記録時点で約10秒経過するごとにまとめて保存します。
-強制終了では未公開分が失われます。正常な例外終了では残りを保存します。
-ZIPとS2UT生成は成功したシャードごとに記録します。
-学習は設定された更新間隔で保存されます。`durable_updates`が復旧基準です。
-Driveマウントでの書込み/読戻し確認は行いますが、Google Driveサーバー側同期の完了は保証できません。
+Sample checkpoints normally publish in groups of 64 or after about 10 seconds at the next record. Forced termination loses unpublished work. Graceful exception handling saves remaining records. ZIPs and S2UT generation save by successful shard. Training follows its configured interval. `durable_updates` is the recovery point. Drive mount writes are read back for verification. Server-side Drive synchronization is outside this guarantee.
 
-## 学習開始済み48fcdb7からTT2の並行取得・時間制限なしを使う場合
+## Concurrent retrieval and no time limit for TT2 started on 48fcdb7
 
-`scripts/colab/resume_streaming_training.py`は、元の固定revisionと依存環境を保持し、
-実行処理だけを別のクリーンGit worktreeから読み込む明示的なoverlay方式です。
-既存runのconfig・snapshot・環境lock・学習条件は書き換えません。
-元revisionと実行コードrevision、環境/config SHA256を
-`PERSISTENT/execution-overlays/<revision>.json`へ記録し、trainerのresearch metadataにも
-実行コードrevisionを記録します。学習対象の選択・optimizer・モデル・論文設定は変更しません。
+`scripts/colab/resume_streaming_training.py` explicitly loads execution code from a separate clean Git worktree and retains the original pinned revision and dependencies. The saved config, snapshots, environment lock, and training conditions are preserved. `PERSISTENT/execution-overlays/<revision>.json` records the original and execution revisions and environment/config SHA-256 values. Trainer research metadata also records the execution revision. Training target, optimizer, model, and paper settings remain tied to the run.
 
-対象の基底revisionは`48fcdb7eb023cf35860fe63716dd7dacdd277be5`に限定します。
-このrevisionから変更されたsrcが許可済みの実行/入力処理以外を含む場合、
-configs・requirements・fairseq・モデル等が変わった場合は停止します。
-同じ実験名・保存先でセル1→2→3を実行して**元revisionを取得・構築した後**、
-修正commitからこのスクリプトだけを一時取得し、明示的な`--overlay-revision`で実行します。
-通常のセル5でconfigを作り直さず、保存済みconfigを直接使います。新しい実験名への変更は不要です。
-切断後は同じ手順を繰り返します。新VMではoverlayも再取得します。
+The supported base is `48fcdb7eb023cf35860fe63716dd7dacdd277be5`. Stop on changed source outside approved execution/input code or changed configs, requirements, fairseq, or models. Run Cells 1 → 2 → 3 with the same experiment and destination to fetch and build the original revision. Then fetch this helper from the published fix and pass an explicit `--overlay-revision`. The helper uses the saved config directly. Repeat after disconnection, including retrieving the overlay on a fresh VM.
 
 ```python
-# 修正commitの完全SHAを指定。元REPOをcheckoutし直さない。
-REVISION = '<この修正を含む公開済みcommitの完全SHA>'
+# Supply the full SHA of the fix. Keep the original REPO checkout.
+REVISION = '<full SHA of the published commit containing the fix>'
 run('git', '-C', REPO, 'fetch', 'origin', REVISION)
 helper = Path('/content/resume_streaming_training.py')
 helper.write_text(subprocess.check_output(
@@ -66,98 +48,46 @@ run(sys.executable, helper, '--repo', REPO, '--persistent', PERSISTENT,
     '--overlay-revision', REVISION, '--total-updates', str(TOTAL_UPDATES), *options)
 ```
 
-実行は`--resume`（0からの自動開始は禁止）、`--session-seconds 0`、並行取得ONです。
-snapshot本体・各入力の既存検証と再開チェックは迂回しません。
-依存環境を構築し直した結果、そのSHA256が既存snapshotと異なる場合も停止します。
-この場合、環境lockを編集して一致させたりcheckpointを消したりせず、ログを確認してください。
-実Colab/GPUのoverlay実行とDrive速度は未検証です。
+Execution uses `--resume`, `--session-seconds 0`, and concurrent retrieval. It verifies snapshots, inputs, and resume state and stops on a rebuilt environment SHA mismatch. Inspect the log and preserve the environment lock and checkpoint. Real Colab/GPU overlay execution and Drive speed remain unverified.
 
-### 既存TT2学習へ監視を明示的に追加
+### Add monitoring explicitly to existing TT2 training
 
-上記overlayをこの機能を含むcommitへ更新し、実際の保存済みrun名を使う。
-`-probe-fix-v1`付きで学習した場合は`RUN_NAME = training_run_name('tt2') + '-probe-fix-v1'`。
-helperの引数へ`--monitor`を追加する（既定は評価10更新間隔、patience10、相対改善0.001）。
-旧config/snapshot identityとoptimizer条件は保持し、監視の採用をoverlay auditと新checkpointに記録する。
-監視counterと最良checkpointのSHA256はcheckpoint内でも保持し、将来の再開は保存済みpolicyを継承する。
-history/CSV/SVG/最良checkpointも不変snapshotに同梱される。
-終了済みの監視checkpointを再開すると更新せず`EARLY_STOPPED`を返す。
-履歴は有効化後からの記録で、warmupの終了前は停止判定を進めない。
-TOTAL_UPDATESをwarmup以下のままにした場合、早期終了は上限より前に働かない。
-この停止規則は全devのteacher-forced lossに基づく独自方針であり、論文のdev BLEU選択とは区別する。
+Use an overlay commit containing monitoring and the actual saved run name. For a run with the `-probe-fix-v1` suffix, set `RUN_NAME = training_run_name('tt2') + '-probe-fix-v1'`. Add `--monitor` to the helper. Its defaults are evaluation every 10 updates, patience 10, and relative improvement 0.001. The existing config/snapshot identity and optimizer settings are retained. Record adoption in the overlay audit and new checkpoint. The checkpoint stores the counter and best-checkpoint SHA-256. Immutable snapshots also include history, CSV, SVG, and the best checkpoint. Resume inherits the saved policy. An already stopped checkpoint returns `EARLY_STOPPED` without updates. History starts at adoption and stopping starts after warmup. If TOTAL_UPDATES is at or below warmup, the cap arrives first. This policy uses full-dev teacher-forced loss. The paper selects by dev BLEU.
 
-### 85更新などからウォームアップを通算1,000更新に短縮
+### Shorten warmup to 1,000 absolute updates from a checkpoint such as update 85
 
-まだ監視を採用していない既存TT2 checkpointの場合、上記helperへ
-`--monitor --monitor-interval 10 --practical-warmup-updates 1000`を追加する。
-同じconfig、work-root、backup-rootと実際のrun名（`-probe-fix-v1`付き）を使う。
-最新の検証済みsnapshotからモデル・Adam・更新数・RNGを復元し、次の更新から
-`base_lr * min(absolute_update / 1000, sqrt(1000 / absolute_update))`を適用する。
-1,000までは線形増加、その後は逆平方根で減衰する。85で復元すれば次は86であり、
-学習率は旧10,000設定での86更新目の10倍になる。データの再準備・再学習は不要。
-旧configとfingerprintは出発点の証跡として保持し、実際の変更は`paper_practical`として
-overlay audit、research metadata、last/best checkpointの`schedule_transition`に記録する。
-これは最初から1,000 warmupで学習した実験とは異なる。
-以後はcheckpointから短縮設定を継承する。旧コードでは再開せず、この変更以降のoverlayを使う。
-再変更、1,000以降の初回採用、既存監視履歴のリセットは拒否する。
-早期終了は通算1,000更新を超えてから判定する。上限10,000は維持できる。
+For an existing TT2 checkpoint without monitoring, add `--monitor --monitor-interval 10 --practical-warmup-updates 1000` to the helper. Use the same config, work root, backup root, and actual run name including `-probe-fix-v1`. Restore the model, Adam, update count, and RNG from the latest verified snapshot. Starting with the next update, apply `base_lr * min(absolute_update / 1000, sqrt(1000 / absolute_update))`. LR rises linearly through 1000 and then decays by inverse square root. Restoring 85 makes 86 next, with 10 times the LR of update 86 under the old 10,000-step schedule. Reuse prepared data and learned state.
 
-## 通常セル5からの再開（追加セルの代替）
+Keep the original config and fingerprint as provenance. Record the `paper_practical` change in the overlay audit, research metadata, and `schedule_transition` in last/best checkpoints. The change applies prospectively. Resume inherits the shortened schedule using this or a later compatible overlay. The helper rejects repeated changes, first adoption after 1000, and reset of existing monitor history. Early stopping starts after absolute update 1000. The 10,000 cap can be retained.
 
-現行ノートブックのセル5は`training_session.py`で保存済みrunを探し、対応するコードと
-依存環境を復元してから`--resume`を実行する。旧TT2のprobe-fix-v1も対象。
-環境の全依存版はDriveへ保存し、ない旧runは成功ログの候補を実測ハッシュで確認する。
-環境やrunが曖昧な場合は保存データを保持して停止する。詳細はCOLAB.mdの「セル5の統合再開」参照。
-上記の手動overlayセルは過去の復旧手順として残すが、統合再開の使用時には追加実行しない。
+## Resume through standard Cell 5
 
-## 4A・4Bを完了後に再実行した場合
+The current notebook uses `training_session.py` in Cell 5 to find a saved run, restore compatible code and dependencies, and run `--resume`. This includes old TT2 probe-fix-v1 runs. All dependency versions are stored on Drive. For older runs without a manifest, check candidates from successful logs against measured environment hashes. Stop and retain data if the environment or run is ambiguous. See "Integrated resume in Cell 5" in COLAB.md. The manual overlay cells above document historical recovery. Standard Cell 5 handles the integrated flow.
 
-S2UTの監視は`S2ST_S2UT_MONITOR_POLICY`で明示的に有効化する（通常はノートブックが設定）。
-400 warmupで新規開始したS2UT runは同じ学習名・configで再開し、last checkpoint内の
-`extra_state.s2st_monitor`から履歴と停止counterを復元する。最良モデルも同じsnapshotから戻す。
-policy v2はUnit/合計lossの両counterと基準を保存し、同条件の再開ではリセットしない。
-同じ実行コードがv2に対応している場合のみ、同じ評価間隔のままv2を明示要求すると
-旧履歴・bestの検証後に監査付きで将来の停止条件を変更できる。過去を遡って停止しない。
-評価間隔変更、旧policy v1の変更、終了済みrunの停止解除、best欠損・破損は拒否する。
-既存S2UT runのwarmup変更は構築前に拒否する。1000/10000で開始したrunは元の設定で再開する。
-監視を有効化済みならpolicyを省いた再開でも保存済みpolicyを継承する。
-TT2専用の`resume_streaming_training.py`はS2UTへの移行には使わない。
+## Rerun completed 4A and 4B
 
-ノートブックは`direct_s2st.preparation_workflow`を呼び、正常終了した個々の工程を
-`data/.prep-checkpoints/stages/`に記録します。
-revision、設定内容、入力/出力のファイル一覧・サイズ・更新時刻が一致すれば重い処理を省略し、
-`[preparation-stage] ... status=reused`を表示します。
-ファイル数の多いDriveでは、このメタデータ確認にも時間がかかります。即時終了の保証ではありません。
-途中までの場合は、その工程内のサンプルcheckpointから再開します。
+Enable S2UT monitoring explicitly via `S2ST_S2UT_MONITOR_POLICY`. The notebook normally sets it. Resume a run started with warmup 400 using the same name and config. The last checkpoint's `extra_state.s2st_monitor` restores history and counter, with the best model from the same snapshot. V2 retains both unit and total loss counters and anchors. A v2-capable execution revision can explicitly request v2 at the same evaluation interval. Verify earlier history and best checkpoint and audit the future-only policy change. Reject changes to the interval or legacy v1 policy, clearing of a stopped run, and missing or corrupt best checkpoints. Reject warmup changes before setup. Resume runs started with 1000 or 10000 under their original settings. Once enabled, saved monitoring applies even if the resume flag is omitted. `resume_streaming_training.py` is TT2-specific.
 
-コーパスは公開済みの不変データであることが前提です。高速な再利用判定では毎回全WAVをハッシュしません。
-同じサイズ・更新時刻を維持したまま内容を変更すると検出できないため、原本は編集しないでください。
-音声を再検証する場合は`RECHECK_AUDIO=True`を指定します。工程完了記録を迂回し、WAV検証をやり直します。
-音素・HuBERT・Melの抽出結果まで無条件に全再生成するオプションではありません。
-checkpointや完了記録の破損、設定不一致は黙って無視せず停止します。
+The notebook calls `direct_s2st.preparation_workflow` and records completed stages in `data/.prep-checkpoints/stages/`. If revision, settings, and input/output file lists, sizes, and modification times match, it skips expensive work and prints `[preparation-stage] ... status=reused`. Metadata checks can still take time on Drive. Interrupted stages continue from their saved sample checkpoints.
 
-## 既存の成果物について
+This fast reuse check assumes an immutable published corpus. Content changes that retain size and mtime can go undetected. Keep originals read-only. Set `RECHECK_AUDIO=True` to bypass stage receipts and revalidate WAVs. Compatible phoneme, HuBERT, and mel outputs can still be reused. Corruption and settings mismatches stop the run.
 
-- 旧形式の単一Mel ZIPは再分割せず、既存の参照位置とlock形式を維持します。ZIP索引の検証にも途中保存を使います。
-- 新しい工程完了記録がない旧データでは、最初の1回は工程の確認が必要です。既存の互換checkpointは再利用します。
-- 旧版が保存していなかった進捗は、今回の修正でさかのぼって復元できません。
-- 実行中のColabに修正は自動反映されません。セル1は保存済みrevisionを使うため、リモート更新だけでも反映されません。
-  既存実験のrevision/lockを手動で上書きせず、旧成果物を保持した上で移行してください。
+## Existing artifacts
 
-## 旧4Bが音声ZIP作成で長時間GPUを使わない場合
+- Legacy single mel ZIPs retain their paths and lock format. ZIP index validation also checkpoints progress.
+- Older data without stage receipts needs one verification pass. Compatible checkpoints are reused.
+- Progress never saved by earlier versions cannot be recovered.
+- Running Colab sessions use their existing code. Cell 1 uses the saved revision even after a remote update. Use a supported migration and retain old artifacts and revision/lock metadata.
 
-`stage WAV ZIPs: train/en checked=200/1105`などは、音声200本ではなくZIP200個
-（最大128本/ZIP）の完了数です。ログの`audio=...`は音声数、`built`は今回作成、
-`reused`は既存ZIPを再利用した数です。進捗の`checked`は再開時に0から数え直しますが、
-完了ZIPの原本読込み・作り直しはしません。
+## When legacy 4B spends a long time building audio ZIPs
 
-実行を停止し、CPUランタイムへ変更して同じ実験名・保存先でセル1→2を実行します。
-修正を含むコードを取得・checkoutした後、次の専用スクリプトで固定revisionを更新し、
-CPUで残りの音声ZIPを完成させます（まだ学習を始めていない実験のみ）。
-音素・Melの復旧セル③をもう一度回す必要はありません。
+A line such as `stage WAV ZIPs: train/en checked=200/1105` means 200 completed ZIPs with up to 128 WAVs each. `audio=...` counts audio files, `built` counts new ZIPs, and `reused` counts existing ZIPs. `checked` restarts from zero on resume. Completed ZIPs skip reading and rebuilding source WAVs.
+
+Stop and switch to a CPU runtime, then run Cells 1 → 2 with the same experiment and destination. Fetch and check out the fix and run the script below to update the pin and finish the ZIPs on CPU. Use it only before starting training. Completed phoneme/mel recovery from Cell ③ can be reused.
 
 ```python
 import sys
-REVISION = '<この修正を含む公開済みcommitの完全SHA>'
+REVISION = '<full SHA of the published commit containing the fix>'
 run('git', '-C', REPO, 'fetch', 'origin', REVISION)
 run('git', '-C', REPO, 'checkout', '--detach', REVISION)
 configure_preparation()
@@ -166,124 +96,61 @@ run(sys.executable, REPO / 'scripts/colab/prepare_audio_packs.py',
     '--profile', PROFILE, '--overwrite')
 ```
 
-`--overwrite`は旧revision固定情報を退避・更新する許可です。原本・音素・Mel・Unit・
-既存音声ZIPを削除しません。保存先`data/.drive-audio-packs/`とZIP識別子は55a5a90の
-ままなので、旧4Bで作成済みのZIPを再利用し、未公開分だけ原本を読みます。
-途中で再び切断した場合も同じコマンド、または更新版セル4A.5をCPUで再実行できます。
+`--overwrite` permits archiving and updating the old revision pin. Originals, phonemes, mel, units, and existing audio ZIPs are retained. The destination `data/.drive-audio-packs/` and ZIP identity match `55a5a90`, so completed ZIPs from legacy 4B are reused and only unpublished ZIPs read the originals. After another disconnection, rerun the same command or updated CPU Cell 4A.5.
 
-「音声ZIP準備完了」を確認後、GPUへ切り替え、更新版ノートブックのセル1→4Bを実行します。
-ローカルコピーは新VMで失われるためZIPの取得・展開は必要ですが、原本の大量個別読込みは
-しません。4B開始前に英語・日本語の公開ZIPが揃っていなければ停止します。
-全14万件・実Drive/GPUでの性能と切断復旧は未検証です。
+After audio ZIP preparation completes, switch to GPU and run Cells 1 → 4B in the updated notebook. A fresh VM fetches and extracts ZIPs. 4B stops if the published English and Japanese ZIPs are incomplete. Performance and interruption recovery on the full 140,000-item corpus with Drive and GPU remain unverified.
 
-## 固定eSpeak音素辞書の不足でMel準備が停止した場合
+## When mel preparation stops on missing eSpeak phonemes
 
-eSpeak NG 1.52.0の見本語由来の辞書には、trainで確認された
-`a‍ɪ‍ə`, `a‍ɪ‍ɚ`, `o`, `r`, `ɐ`, `ɑ̃`, `ɔ`が含まれていませんでした。
-準備処理はこの7種類を固定の補足集合として学習用辞書に加えます。
-補足集合・学習用辞書のハッシュを新しいdata-lockに記録します。
-元のphonemes/TSV、inventory、metadata、checkpointは保持するため音素化をやり直す必要はありません。
-dev/testの未知音素を自動追加することはありません。すべてのsplitの辞書範囲をMel抽出前に確認します。
-既に学習を始めたrunにこの新辞書を適用して再開することはできません。
+The sample-word inventory for eSpeak NG 1.52.0 lacked seven phonemes found in train: `a‍ɪ‍ə`, `a‍ɪ‍ɚ`, `o`, `r`, `ɐ`, `ɑ̃`, and `ɔ`. Add this fixed supplement to the training dictionary and record the supplement and dictionary hashes in a new data lock. Keep original phonemes/TSV, inventory, metadata, and checkpoints. Validate every split against the dictionary before mel extraction. Unknown dev/test phonemes are not added automatically. A run that already started training cannot adopt this dictionary on resume.
 
-切断後はセル1で同じ実験を指定してから、修正済みコードを取得し、
-`scripts/colab/resume_preparation.py --persistent <実験保存先> --revision <新しい完全SHA> --profile pilot --overwrite`
-を実行します。このスクリプトは保存済み音素化のhash/count/IDを全splitで確認し、
-旧repository-revisionを退避して固定revisionだけを更新します。
-この`--overwrite`はrevision固定情報の変更だけを許可し、音素・Melには`--resume`を使います。
-環境を構築してMel準備と最終検証から続け、成功時に工程完了記録を保存します。
-学習config/checkpointがある実験は停止します。終了後はGPUへ切り替えてセル1→4Bです。
+After disconnection, set the same experiment in Cell 1, fetch the fix, and run `scripts/colab/resume_preparation.py --persistent <experiment-directory> --revision <new-full-SHA> --profile pilot --overwrite`. It verifies saved phoneme hash/count/IDs across splits, archives the old repository revision pin, and updates that pin. `--overwrite` applies only to the revision pin. Phonemes and mel use `--resume`. The script builds the environment, continues mel preparation and final verification, and saves stage completion on success. It stops for experiments with a training config or checkpoint. After completion, switch to GPU and run Cells 1 → 4B.
 
-環境再構築では、host Pythonへのuvインストールに旧`PIP_CONSTRAINT`などを継承しません。
-Python 3.10の依存制約は仮想環境の構築後に適用します。
+Runtime rebuild installs uv into host Python without inherited constraints such as old `PIP_CONSTRAINT`. Apply Python 3.10 dependency constraints after creating the venv.
 
-## Mel抽出開始直後のEOFErrorについて
+## EOFError at the start of mel extraction
 
-`mel: extract/reuse features checked=0`の直後に`EOFError: No data left in file`が
-出る旧版には、一時NPYを先に作成する処理と、固定fairseqの「既存ファイルは省略」
-という既定動作の不整合がありました。公式抽出の呼出しでは新規の非公開一時ファイルに
-限って`overwrite=True`を指定し、空ファイルのまま抽出が省略されないようにしています。
-公開済み成果物・キャッシュを上書きする許可ではありません。
-修正版へ移行し、同じ復旧スクリプトを再実行できます。
-音素化・保存済み入力WAVヘッダの互換checkpointは保持しますが、
-ログで`saved=0`だったMel特徴量自体には再利用できる抽出結果がありません。
+Older versions can report `EOFError: No data left in file` immediately after `mel: extract/reuse features checked=0`. They created an empty temporary NPY before calling pinned fairseq, whose default skips existing files. The fixed official extraction call uses `overwrite=True` only for a new unpublished temporary file. Published outputs and cache are preserved. Migrate to the fix and rerun the same recovery helper. Compatible phoneme and input WAV header checkpoints are retained. `saved=0` means no extracted mel outputs were available for reuse.
 
-## 音素生成と辞書の新方式への移行
+## Migrate phoneme generation and dictionaries
 
-新規の音素生成では、見本語だけでなく固定版eSpeak NG 1.52.0の
-`base1 → en → en-us`音素定義からIPAを取得して、分割非依存の辞書を作ります。
-他のG2P辞書との混合や、dev/testの出力に応じた自動追加はしません。
-`don't`、`prefecture's`、`3.14`、略語、語内ハイフン、時刻などを分断せずeSpeakへ渡します。
-生成方式と辞書方式のversion、出力TSVのSHAをmetadataに記録します。
-辞書外の音素は、そのサンプルの生成直後にID/本文付きで停止し、不正ラベルを保存しません。
-保存済みラベルもMel抽出前に全splitの辞書範囲・ID・metadataを検証します。
+New generation builds a split-independent IPA dictionary from pinned eSpeak NG 1.52.0 definitions `base1 → en → en-us`, in addition to sample words. It uses this G2P and fixed dictionary across splits. Contractions, possessives, decimals, abbreviations, in-word hyphens, and times reach eSpeak intact, including `don't`, `prefecture's`, and `3.14`. Metadata records generator and dictionary versions and TSV SHA. An out-of-vocabulary phoneme stops immediately with the sample ID and text before saving an invalid label. Before mel extraction, validate the dictionary coverage, IDs, and metadata of saved labels across all splits.
 
-WAVを読まずに確認する場合:
+The validation command checks phonemes without reading WAVs.
 
 ```bash
 python -m direct_s2st.cli translatotron2 validate-phonemes --profile pilot
 ```
 
-通常の`--resume`は、完了済みの旧metadataがあれば旧音素生成方式を維持して再利用します。
-旧/新方式のラベルは混在させません。完了metadataがない旧形式の途中結果で
-辞書方式が一致しない場合は、明示的な移行を求めて停止します。
-単なる7音素の補足は旧ラベルを再生成しません。短縮形・数字の生成も修正したい場合は、
-学習開始前に修正済みコードを取得し、次の**明示的な再生成**を使います:
+Standard `--resume` reuses completed legacy metadata and its original generation method. Incomplete legacy results with a mismatching dictionary method require explicit migration. Adding the seven supplemental phonemes alone keeps the old labels. To also correct contraction and number handling, fetch the fix before training and use the explicit regeneration flag.
 
 ```bash
 python scripts/colab/resume_preparation.py \
-  --persistent <実験保存先> --revision <修正コードの完全SHA> \
+  --persistent <experiment-directory> --revision <full-fix-SHA> \
   --profile pilot --overwrite --regenerate-phonemes
 ```
 
-旧音素、旧学習用辞書、旧data-lockは`data/translatotron2/phoneme-migrations/<ID>/`へ
-退避して保持します。音素生成はやり直すため時間がかかりますが、入力コーパス、保存済みMel、
-Melの途中checkpoint、公開済みZIPは保持し、互換な特徴量を再利用します。
-移行自体も途中保存されるため、切断したら同じコマンドを再実行できます。
-学習config/checkpointがある実験への自動移行は拒否します。
+The old phonemes, dictionary, and data lock are archived under `data/translatotron2/phoneme-migrations/<ID>/`. Regeneration takes time. The corpus, saved mel, partial mel checkpoints, and published ZIPs are preserved and compatible features are reused. Migration checkpoints progress, so rerun the same command after disconnection. Experiments with training configs or checkpoints reject automatic migration.
 
-## 検証範囲
+## Verification scope
 
-CPUテストで中断・再開、完了結果の再利用、変更/破損の検出、ノートブック呼出し、
-学習snapshot復元、推論/評価journal、集計の再実行を検証します。
-実Colabの24時間切断、Drive同期障害、全14万件と実GPUによる全工程E2Eは未検証です。
+CPU tests cover interruption and resume, completed-result reuse, change and corruption detection, notebook entry points, training snapshot restoration, inference and evaluation journals, and repeat aggregation. Real Colab 24-hour termination, Drive synchronization failures, and full 140,000-item GPU end-to-end execution remain unverified.
 
-## 大量のMel NPYでDriveのInput/output errorが出た場合
+## Drive input/output errors with many mel NPYs
 
-旧版は1個の`features/`フォルダに全NPYを保存していました。
-[Colab公式FAQ](https://research.google.com/colaboratory/intl/en-GB/faq.html#drive-timeout)では、
-フォルダ内の大量ファイルが`Input/output error`を招く場合があり、各フォルダを約1万件未満に
-抑えることを推奨しています。同じエラーは操作/帯域quotaなどでも発生するので、
-このログだけでファイルの破損・消失とは判定できません。
+Older code put all NPYs in one `features/` directory. The [Colab FAQ](https://research.google.com/colaboratory/intl/en-GB/faq.html#drive-timeout) describes I/O errors in large folders and recommends keeping folders below about 10,000 files. Operation and bandwidth quotas can produce the same error. The log alone cannot establish corruption or loss.
 
-新方式はローカル作業ディスクでNPYを扱い、最大128件/目安256MiBずつのZIPを
-`<Mel checkpoint root>/packs-v1/<先頭2桁>/pack-<ID>.zip`へ保存します。
-フォルダを分けるだけでは個別読書き回数は減らないため、NPY単位のDrive書込みをやめました。
-ZIP保存後にreceiptを公開した分だけが再開時に再利用されます。
-抽出設定・checkpoint identity/keyは変えず、旧checkpointも上書きしません。
-既存`features-v2/`のコピーも元SHA256で照合してZIPに取り込みます。
-旧`features/`・`features-v2/`・chunkは削除・再生成・移動しません。
+The new path works on local disk and saves ZIPs with up to 128 items and a target of 256 MiB under `<Mel checkpoint root>/packs-v1/<first-two-characters>/pack-<ID>.zip`. Packing reduces individual Drive writes. On resume, reuse ZIPs with published receipts. Extraction settings, checkpoint identity/key, and old checkpoints are retained. Existing copies in `features-v2/` are verified by original SHA-256 before packing. The old `features/`, `features-v2/`, and chunks stay in place.
 
-各NPYは元checkpointのSHA256と照合し、ZIPは書込み後の読戻しSHA256を確認します。
-次回はZIPのパス/サイズ/更新時刻を保存した不変receiptが一致すれば内容読込みを省略します。
-同じサイズ/更新時刻のまま内容を変更することは検出できません。必要時は`S2ST_PREP_RECHECK=1`で
-内容を再検証します。これは既存Melの再抽出を指定するものではありません。
+Check each NPY against its saved SHA-256 and read back the ZIP to verify its hash. A matching immutable path/size/mtime receipt skips reading ZIP contents on the next run. Content changes with the same size and mtime can go undetected. Set `S2ST_PREP_RECHECK=1` to verify contents again while retaining extracted mel.
 
-### 旧フォルダがマウント経由で読めないときの救済
+### Recover from a legacy folder that the mount cannot read
 
-`scripts/colab/repair_mel_cache.py`は、Drive APIで**旧フォルダを読み取り専用で**一覧取得し、
-ファイルIDを使ってダウンロードできます。旧NPYのマウントパスを開くことはありません。
-ダウンロード・ZIP作成はローカルで行い、保存済みZIPだけDriveマウントへ書き込みます。
-元ファイル・checkpointは残すので、**救済ZIPに加え、その後の学習用ZIPの空き容量が必要**です。
-APIの権限、ファイルの同期、Drive/APIのquota、保存先の書込み障害は別途解消する必要があります。
-この手順で必ず復旧する・短時間で終わるという保証はありません。
+`scripts/colab/repair_mel_cache.py` can list the old folder read-only through the Drive API and download by file ID without opening the old mounted NPY paths. Download and build ZIPs locally, then write the saved ZIPs through the mount. Retaining the originals and checkpoints requires space for both recovery ZIPs and subsequent training ZIPs. Resolve API permissions, file sync, quotas, and destination write errors separately. Recovery time and success depend on those conditions.
 
-### 推奨: ダウンロード済みフォルダZIPから救済する
+### Recover from downloaded folder ZIPs
 
-DriveのWeb画面等で旧`features`をZIPとしてダウンロードできる場合、そのZIPを
-Colabのローカルディスクへ置き、次の引数で取り込めます。分割ZIPは`--source-zip`を
-繰り返してすべて指定します。ZIPを展開してDriveへNPYを戻す必要はありません。
-Webからの大量ダウンロード自体も成功・短時間完了を保証するものではありません。
+If Drive's web UI can download old `features` as ZIPs, place them on Colab's local disk. Repeat `--source-zip` for each part. The script reads the ZIPs directly. Large web downloads can take time or fail.
 
 ```python
 MEL_CACHE = PERSISTENT / 'data/translatotron2/.prep-checkpoints/mel/2b2a74082e7462215d32ceca'
@@ -295,74 +162,48 @@ run(*repair_args, '--limit', '3')
 run(*repair_args)
 ```
 
-各NPYのSHA256が保存済みcheckpointと一致したものだけを保存します。
-ZIPにない未救済分は既存分散コピー、読める旧ファイルの順に参照します。
-旧マウントが読めず不足分がある場合は下記API引数も追加できます。
-ZIPはこのスクリプトが取得・削除するものではありません。VM消失後、未救済分の
-読込みに必要な元ZIPは再び配置してください。保存済みpackは再利用されます。
+Only NPYs matching checkpoint SHA-256 are saved. For entries missing from the ZIPs, the helper looks for existing distributed copies, then readable legacy files. Add API arguments below for missing files when the old mount is unreadable. Supply source ZIPs again on a fresh VM if pending files need them. Published packs are reused. The helper leaves source ZIPs in place.
 
-### ZIPを用意できない場合: APIによる一度だけの旧データ移行
+### One-time API migration without source ZIPs
 
-旧データをAPIで1ファイルずつ読む回数そのものは減らせません。batch APIもmediaの
-一括ダウンロードには使えません。初回救済が長時間になる可能性は残ります。
-一覧/ダウンロードを既定1秒間隔に抑え、403のrateLimitExceeded/userRateLimitExceeded・
-429・一時的な5xxだけを最大8回バックオフ再試行します。制限に当たると要求間隔も
-増やし、同じプロセス内で維持します。権限不足や日次制限等は無条件再試行しません。
-1秒間隔がすべての割当に対して安全という保証はありません。
+The API reads legacy media one file at a time. Listing and download requests default to one-second spacing. Only 403 rateLimitExceeded/userRateLimitExceeded, 429, and transient 5xx responses are retried, up to eight times with backoff. Rate limits increase the spacing for the current process. Permission and daily quota failures are not retried unconditionally. The initial migration can be long and one-second spacing can still exceed some quotas.
 
-同じ実験のセル1を実行後、処理を実行していない状態で修正版checkoutを取得します。
-`REVISION`にはこの修正を含む公開済みcommitの完全SHAを指定します。
-保存済みrevisionはまだ手で編集せず、音素・Mel・checkpointも削除しないでください。
+Run Cell 1 for the same experiment, then fetch the published fix while no stage is running. Leave saved pins, phonemes, mel, and checkpoints in place.
 
 ```python
 import sys
 ensure_workspace()
 configure_preparation()
-REVISION = '<修正版の完全SHA>'
+REVISION = '<full SHA of the fix>'
 run('git', '-C', REPO, 'fetch', 'origin', REVISION)
 run('git', '-C', REPO, 'checkout', '--detach', REVISION)
 ```
 
-DriveのWeb画面で、ログに出たcheckpointフォルダ内の**旧`features`フォルダ**を開き、
-URLの`/folders/`より後のIDを控えます。例のcache rootは実際のエラーログのものに合わせます。
-`features-v2`、`mel`、実験フォルダ全体のIDではありません。
-認証はノートブック上で、マウントと同じアカウントに対して行います。
+Open the old `features` folder inside the checkpoint named in the error log in Drive. Copy the ID after `/folders/` in its URL. Use the matching cache root. Authenticate in Colab as the same account as the mount.
 
 ```python
 from google.colab import auth
 auth.authenticate_user()
 MEL_CACHE = DATA / 'translatotron2/.prep-checkpoints/mel/2b2a74082e7462215d32ceca'
-FEATURES_FOLDER_ID = '<旧featuresフォルダのID>'
-# host Pythonを使用。仮想環境のPYTHONではありません。
+FEATURES_FOLDER_ID = '<ID of the old features folder>'
+# Use the host Python executable.
 repair_args = [sys.executable, REPO / 'scripts/colab/repair_mel_cache.py',
                '--cache-root', MEL_CACHE, '--storage', 'packed',
                '--drive-folder-id', FEATURES_FOLDER_ID, '--api-interval', '1']
-run(*repair_args, '--limit', '3')  # まずSHA一致・保存先への書込みを3件で確認
+run(*repair_args, '--limit', '3')  # Check SHA and destination writes on three items first.
 ```
 
-成功したら同じセル内、または次のセルで上限なしでコピーします。
+After the trial succeeds, copy with no limit in the same or next cell.
 
 ```python
 run(*repair_args)
 ```
 
-`[mel-recovery] packed=... reused=... persisted=... pending_local=... remaining=...`で
-実際の進捗を確認できます。`packed`は今回取り込んだ件数、`persisted`はZIP保存済み、
-`pending_local`は未公開のローカル件数です。強制終了時は未公開分だけやり直します。
-3件の試行だけでは全件のquota/書込み成功は保証できません。
-中断したら同じ認証・同じ引数で再実行します。保存済みpackは再ダウンロードしません。
-分散コピー済み分は再ダウンロードせず、元を保持したままZIPに取り込みます。
-完全なDriveファイルID一覧は同じcheckpoint rootへ保存し、再利用します。
-一覧の途中で停止した場合は一覧取得をやり直します。APIの一覧が古い場合のみ
-`--refresh-index`を追加し、旧一覧を退避して取り直します（旧NPY/chunkは変更しません）。
-ファイルが欠落・重複している場合やSHA256が違う場合は黙って先へ進みません。
-API認証/権限不足は`authenticate_user()`だけでは解消しない場合があります。
-再試行上限でもquotaが続く場合は連続実行せず、要求間隔（`--api-interval 2`等）、
-公式FAQの対処とアクセス権・空き容量を確認してください。バックオフはquotaを増やしません。
+Track `[mel-recovery] packed=... reused=... persisted=... pending_local=... remaining=...`. `packed` counts newly packed entries, `persisted` counts ZIP-saved entries, and `pending_local` counts unpublished local entries. Forced exit only loses unpublished progress. A three-item trial checks the workflow and may miss quota or write issues at full scale. Resume with the same authentication and arguments. Existing packs and distributed copies avoid redownloads. The complete file-ID listing is saved under the same checkpoint root. An interrupted listing starts again. Use `--refresh-index` only for a stale listing. The old listing is archived, and original NPYs and chunks are retained. Missing or duplicate files and SHA mismatches stop the migration.
 
-コピー完了後、保存済みrevisionを専用スクリプトで更新してMel準備と最終検証を再開します。
-この`--overwrite`はrevision固定情報の更新を許可するだけで、Mel再生成ではありません。
-既に音素移行が完了していれば`--regenerate-phonemes`は付けません。
+`authenticate_user()` may not resolve permission issues. If quota errors outlast retries, check request spacing (for example `--api-interval 2`), the FAQ, permissions, and available space before retrying. Backoff does not raise quota.
+
+After copying, update the saved pin with the recovery helper and resume mel preparation and final verification. Here `--overwrite` authorizes the pin update. Omit `--regenerate-phonemes` if phoneme migration is already complete.
 
 ```python
 run(sys.executable, REPO / 'scripts/colab/resume_preparation.py',
@@ -370,5 +211,4 @@ run(sys.executable, REPO / 'scripts/colab/resume_preparation.py',
     '--profile', PROFILE, '--overwrite')
 ```
 
-これで互換な保存済みMelを使い、未保存分の抽出とZIP/TSV/最終検証へ進みます。
-元の音声・音素・学習用辞書はこのストレージ修復で変更しません。
+The helper reuses compatible saved mel, extracts remaining samples, and proceeds to ZIP/TSV creation and final verification. Source audio, phonemes, and the training dictionary are preserved.

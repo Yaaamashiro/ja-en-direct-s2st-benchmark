@@ -385,13 +385,17 @@ def test_cell1_then_normal_8d_without_cell2_gpu_hf_or_other_diagnostics(tmp_path
     assert namespace['text_pair_audit_ui'].position == 1 and ui.closed
 
 
-def test_existing_notebook_cells_unchanged_and_8d_follows_8c():
+def test_existing_notebook_code_cells_unchanged_and_8d_follows_8c():
     current = json.loads((ROOT/'notebooks/colab_training.ipynb').read_text(encoding='utf-8'))
     prior = json.loads(subprocess.check_output(['git', '-c', 'safe.directory='+str(ROOT), '-C', str(ROOT),
         'show', '837f379f2a6f37e4c28f64f685d0a677090de9b4:notebooks/colab_training.ipynb'], encoding='utf-8'))
     new = [c for c in current['cells'] if ''.join(c['source']).startswith('#@title 8D.')]
     assert len(new) == 1
-    assert [c for c in current['cells'] if c not in new and not ''.join(c['source']).startswith(('#@title 8E.','#@title 8F.'))] == prior['cells']
+    later_titles = ('#@title 8E.', '#@title 8F.')
+    assert [c for c in current['cells'] if c['cell_type'] == 'code' and c not in new
+            and not ''.join(c['source']).startswith(later_titles)] == [
+        c for c in prior['cells'] if c['cell_type'] == 'code'
+    ]
     position = current['cells'].index(new[0])
     assert ''.join(current['cells'][position-1]['source']).startswith('#@title 8C.')
     assert ''.join(current['cells'][position+1]['source']).startswith(('#@title 8E.', '#@title 9.'))

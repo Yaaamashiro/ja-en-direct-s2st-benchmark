@@ -1,103 +1,56 @@
-# 論文寄せの通常実験（16 kHzコーパスへの適応）
+# Paper-aligned training on the 16 kHz corpus
 
-通常用Colabは `paper_exact`、TT2 Fisher、BLEU用Griffin-Lim、対象コーパスのtrain音声で
-学習するS2UT Code HiFi-GANを既定とする。**exactは公開された主要レシピ条件を固定する
-モードであり、独立実装・別コーパスでの完全再現や論文の数値再現を意味しない。**
-TT2は公開された実効バッチ、S2UTはGPUごとのtoken予算も維持する。
-コーパスは変更せず、既存16 kHz/80-bin target MelとUnit抽出結果を再利用する。
-smokeは小型TT2・2更新の配線確認で、品質の証拠ではない。
+The standard Colab notebook defaults to `paper_exact`, TT2 Fisher, Griffin–Lim for BLEU, and S2UT Code HiFi-GAN fitted on the target corpus's English train audio. **Exact mode fixes the main published recipe settings.** The independent implementation and different corpus still require separate verification of numerical results. TT2 keeps the published effective batch size, and S2UT keeps the per-GPU token budget. Reuse the existing corpus, 16 kHz/80-bin target mel, and extracted units. The small two-update TT2 smoke run checks pipeline wiring.
 
-TT2の追加選択肢`TT2_RECIPE=stabilized_seconds_v1`は明示的な安定化実験。
-秒単位duration MSE・80ms/token初期化・peak LR0.0003/warmup400を使う新規practical runで、
-実効batch1024を維持する。原論文のduration単位・初期化との一致は未確認。
-旧frame recipeやcheckpointを再解釈せず、通常セル1→5で別名保存する。
-詳細・再開手順は[COLAB.md](COLAB.md#tt2の安定化試験recipe新規run限定)。
+Select `TT2_RECIPE=stabilized_seconds_v1` for an explicit stabilization experiment. A fresh practical run uses duration MSE in seconds, initialization at 80 ms per token, peak LR 0.0003, warmup 400, and effective batch 1024. Duration units and initialization in the paper are unknown. Standard Cells 1 → 5 save this recipe under a separate run name. Legacy frame recipes and checkpoints retain their original meaning. See [setup and resume](COLAB.md#experimental-tt2-stabilization-recipe-new-runs-only).
 
-## 選択項目
+## Settings
 
-| 設定 | 通常値 | 変更時の扱い |
+| Setting | Standard value | How changes are handled |
 | --- | --- | --- |
-| REPRODUCTION_MODE | paper_exact | 負担が大きければpaper_practicalを明示選択。別runとして管理 |
-| TT2_BATCH_SIZE | 8 | 自動測定OFF時の同時処理数。exactはupdate_freq=1024/batch |
-| TRAIN_CALIBRATE_BATCH | True | 共通の開始前測定。S2UT exactは公式batchの収容確認のみ。試運転後、初期重みから本学習 |
-| TRAIN_CALIBRATION_MAX_BATCH | 1024 | 選定対象の上限。S2UT exactには影響しない。実際の収容数ではない |
-| TRAIN_VRAM_RESERVE_RATIO | 0.10 | 試運転のピークVRAMに対する安全余裕（5%以上） |
-| TRAIN_CALIBRATION_STEPS | 3 | 候補ごとの実forward/backward/optimizer測定回数（3以上） |
-| PRACTICAL_UPDATE_FREQ | 1 | practicalのみ使用。実効batch=物理batch×update_freq×world_size |
-| TT2_VOCODER_MODE | griffin_lim | hifiganは別の比較run。Mel vocoder学習が追加で必要 |
-| S2UT_VOCODER_MODE | paper | 新paper_fisher_v1は公式LJSpeech配布重み（Fisher学習重みではない）。trainedは自前学習用の別条件 |
-| S2UT_RECIPE | paper_fisher_v1 | 新規run、warmup10000・400000更新上限・早期終了なし。旧run再開はlegacy_short |
-| TOTAL_UPDATES | 研究者が指定 | TT2 Appendix Aの総更新数はunknown。S2UT公式目安400000は自動実行しない |
-| S2UT_TOTAL_UPDATES | 400000 | S2UT専用。RUN_TRAININGとCONFIRM_TRAININGは既定OFFのまま。短期変更時は論文の学習量に未達と記録 |
-| TRAIN_CALIBRATION_OBJECTIVE | throughput | 安全な候補から試運転速度で選ぶ。capacityは収まる最大数。S2UT exactは収容確認のみ |
-| TRAIN_SAVE_INTERVAL | 1 | exactの1更新が長いため毎更新ローカル保存。Drive公開は別の時間間隔・容量制限 |
-| TT2_MONITOR | True | dev lossによる独自の監視・最良checkpoint保持・早期終了。原論文のdev BLEU選択とは異なる。optimizer/batch/warmupは保持 |
+| REPRODUCTION_MODE | paper_exact | Explicitly choose paper_practical for a separate run. |
+| TT2_BATCH_SIZE | 8 | Physical batch with calibration off. Exact mode uses update_freq=1024/batch. |
+| TRAIN_CALIBRATE_BATCH | True | Shared pre-training probe. S2UT exact checks whether the official batch fits. Actual training starts from initial weights. |
+| TRAIN_CALIBRATION_MAX_BATCH | 1024 | Search ceiling, except in S2UT exact. Actual capacity depends on the probe. |
+| TRAIN_VRAM_RESERVE_RATIO | 0.10 | Safety margin against measured peak VRAM, at least 5%. |
+| TRAIN_CALIBRATION_STEPS | 3 | At least three real forward/backward/optimizer steps per candidate. |
+| PRACTICAL_UPDATE_FREQ | 1 | Practical only. Effective batch = physical batch × update_freq × world_size. |
+| TT2_VOCODER_MODE | griffin_lim | hifigan is a separate comparison run that requires mel vocoder training. |
+| S2UT_VOCODER_MODE | paper | New paper_fisher_v1 uses the official public LJSpeech weights. trained selects separately fitted weights. |
+| S2UT_RECIPE | paper_fisher_v1 | New run with 10000 warmup, a 400000-update cap, and no early stopping. Use legacy_short to resume an old run. |
+| TOTAL_UPDATES | Researcher-specified | TT2 Appendix A does not specify the total updates. The S2UT recommendation of 400000 does not launch automatically. |
+| S2UT_TOTAL_UPDATES | 400000 | S2UT only. RUN_TRAINING and CONFIRM_TRAINING default to off. Shorter runs are recorded as below the paper's training budget. |
+| TRAIN_CALIBRATION_OBJECTIVE | throughput | Select by probe speed among safe candidates. capacity selects the largest fit. S2UT exact only checks fit. |
+| TRAIN_SAVE_INTERVAL | 1 | Save locally every update because exact updates can take a long time. Drive publication has a separate time interval and capacity limit. |
+| TT2_MONITOR | True | Custom dev-loss monitoring, best-checkpoint retention, and early stopping. The paper selects by dev BLEU. Optimizer, batch, and warmup are retained. |
 
-`paper_exact` は**本学習中**の適応バッチ分割・精度変更を禁止する。TT2は開始前の明示的な
-VRAM測定で物理batchを選定し、蓄積回数とともに記録・固定する。
-S2UTは開始前も追加分割・拡大禁止で、公式token-budget batchの収容確認のみ行う。OOM時にbatchや精度を黙って
-変えず停止する。物理batch8はVRAM収容の保証ではない。新runで物理batchを下げても
-exactの実効1024は維持できるが、microbatch-localなBatchNorm統計は同じにならない。
-practicalでも通常はFisherモデル・LR・warmup・L2を保持する。
-例外としてS2UTの明示的な`S2UT_WARMUP_UPDATES=400/500/1000`を許可し、論文の10,000との差を記録する。
-S2UTの短縮条件はlegacy_shortとして残すが、新規既定はpaper_fisher_v1とする。
-TT2の既存checkpoint向け短縮はRESUME.md参照。
-TT2と旧S2UTの短縮条件は400 warmup・10更新ごとのdev評価・patience 5・最低改善率1%。
-policy v3ではTT2の全4種、S2UTの全5種のDev lossを独立anchorで監視する。
-いずれも自身のanchorから1%以上改善しない評価が5回連続すれば停止する。
-これらは独自の短縮/早期終了条件であり、原論文の学習量やBLEUでのモデル選択の再現ではない。
+`paper_exact` forbids adaptive batch splitting and precision changes during training. TT2 explicitly measures VRAM before training to select and fix the physical batch and accumulation. S2UT exact only checks whether the official token-budget batch fits, with no splitting or expansion. OOM stops execution. Physical batch 8 has no guaranteed fit. A new TT2 run can reduce physical batch while retaining effective batch 1024, with different microbatch-local BatchNorm statistics.
 
-新S2UTは1000更新ごとの全Dev lossと固定500件補助text BLEU、主要更新で固定100件の
-音声ASR-BLEUを学習中に測定する。BLEUは停止・best選択に不使用で、bestはDev unit_loss。
-通常セルでの開始/再開、評価コスト、ASR/vocoderの論文との差異は[COLAB.md](COLAB.md)を参照。
+Practical runs normally keep Fisher, LR, warmup, and L2. An explicit `S2UT_WARMUP_UPDATES=400/500/1000` records the deviation from the paper's 10,000 updates. Short S2UT settings remain available as `legacy_short`, with `paper_fisher_v1` the new-run default. See `RESUME.md` for shortening a saved TT2 run.
 
-## 共通の開始前VRAM測定（Colabセル5）
+TT2 and legacy S2UT short runs use 400 warmup updates, dev evaluation every 10 updates, patience 5, and a 1% minimum improvement. V3 tracks independent anchors for all four TT2 or five S2UT dev losses. Five consecutive evaluations without a 1% improvement on any metric trigger a stop. These custom recipes use a shorter budget and loss-based selection. New S2UT records full dev losses and auxiliary text BLEU on 500 fixed samples every 1000 updates, and audio ASR-BLEU on 100 fixed samples at selected updates. Best selection uses dev `unit_loss`. BLEU is diagnostic. See [COLAB.md](COLAB.md) for startup, resume, evaluation cost, and ASR and vocoder differences.
 
-TT2・S2UT・学習するMel/Unit HiFi-GANに同じ測定・保存機構を使用する。
-Griffin-Limと公式学習済みvocoderは学習しないため対象外。Cascadeも既製モデルの推論のみ。
-S2UT paper_exact以外では1→2→4→8…の候補を、上限またはOOM/安全余裕不足まで試し、合格した最大の同時処理数を
-選ぶcapacity方式と、安全な候補の処理数/秒で選ぶthroughput方式がある。通常はthroughput。
-初回optimizer確保の1ステップ目は速度採点から除き、安全性の判定には含める。
-最良速度から3%以内では大きいbatchを選ぶ。最悪padding負荷での短い実測なので、
-実データ全体の最大速度・GPU占有率を保証しない。
-S2UT paper_practical/GANは最後の合格・不合格候補の間も二分探索で測る。TT2は実効batchを割り切れる
-候補のみ（1024では2の累乗）を試す。
+## Shared VRAM calibration (Colab Cell 5)
 
-- 各候補は独立した新規プロセスで初期重みから試す。optimizerの状態確保も測定に含む。
-  試行checkpointを本学習へロード・Drive公開しない。本学習は別プロセスでupdate 0から開始。
-- TT2はtrainの最大source/target/phone長を組み合わせた保守的なpadding負荷を使用。
-  合成した負荷は測定専用であり、翻訳教師ペアとして本学習には使わない。
-  exactは**物理batch×蓄積回数＝1024**を維持。practicalも設定済み実効batchを維持する。
-- S2UTはtrainの正規token-budget batchからattention負荷・最長音声・件数が大きいものを試す。
-  paper_exactはmax_tokens=20000/update_freq=4のまま追加分割なしで1回の試運転を行う。
-  MAX_BATCHの設定は無視し、収まらなければ停止する。recordのselected=0は未選定ではなく
-  「公式batch・追加capなし」を意味する。paper_practicalのみ物理分割上限を選定・固定する。
-  practicalも既存max_tokens/update_freq/サンプル順は変更しないが、分割は公式実行方式との差異として扱う。
-  可変長なので常に同じ件数を同時に処理するわけではない。1024発話に変更しない。
-- GANは長いtrain音声で、generator/discriminator両optimizerを測定する。勾配蓄積を新たに
-  導入せず**実バッチ数**を選定するため、1更新あたりの発話数は選択値になる。
-- `checkpoints/<RUN_NAME>/batch-calibration.json`にGPU/PyTorch/CUDA、各試行のピーク
-  allocated/reserved/全体使用量・時間・実処理数・選択結果をatomic保存する。
-  中断時は完了した候補を再利用し、未完了候補だけ再測定。本学習snapshotにも記録を含める。
-- 再開時は選択値を再利用。同じGPU条件では測定不要。別GPUでは同じ選択値だけ再検査し、
-  収まらなければ停止する（checkpointに合わせたbatchを勝手に変えない）。
-- 学習済み旧runへ後付けしない。設定・データの変更も新run名が必要。準備済みMel/Unitは共有可。
+TT2, S2UT, and trainable mel and unit HiFi-GAN share the probe and persistence mechanism. Griffin–Lim, the official pretrained vocoder, and inference-only Cascade are outside calibration.
 
-この測定もGPU時間を使う。Colab切断時に未保存の試行が失われる場合はその候補を再実行する。
-短い測定は全実行条件のOOM防止を保証しない。試行中の辞書/入力/数値エラーはOOMとみなして
-隠さず停止する。本学習のOOMも自動でbatchを変えず、最後の完成snapshotを保持する。
-CPU上のテストは選定・分割・保存・再開の検証であり、実GPUの測定結果ではない。
+Except for S2UT exact, probe 1, 2, 4, 8, and so on until the cap, OOM, or insufficient margin. Capacity selects the largest passing physical batch. Throughput, the default, selects by examples per second among passing candidates. Exclude the first optimizer allocation step from speed scoring and include it in safety checks. Prefer the larger batch within 3% of the fastest. A brief worst-padding probe cannot guarantee end-to-end throughput or occupancy. S2UT practical and GAN probe between the last passing and failing candidates by binary search. TT2 tests only divisors of the effective batch, which are powers of two for 1024.
 
-TT2は1更新分の1024件を一度にRAMへ載せず、物理batchごとに読み込み、validな
-frame/phone/utterance数でlossを重み付けして累積する。部分的な勾配は保存しない。
-切断時は最後のDrive上の完成snapshotから再開し、未保存の更新分は再計算する。
-通常は時間上限なし（SESSION_MINUTES=0）で目標更新数まで学習を続ける。
-任意の時間上限を設定した場合、exactの1更新が長いとセッション終了猶予に収まらず
-その更新を失う可能性がある。Colab側の切断・実行上限も別途適用される。
+- Test each candidate from initial weights in a fresh process and include optimizer allocation. Actual training starts from update 0 in a separate process. Probe checkpoints are discarded.
+- TT2 probes a conservative padding workload combining the longest train source, target, and phoneme sequences. Synthetic probe combinations are never training pairs. Exact keeps physical batch × accumulation at 1024. Practical keeps its configured effective batch.
+- S2UT probes regular train token-budget batches with high attention load, long audio, or many examples. Exact performs one unsplit trial with max_tokens=20000 and update_freq=4. It ignores MAX_BATCH and stops if the batch does not fit. A recorded `selected=0` means official batching with no extra cap. Practical fixes a physical split cap while preserving the original token budget, update frequency, and sample order. Splitting is a deviation from the official execution mode. Variable-length token-budget batches vary in sample count.
+- GAN probes both generator and discriminator optimizers on long train audio. The selected physical batch is the number of utterances per update, with no new accumulation.
+- Atomically save GPU/PyTorch/CUDA, peak allocated, reserved and total memory, timings, work counts, and selection to `checkpoints/<RUN_NAME>/batch-calibration.json`. Resume reuses completed candidates and repeats pending ones. Training snapshots include the record.
+- Reuse the selection on resume. On another GPU, check only whether the saved choice fits and stop if it does not.
+- Calibration applies to new runs. Settings or data changes require a new run name. Prepared mel and units can be shared.
 
-## 実際の学習条件
+Calibration uses GPU time. A VM disconnection can lose an unpublished trial. A short probe cannot prevent every later OOM. Dictionary, input, and numerical errors stop the run with their actual cause. Training OOM preserves the last complete snapshot. CPU tests cover selection, splitting, persistence, and resume.
 
-Colabの生成コマンドはTT2で以下を含む（物理batch8の場合）。
+TT2 loads one physical batch at a time and weights accumulated losses by valid frame, phone, or utterance counts. Partial gradients are not checkpointed. Resume from the last complete Drive snapshot and recompute unsaved updates. `SESSION_MINUTES=0` normally allows training to the update target. With a time cap, a long exact update can exceed the grace period and be lost. Colab's own disconnect and execution limits apply independently.
+
+## Training conditions
+
+The generated TT2 command includes the following when physical batch is eight.
 
 ```text
 --model-size fisher --reproduction-mode paper_exact
@@ -105,8 +58,7 @@ Colabの生成コマンドはTT2で以下を含む（物理batch8の場合）。
 --batch-size 8 --update-freq 128 --vocoder-mode griffin_lim
 ```
 
-S2UTは固定fairseqの `s2ut_transformer_fisher`。実コードからencoder
-12層/256次元/4heads、decoder6層/256次元/8headsを確認する。
+S2UT uses pinned fairseq's `s2ut_transformer_fisher`. Verify the encoder's 12 layers, width 256, and four heads and the decoder's six layers, width 256, and eight heads against the code.
 
 ```text
 --arch s2ut_transformer_fisher --lr 0.0005 --warmup-updates 10000
@@ -114,110 +66,59 @@ S2UTは固定fairseqの `s2ut_transformer_fisher`。実コードからencoder
 --max-tokens 20000 --update-freq 4 --fp16
 ```
 
-S2UT論文Appendix A・Table 4は**max tokens per GPU=20k、GPU台数=4**を明記している。
-update_freq4は公式レシピが案内する4GPU相当を1プロセスで累積する設定であり、
-4GPUでの実行そのものと数値的に同一だとは主張しない。
-paper_exactでは追加の発話数cap、固定分割、オンライン適応、精度変更を拒否する。
-旧版で分割選定したS2UT exactの記録/checkpointは新方式へ自動移植せず、新runを要求する。
-token予算に基づく可変batchなので「発話数1024」とは解釈しない。
-HuBERT layer6、k=100、固定model revisionとk-means SHA、reduced units、
-source/target letter CEとdecoder CTCを維持する。CTCは原論文§4.2どおり、
-SentencePiece Unigram（要求語彙1000）とする。分割器の学習対象はこの実装ではtrain英語文のみ。
-smokeの小コーパスでは1000 pieceを作れないため、実際の語彙数も記録する。
-モデル・train文hash・SentencePiece版・SHA-256をprepared lockへ保存する。
-target-letterとCTCは別辞書であり、同じ英語文から再符号化して一致を検証する。
-source-letter/target-letterの文字集合にはtrain/dev/testの文字を登録する。
-モデルの最適化はtrainのみ。文字の登録はその文字を予測できる学習例を増やすものではない。
-辞書の頻度はtrain頻度を維持し、held-out専用文字の登録countは1とし、専用文字一覧をlockへ記録する。
-原論文は文字辞書を構築するsplitを明示していないため、この登録方針は実装上の選択として記録する。
-CTC分割器はdev/testから学習せず、未知pieceを`<unk>`へ符号化しsplit別件数を記録する。
+S2UT Appendix A, Table 4 specifies **20k max tokens per GPU and four GPUs**. Official single-process `update_freq=4` accumulates the equivalent budget, with numerical equality to four-GPU execution unverified. Exact mode rejects additional utterance caps, fixed splitting, online adaptation, and precision changes. Previous split S2UT exact runs require a fresh run under the new policy. Batch size is a variable token budget.
 
-旧4B完了データは `fairseq-unigram-allchars-v1` へ再開可能に移行する。
-Unit TSV・設定を再利用し、文字補助ラベル/CTCラベルだけ生成する。元のfairseq、
-Mel、HuBERT Unit、学習checkpoint、旧fairseq-unigram-v1は変更しない。S2UT学習runはrecipe-v3の新名になる。
-CTCモデルを変更した旧S2UT checkpointは継続学習しない。
+Keep HuBERT layer 6, k=100, the pinned model revision and k-means SHA, reduced units, source and target letter CE, and decoder CTC. CTC uses SentencePiece Unigram with a requested vocabulary of 1000 as in paper §4.2. Fit on English train text only. Small smoke corpora may produce fewer pieces, so record actual vocabulary size. Store model, train-text hash, SentencePiece version, and SHA-256 in the prepared lock. Letter and CTC dictionaries are distinct. Re-encode the same sentence to verify CTC pieces. Register train, dev, and test code points for source and target letters. Model optimization uses train only. Retain train frequencies and use serialized count 1 for held-out-only characters, listing them in the lock. The paper does not specify the splits used to build the letter dictionary, so this registration is documented as an implementation choice. Encode unknown CTC pieces as `<unk>` and record counts by split.
 
-## 特徴・音声復元・評価の差異
+Migrate older completed 4B data to `fairseq-unigram-allchars-v1` with resume support. Reuse unit TSVs and configuration and generate letter and CTC labels. Preserve old fairseq data, mel, HuBERT units, checkpoints, and `fairseq-unigram-v1`. S2UT training uses a new recipe-v3 run name. An older checkpoint cannot resume with a different CTC model.
 
-- TT2 sourceは学習・推論で16 kHz/80 bins、25 ms window、10 ms hop、125–7600 Hz、
-  utterance CMVN。prepared音声やtarget Melは書き換えない。
-- targetは既存metadataの16 kHz/80 bins、25 ms/10 ms、0–8000 Hz、natural-log magnitude Mel。
-  原論文の24 kHz/128 bins、50 ms/12.5 ms、20–12000 Hzとの差を記録する。
-- G2PはeSpeak NG 1.52.0。Google独自G2Pではない。日英合成コーパス・音素辞書は
-  原論文と異なる。voice preservationは無効。
-- TT2原論文§5.1のBLEU経路に合わせてGriffin-Limを実装。Slaney Mel擬似逆行列、
-  magnitude power1、Hann、center、momentum0、32反復、発話別固定seed。
-  Googleの反復数・位相初期値はunknownで、こちらの選択を記録する。
-- HiFi-GANは代替方式として残す。比較IDにvocoderモードを含め、WAV・RTF・結果を混ぜない。
-  同じ学習済みTT2を別vocoderで評価するためだけにTT2を再学習する必要はない。
-- S2UT paper vocoderは公式LJSpeech HuBERT-100のcheckpoint/configをHTTPS取得し、
-  固定SHA-256で検証する。duration prediction必須で、独自重みへ自動置換しない。
-  初回取得にはネットワークと配布元の重み利用条件の確認が必要。
-- 通常はtrainedを選び、対象コーパスの英語train音声と元のUnit列で学習する。
-  KM100 embedding、duration predictor（128/kernel3/dropout0.5）、log-duration MSE重み1、
-  MPD/MSD・GAN/FM/Mel損失を使用する。ただし現在の独立trainerはMel frontend、
-  crop/実batch、学習率schedule等が原論文のFisher vocoder条件と同一ではない。
-  配布重みの「paper」という旧モード名も完全再現を意味しない。差異はmetadataに記録する。
-- 共通主指標はWhisperによるASR-sacreBLEU。Google ASRによる原論文BLEUとの数値同等性は
-  保証しない。MOS評価とWaveRNNは今回未実装。speaker similarityはvoice preservation評価ではない。
+## Features, synthesis, and evaluation
 
-モデル構造も独立PyTorch実装で、初期化・microbatch BatchNorm・dropout等の数値同等性は
-未確立。LRや形状が一致しても、論文と同じ品質が出たとは主張しない。
+- TT2 source features use 16 kHz/80 bins, 25 ms window, 10 ms hop, 125–7600 Hz, and utterance CMVN at training and inference time. Prepared audio and target mel are preserved.
+- Target metadata records 16 kHz/80 bins, 25 ms/10 ms, 0–8000 Hz, and natural-log magnitude mel. The paper uses 24 kHz/128 bins, 50 ms/12.5 ms, and 20–12000 Hz.
+- G2P uses eSpeak NG 1.52.0. The paper uses Google's G2P and different data and dictionary. Voice preservation is disabled.
+- Griffin–Lim follows the BLEU path in TT2 §5.1, with a Slaney mel pseudoinverse, magnitude power 1, Hann window, center enabled, momentum 0, 32 iterations, and a fixed seed per utterance. Google's iteration count and phase initialization are unknown.
+- HiFi-GAN remains an alternative under a comparison ID that includes vocoder mode. Evaluate the same TT2 checkpoint with either vocoder. WAVs, RTF, and results are specific to the mode.
+- The S2UT paper vocoder fetches official LJSpeech HuBERT-100 checkpoints and config over HTTPS, verifies pinned SHA-256, and requires duration prediction. Initial retrieval requires network access and review of the weight provider's usage conditions.
+- The trained alternative fits on the target corpus's English train audio and original units, with KM100 embeddings, duration predictor (128/kernel 3/dropout 0.5), log-duration MSE weight 1, and MPD/MSD, GAN, feature matching, and mel losses. Mel frontend, crop, physical batch, and LR schedule differ from the original Fisher vocoder. Document these deviations and the provenance of distributed paper-mode weights in metadata.
+- The shared primary metric is Whisper ASR-sacreBLEU. Numerical equivalence to the paper's Google ASR BLEU is unverified. MOS and WaveRNN are outside this implementation. Speaker similarity measures similarity to the target reference.
 
-## GPU実装・測定の境界
+The independent PyTorch model also leaves numerical parity of initialization, microbatch BatchNorm, and dropout unverified. Matching learning rates and tensor shapes alone does not establish paper-quality results.
 
-TT2はSpecAugmentの一様整数乱数をcheckpoint保存対象のCPU RNGで生成し、
-教師強制prenetを全フレームまとめて処理する。LSTMの自己回帰とBatchNormは維持する。
-旧CUDA RNG/逐次dropoutと乱数列が異なるためengine-v2をrun fingerprintへ含め、
-旧runには混ぜない。勾配/parameter異常チェックは維持して同期を集約する。
-S2UTの勾配auditもGPU上で集約し、直近128 lossだけ保持する（全lossはfairseqログ）。
+## GPU implementation and measurements
 
-HuBERTは必要なL6より後の層を実行しない。前方層のhidden stateは変えず、
-CPUの小型モデルでは削減前後の完全一致を検証する。最大256件/推定128MiBの先読みで
-同じ音声長をまとめ、Unit順・paddingなしを維持する。長さが全て異なる場合はbatch1のまま。
+TT2 draws uniform integer SpecAugment samples from checkpointed CPU RNG and batches teacher-forced prenet frames. It retains autoregressive LSTM and BatchNorm. Its RNG sequence differs from the old CUDA RNG and sequential dropout, so engine-v2 is part of the run fingerprint. Gradient and parameter checks remain and synchronize together. S2UT aggregates gradient auditing on GPU and retains the last 128 losses in memory. Fairseq logs retain all losses.
 
-performanceログはVRAM・処理数/秒・データ待ち時間と、取得可能ならnvidia-smiのGPU使用率
-サンプルを表示する。取得不可はnullで、0%とは扱わない。GPU使用率は瞬間のhardwareサンプルであり
-更新全体の平均ではない。A100実測・長時間OOM・品質の確認はColabで別途必要。
+HuBERT stops at L6 without changing earlier hidden states. Small CPU models verify exact equality before and after the change. Prefetch up to 256 items or an estimated 128 MiB and group identical audio lengths without padding or unit reordering. Distinct lengths stay at batch 1.
 
-## 保存・既存実験
+Performance logs report VRAM, examples per second, data wait, and nvidia-smi GPU utilization samples when available. Unavailable is null. Utilization samples are instantaneous. A100 timing, long-run OOM behavior, and quality need separate Colab verification.
 
-`research-metadata.json` は実際のmodel寸法、optimizer、precision、batch、特徴設定、
-辞書/G2P設定、データfingerprint、repository revision、Unit artifact、更新数を記録する。
-実際のvocoder重み/config/input SHAは推論後の `vocoder-lock.json` に記録する。
-Griffin-Limの重みSHAはnull（学習済み重み不要）。metadataもsnapshotに含まれる。
+## Persistence and existing experiments
 
-通常用の学習run名は `tt2-training-実験名-paper_exact-recipe-v2`、`s2ut-training-実験名-paper_exact-recipe-v3` 等。
-古いbatch/LRのcheckpointを新レシピへ自動移植しない。prepared dataは削除しない。
-同じ条件の新レシピrunは、同じ実験名・出力先・設定で再実行して再開する。
-practicalへ切り替えると別runになり、学習は新規に開始する。
+`research-metadata.json` stores actual model dimensions, optimizer, precision, batch, feature and dictionary/G2P settings, data fingerprint, repository revision, unit artifacts, and updates. After inference, `vocoder-lock.json` records actual weight, config, and input SHAs. Griffin–Lim has null weight SHA. Snapshots include metadata.
 
-既存Colabは `repository-revision.txt` に古いコードが固定されている場合がある。
-ノートブック更新だけではコードは更新されない。既存学習snapshotを保持したまま、
-使用revisionを明示更新する移行が必要。旧runに新設定を上書きしてはならない。
-本修正のpushは別途ユーザー承認後に行う。
+Typical run names are `tt2-training-<experiment>-paper_exact-recipe-v2` and `s2ut-training-<experiment>-paper_exact-recipe-v3`. Preserve prepared data and keep older batch and LR checkpoints with their recipes. Resume new-recipe runs using the same experiment, output path, and settings. Practical mode starts a separate run.
 
-push後、新しい完全なcommit SHAを確認してから、Colabで以下を明示実行する。
-`NEW_REVISION` の値は推測しない。旧snapshotは保持されるが旧モデルの学習は移行しない。
+An existing Colab experiment may pin old code in `repository-revision.txt`. Updating the notebook leaves that pin in place. Explicitly update the revision while preserving existing snapshots and run settings. The original release required separate user approval before pushing.
+
+After publication, obtain the complete commit SHA and run this migration. Existing snapshots are retained. The old model does not resume training under the new recipe.
 
 ```python
 import sys
-NEW_REVISION = 'ここにpush後の40桁SHA'
+NEW_REVISION = 'REPLACE_WITH_THE_PUBLISHED_40_CHARACTER_SHA'
 ensure_workspace()
 run('git', '-C', REPO, 'fetch', 'origin', NEW_REVISION)
 run('git', '-C', REPO, 'checkout', '--detach', NEW_REVISION)
 run(sys.executable, REPO / 'scripts/colab/use_paper_recipe.py',
     '--persistent', PERSISTENT, '--revision', NEW_REVISION, '--overwrite',
     '--separate-recipe-v3-runs')
-# 更新版ノートブックのセル1 → 5。初回setupは自動再構築。
-# 4A/4Bが未完了なら、その工程だけ先に再開する。
+# Run Cells 1 → 5 in the updated notebook. The initial setup rebuilds automatically.
+# Resume any unfinished 4A or 4B stage first.
 ```
 
-旧paper runがある場合も `--separate-recipe-v3-runs` の明示指定で保存したまま移行できる。
-この指定がなければ停止する。すでにrecipe-v3設定がある実験は別のcode/run移行が必要。
-データ、旧config、旧checkpointは削除しない。旧checkpointからの学習再開はしない。
+`--separate-recipe-v3-runs` preserves old paper runs and is required when migrating them. Experiments that already use recipe-v3 need a separate code/run migration. Data, old configs, and checkpoints are retained.
 
-## 根拠と検証範囲
+## Sources and verification scope
 
 `stabilized_pooled_v2` is another explicitly experimental fresh practical TT2
 recipe, not a correction claimed by the paper. It inherits seconds-v1 training
@@ -228,10 +129,6 @@ batch4, five layerwise valid-frame pooled moments, single-process FP32, hard
 cap1000. No old run's history, best selection metric or paper-exact defaults are
 reinterpreted. Small local evidence is not a full-corpus translation-quality result.
 
-[TT2 Appendix A・§5](https://arxiv.org/html/2107.08661v5)、
-[S2UT Appendix A・Table 4](https://aclanthology.org/2022.acl-long.235.pdf#page=12)、
-[固定fairseq Fisherレシピ](https://github.com/facebookresearch/fairseq/blob/3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99/examples/speech_to_speech/docs/direct_s2st_discrete_units.md)。
+[TT2 Appendix A and §5](https://arxiv.org/html/2107.08661v5), [S2UT Appendix A and Table 4](https://aclanthology.org/2022.acl-long.235.pdf#page=12), and the [pinned fairseq Fisher recipe](https://github.com/facebookresearch/fairseq/blob/3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99/examples/speech_to_speech/docs/direct_s2st_discrete_units.md).
 
-CPUテストは生成コマンド、固定fairseqの実architecture関数、逐次累積と通常累積の
-実Adam更新・再開一致、Griffin-Limの実音声復元と再利用、SHA固定を確認する。
-Drive/Colab実データmetadata、GPU本学習、翻訳品質、MOSは未検証。
+CPU tests cover generated commands, pinned fairseq architecture functions, real Adam updates and matching resume under sequential and standard accumulation, real Griffin–Lim synthesis and reuse, and SHA pinning. Drive and Colab real-data metadata, full GPU training, translation quality, and MOS remain unverified.

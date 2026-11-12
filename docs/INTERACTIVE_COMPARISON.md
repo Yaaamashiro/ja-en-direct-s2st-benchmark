@@ -1,103 +1,63 @@
-# 任意文から2方式のS2STを比較する（セル10）
+# Compare two S2ST systems on a custom sentence (Cell 10)
 
-## 手順
+## Workflow
 
-1. BF16対応GPUへ接続し、対応コードの通常ノートブックを開く。基本設定はセル1。
-2. 同じ実験名を設定し、セル1→**セル10だけ**を実行する。セル4〜8・再学習は不要。
-3. セル10の`INTERACTIVE_JA_TEXT`へ日本語1文を入力する（1〜500文字、改行不可。まず短文を推奨）。
-4. `INTERACTIVE_MODEL`で`s2ut` / `tt2` / `s2t_tts`を選ぶ。
-   前2つだけ保存済みrunが必要。`INTERACTIVE_RUN_NAME=''`なら既存のモデル別選択pointerを使用し、
-   一意でない場合は候補名を表示して停止する。明示名も指定可能。
-5. Qwen生成日本語音声、Cascadeと選択方式の英語音声・ASR文字起こし・参考BLEU・性能表を確認する。
+1. Connect to a BF16-capable GPU and open the standard notebook with compatible code. Configure it in Cell 1.
+2. Use the same experiment name and run Cell 1 → **Cell 10**. This workflow uses saved artifacts and skips Cells 4–8 and retraining.
+3. Enter one Japanese sentence in `INTERACTIVE_JA_TEXT` in Cell 10. Use 1–500 characters with no line breaks. Start with a short sentence.
+4. Set `INTERACTIVE_MODEL` to `s2ut`, `tt2`, or `s2t_tts`. S2UT and TT2 require saved runs. An empty `INTERACTIVE_RUN_NAME` uses the existing model-specific selection pointer. If selection is ambiguous, the cell lists candidates and stops. You can also name a run explicitly.
+5. Review the Japanese audio from Qwen, the English audio and ASR transcripts from Cascade and the selected system, diagnostic BLEU, and the performance table.
 
-同じ日本語WAVを両方式へ入力する。入力音声はQwen CustomVoiceで`language=Japanese`、
-既存のOno_Anna、固定SHA、公式samplingと文ごとseedを用いて生成する。
-その24kHz音声を既存学習入力に合わせて`scipy.signal.resample_poly(2/3)`で16kHzへ変換する。
-両方のWAVと変換方法を保存し、2方式が別々の日本語音声を合成することはない。
-合成音声での1例比較であり、自然な日本語音声・元のtest分布上の性能を表すものではない。
+Both systems receive the same Japanese WAV. Qwen CustomVoice synthesizes it using `language=Japanese`, Ono_Anna, the pinned SHA, official sampling, and a per-sentence seed. `scipy.signal.resample_poly(2/3)` converts the 24 kHz audio to 16 kHz to match training inputs. The cell saves both WAVs and the conversion method. This comparison uses one synthetic utterance. Performance on natural speech or the original test distribution needs a separate evaluation.
 
-## 比較と自動参照
+## Comparison and automatic reference
 
 ```
-入力日本語文 → Qwen日本語TTS → 共通の16kHz WAV
-                                 ├─ Cascade: Whisper日本語ASR → NLLB英訳 → Qwen英語TTS
-                                 └─ 選択方式: S2UT / TT2 / Whisper S2T→Qwen英語TTS
-各英語音声 → 固定英語ASR → CascadeのNLLB英訳を自動参照にしたsentence BLEU
+Japanese input text → Qwen Japanese TTS → shared 16 kHz WAV
+                                          ├─ Cascade: Whisper Japanese ASR → NLLB English translation → Qwen English TTS
+                                          └─ Selected system: S2UT / TT2 / Whisper S2T → Qwen English TTS
+Each English output → pinned English ASR → sentence BLEU using Cascade's NLLB translation as the automatic reference
 ```
 
-**Cascade英訳は正解ではなく機械的な擬似参照。**
-このBLEUはCascadeへの一致度であり、翻訳精度として順位付けできない。
-Cascadeが誤訳すると、その誤訳と一致する方式の点数が高くなる。
-Cascade自身のASR-BLEUは主にTTS/評価ASRの整合性を見る値であり、自己評価による翻訳精度ではない。
-1文BLEUは表現の違いや文の長さにも敏感。正式test BLEUと混ぜない。
+**Cascade provides a machine-generated reference.** BLEU here measures agreement with Cascade. A model that repeats a Cascade mistranslation can score well. Cascade's own ASR-BLEU mainly measures agreement across TTS and evaluation ASR. Sentence BLEU is sensitive to wording and sentence length. Keep it separate from formal test BLEU.
 
-擬似参照は評価にだけ使用する。候補モデルの関数は日本語音声と保存済みモデルしか受け取らず、
-Cascade ASR/MT文、入力日本語の正解文字列、英語の教師を与えない。
-評価ASRも擬似参照文をプロンプトとして使用しない。
+The automatic reference is used only for scoring. The selected system receives Japanese audio and its saved model. It has no access to Cascade ASR or MT text, gold Japanese text, or English targets. Evaluation ASR does not receive the reference as a prompt.
 
-## 既存設定を変えない範囲
+## Model settings
 
-| 部品 | 採用する設定 | 理由・検証上の制約 |
+| Component | Settings | Rationale and scope |
 |---|---|---|
-| S2UT | 保存dev-best、既存fairseq frontend/非train変換、beam10、max_len_a=1、FP32推論 | 既存`generation_command`の評価条件を維持。公式datasetのsource-only経路を使い、dummy教師・新しい辞書・train/dev/test TSVを作らない |
-| Unit音声化 | SHA照合した公式LJSpeech Code HiFi-GAN、学習済みduration predictor | 既存paper vocoderと同じ。声はLJSpeech寄りで元話者保持の評価ではない |
-| TT2 | 保存dev-best/較正情報、checkpointに結び付いたsource frontend、max_phones400/max_frames3000/beam1 | 既存native推論条件を維持。EOSが出ないモデルを強制打切りで成功扱いにしない |
-| Mel音声化 | Griffin–Lim、32反復、位相seed1 | 少数新規入力の明示的工学設定。原論文の未公開反復数を再現したとは主張しない。既存Mel specと逆変換を使用 |
-| Cascade/S2T→TTS | 既存configのSHA固定モデル、同じ英語Qwen音声化 | 日本語Qwen入力以外のモデル設定・重みを変更しない |
-| Qwen | 共通の`official_sampling_eos_v1` | sampling・EOS監視・上限・seedの差分根拠は[監査記録](CASCADE_TTS_AUDIT.md)を継承 |
+| S2UT | Saved dev-best, existing fairseq frontend and non-training transforms, beam 10, max_len_a=1, FP32 inference | Uses the evaluation settings from `generation_command` and the official dataset's source-only path. No dummy targets, new dictionaries, or train/dev/test TSVs. |
+| Unit synthesis | SHA-verified official LJSpeech Code HiFi-GAN with trained duration predictor | Uses the existing paper vocoder. The voice resembles LJSpeech, so this setup does not measure source-speaker preservation. |
+| TT2 | Saved dev-best and calibration metadata, checkpoint-bound source frontend, max_phones=400, max_frames=3000, beam=1 | Uses the existing native inference conditions. Missing EOS counts as a failure. |
+| Mel synthesis | Griffin–Lim, 32 iterations, phase seed 1 | Explicit settings for a small number of new inputs. The paper's iteration count is unpublished. Uses the existing mel specification and inverse transform. |
+| Cascade and S2T→TTS | Models pinned by SHA in existing configs and the same English Qwen synthesis | Reuses model settings and weights for the downstream English pipeline. |
+| Qwen | Shared `official_sampling_eos_v1` | Sampling, EOS monitoring, limits, and seed decisions are documented in the [audit](CASCADE_TTS_AUDIT.md). |
 
-推論のみでoptimizer更新・訓練はしない。選択run以外のTT2/S2UTや自前Unit/Mel runは復元しない。
-元の依存環境を厳密復元し、その中で固定Qwen等のimportを確認する。
-既存環境に無断で依存を追加したり、保存SHAを差し替えたりしない。
+The cell runs inference and restores only the selected TT2 or S2UT run as needed. It restores the original dependency environment exactly and checks imports for pinned components such as Qwen. Existing dependency versions and saved SHAs govern restoration.
 
-## 速度・メモリ
+## Timing and memory
 
-GPU推論は**逐次・別プロセス**。同時ロードのOOMや相互干渉を避ける。
-これはユーザーが選択した実行方式であり、本セルの逐次ロードで必要なピークを測る。
-全モデルを同時常駐させる既存CLI一括経路のVRAM必要量と同一視しない。
-表示値は単一発話・batch1の**初回推論**で、ウォームアップ・反復測定・統計検定はない。
-モデル間の順番、カーネル初期化、GPUクロック、キャッシュ、他のColab負荷に影響される。
+GPU inference runs **sequentially in separate processes** to avoid concurrent-load OOMs and interference. This is the user's chosen execution mode. Peak measurements describe sequential loading in this cell. The existing CLI can hold all models at once and has different VRAM requirements. Displayed timings cover a **first inference** for one utterance with batch size 1. Order, kernel initialization, GPU clocks, caches, and other Colab workload can affect them. This run uses no warmup, repeated measurements, or statistical tests.
 
-- 翻訳・音声化秒: CascadeはASR+MT+英語TTS、候補は本体推論+音声化を合算。
-  source frontendとローカル音声/feature serializationは含む。CUDAを同期して計時する。
-- 共通日本語合成、プロセス起動、モデル取得/ロード、Drive保存、評価用英語ASRは上記に含めない。
-- worker取得・ロード秒は別表示。HF取得が含まれる場合がある一方、親プロセスで行う
-  Drive snapshot復元は含まれないため、コールドダウンロード速度の公平な比較ではない。
-- 入力RTFは翻訳・音声化秒/共通日本語秒数。JSONには出力音声長で割るRTFも残す。
-- RAMはworker process RSSの50msサンプリングpeak。Colab全体や別プロセスの使用量ではなく、
-  短いpeakを取り逃す可能性がある。psutilがない/権限等で取れない場合は取得不可。
-- VRAMは`torch.cuda.max_memory_allocated/reserved`。ロードと推論を含むピーク、
-  allocated/GPU総容量の割合を表示する。CUDA context・他プロセス・Torch外の使用量は含まない。
-  nvidia-smiのdevice全体使用量やGPU計算利用率と同じではない。
-- 逐次ステージのメモリは**最大値**を取り、合計しない。失敗・未計測を0や高速として表示しない。
+- Translation and synthesis time sums ASR, MT, and English TTS for Cascade, and model inference and synthesis for the candidate. It includes the source frontend and local audio and feature serialization. Timing synchronizes CUDA.
+- This interval excludes shared Japanese synthesis, process startup, model retrieval and loading, Drive writes, and English ASR for evaluation.
+- Worker retrieval and load time is displayed separately. It can include Hugging Face retrieval but excludes Drive snapshot restoration by the parent process, so it cannot fairly compare cold download speeds.
+- Input RTF divides translation and synthesis seconds by the shared Japanese duration. JSON also records RTF based on output audio duration.
+- RAM is peak worker RSS sampled every 50 ms. This can miss short peaks and excludes the rest of Colab and other processes. RAM is unavailable if psutil or permissions are missing.
+- VRAM uses `torch.cuda.max_memory_allocated/reserved`, includes loading and inference, and reports allocated memory as a fraction of total GPU capacity. It excludes the CUDA context, other processes, and non-Torch allocations. Device-wide nvidia-smi memory and GPU compute utilization are different measurements.
+- Memory for sequential stages is aggregated using the maximum. Failures and unavailable measurements are shown as such.
 
-各測定にセッションIDとGPU情報を保存する。中断再開で異なるセッション/GPUの値が混ざった場合は
-そのまま元の測定値として保持し、同一条件の速度比較ではない旨を画面/レポートへ表示する。
-正確な性能評価には、同一GPU/入力集合・ウォームアップ・複数回反復を行う別の正式プロトコルが必要。
+Each measurement records its session ID and GPU. When resumed measurements come from different sessions or GPUs, the original values are kept and the UI and report mark the conditions as different. A formal performance study requires the same GPU and inputs, warmup, and repeated runs.
 
-## 保存・再開
+## Storage and resume
 
-`<実験>/interactive/<ID>/`へplan、段階receipt、入力/出力WAV、中間Mel/Unit、ASR文、
-`comparison.json`、`report.md`を保存。学習・test評価・コーパスには書き込まない。
-音声は途中段階ごとにSHA照合して保存し、成功済みステージは再利用する。
-失敗attemptも`history/`へ残す。破損があれば停止し、黙って音声を再生成しない。
+`<experiment>/interactive/<ID>/` stores the plan, stage receipts, input and output WAVs, intermediate mel and unit outputs, ASR text, `comparison.json`, and `report.md`. Training, test evaluation, and the corpus are read-only here. Verify SHA before saving each stage's audio and reuse successful stages. Failed attempts go to `history/`. Corrupt files stop the run.
 
-切断後は同じ設定のセル1→10。全段階完了済みなら保存音声・過去の測定値を再表示し、
-学習checkpointの再ダウンロードやGPU推論は不要。
-同じrun名の学習が後から進んだ場合、既存の完了比較は保存snapshotに固定したまま表示する。
-新しいsnapshotや新しい性能測定には`INTERACTIVE_REMEASURE=True`を選ぶ。
-これは毎回別IDを作り、旧結果は削除しない。中断した再測定を続けるときはFalseへ戻す。
-TT2等の候補が失敗しても独立なCascade結果は残り、エラーと「BLEU/性能は算出不可」を表示する。
+After disconnection, use Cells 1 → 10 with the same settings. Completed comparisons display stored audio and measurements without fetching checkpoints or running GPU inference. They stay pinned to their saved snapshot as training under the same run name advances. Set `INTERACTIVE_REMEASURE=True` for a new snapshot or timing run. It creates a new ID and retains previous results. Set it back to False to resume an interrupted measurement. If a candidate such as TT2 fails, Cascade results remain available and the UI reports the error and unavailable BLEU and performance.
 
-新規依存は追加しない。既存SciPy/SoundFile/Torch/SacreBLEU/Transformers/fairseq/Qwenを使用する。
-CPU/モックでsource-only入出力・日本語生成/resample・教師非入力・保存/再開・失敗分離・
-メモリ集計・通常セル導線を検証する。本物の保存checkpointとQwenを使ったColab/GPU E2Eは未検証。
+The cell uses existing SciPy, SoundFile, Torch, SacreBLEU, Transformers, fairseq, and Qwen dependencies. CPU tests and mocks cover source-only inputs and outputs, Japanese synthesis and resampling, exclusion of targets, save and resume, independent failures, memory aggregation, and the standard notebook flow. Real-weight Colab/GPU end-to-end inference remains unverified.
 
-実機テストは`tests/gpu/test_interactive_comparison_gpu.py`に分離する。
-`S2ST_INTERACTIVE_GPU_PLAN`へ検証済みS2UT用planを指定したときだけ、別の一時保存先で
-実Qwen日本語合成→2方式翻訳→音声化→ASR/参考BLEUを実行する。モデル取得・CU消費があるため、
-通常CPUテストでは実行しない。TT2の翻訳品質/EOS問題の解消をこの機能の実装完了条件と混同しない。
+The hardware test is `tests/gpu/test_interactive_comparison_gpu.py`. Set `S2ST_INTERACTIVE_GPU_PLAN` to a verified S2UT plan to test real Qwen Japanese synthesis, both translations, English synthesis, and ASR and diagnostic BLEU in a separate temporary location. It fetches models and consumes compute units, so it is excluded from standard CPU runs. TT2 translation quality and EOS are independently tracked.
 
-今回の検証: 新機能26件、全CPUテスト **775 passed / 2 skipped / 8 GPU tests deselected**。
-Python 3.10構文互換性と`git diff --check`も確認した。実行環境はローカルPython 3.13/CPUであり、
-Colab Python 3.10/GPU上の実重みE2E・実VRAM値を検証した結果ではない。
+Verification reported 26 feature tests and **775 passed, 2 skipped, and 8 GPU tests deselected** for the full CPU run. Python 3.10 syntax compatibility and `git diff --check` passed. These checks ran locally on Python 3.13/CPU. Real weights and VRAM measurements on Colab Python 3.10/GPU remain to be verified.

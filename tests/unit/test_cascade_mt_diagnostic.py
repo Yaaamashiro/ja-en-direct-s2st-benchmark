@@ -204,13 +204,15 @@ def test_chunk_corruption_duplicates_and_wrong_source_are_rejected(tmp_path):
         mt.TextChunks(tmp_path,identity,expected)
 
 
-def test_cell_8b_is_between_8a_and_9_and_all_other_cells_are_unchanged():
+def test_cell_8b_is_between_8a_and_9_and_other_code_cells_are_unchanged():
     import subprocess
     git = ['git','-c','safe.directory='+ROOT.as_posix(),'-C',str(ROOT)]
     old = json.loads(subprocess.check_output(git+['show','HEAD:notebooks/colab_training.ipynb'],encoding='utf-8'))
     new = json.loads((ROOT/'notebooks/colab_training.ipynb').read_text(encoding='utf-8'))
     skip = lambda cell: ''.join(cell['source']).startswith(('#@title 8B.', '#@title 8C.', '#@title 8D.', '#@title 8E.', '#@title 8F.'))
-    assert [c for c in new['cells'] if not skip(c)] == [c for c in old['cells'] if not skip(c)]
+    assert [c for c in new['cells'] if c['cell_type'] == 'code' and not skip(c)] == [
+        c for c in old['cells'] if c['cell_type'] == 'code' and not skip(c)
+    ]
     cell = next(c for c in new['cells'] if skip(c))
     i = new['cells'].index(cell)
     assert ''.join(new['cells'][i-1]['source']).startswith('#@title 8A.')

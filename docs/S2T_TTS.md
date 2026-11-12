@@ -1,34 +1,37 @@
 # S2T→TTS baseline
 
-## モデルと出力
+## Models and outputs
 
-第4方式のIDは`s2t_tts`、CLIは`s2st-benchmark s2t-tts run`です。
-S2UT、Translatotron 2、ASR→MT→TTS Cascadeと同じcommon/testを使います。
+The fourth system has ID `s2t_tts` and CLI command `s2st-benchmark s2t-tts run`.
+It uses the same common test split as S2UT, Translatotron 2, and ASR→MT→TTS Cascade.
 
-- S2T: `openai/whisper-large-v3`、Japanese speech → English text、`task=translate`。
-  revisionは`06f233fe06e710322aca913c1bc4249a0d71fce1`。
-  実装時に[Hugging Face model API](https://huggingface.co/api/models/openai/whisper-large-v3)で確認したSHAです。
-- TTS: `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`、revision
-  `f00cf133b78d3c2c35857faba3b1be9b98c4f971`、`Ono_Anna`、English。
-- `configs/s2t_tts/default.yaml`から条件を読み込みます。`main` revisionは拒否します。
-- Whisperは`do_sample=False, condition_on_prev_tokens=False`。
-  共通`QwenTTS`は固定モデルの公式sampling（main/subtalkerともTrue）と文ごとの固定seedを使用します。
-  旧greedy条件とは別runです。変更理由・EOS監視・上限の意味は[監査記録](CASCADE_TTS_AUDIT.md)を参照してください。
-  決定的デコード設定ですが、異なるGPU/runtime間のbitwise一致は保証しません。
+- S2T uses `openai/whisper-large-v3` to translate Japanese speech to English text
+  with `task=translate`. Its revision is `06f233fe06e710322aca913c1bc4249a0d71fce1`,
+  verified at implementation time against the [Hugging Face model API](https://huggingface.co/api/models/openai/whisper-large-v3).
+- TTS uses `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` at revision
+  `f00cf133b78d3c2c35857faba3b1be9b98c4f971`, with `Ono_Anna` and English.
+- Settings come from `configs/s2t_tts/default.yaml`. A `main` revision is rejected.
+- Whisper uses `do_sample=False, condition_on_prev_tokens=False`. The shared
+  `QwenTTS` uses the pinned model's official sampling settings (both main and
+  subtalker enabled) and a fixed seed per sentence. This creates a separate run
+  from the old greedy setting. The decoding settings do not guarantee bitwise
+  equality across GPUs or runtimes. See the [audit](CASCADE_TTS_AUDIT.md) for
+  the rationale, EOS monitoring, and output limits.
 
-既存CascadeはWhisper large-v3-turboの`transcribe` → NLLB-200 distilled 600M
-→ QwenTTSのままです。Whisper loaderとjournal処理だけを共通化しています。
-以前のCascade journal identityと予測形式は維持しています。
+The existing Cascade continues to use Whisper large-v3-turbo in `transcribe` mode,
+followed by NLLB-200 distilled 600M and QwenTTS. The systems share the Whisper loader
+and journal code. Existing Cascade journal identities and prediction formats are preserved.
 
-`RUNS_ROOT/s2t_tts-smoke/predictions/`（configの`run_id`で変更可能）に
-`predictions.jsonl`、`audio/*.wav`、`predictions.lock.json`、`run-metadata.json`を保存します。
-翻訳は`s2t_en_text`、時間は`s2t_seconds`と`tts_seconds`に残します。
-その他は共通prediction形式で、同じ評価器・normalization・referenceを使用します。
+`RUNS_ROOT/s2t_tts-smoke/predictions/` stores `predictions.jsonl`, `audio/*.wav`,
+`predictions.lock.json`, and `run-metadata.json`. Change the output run via `run_id`
+in the config. Translations are stored in `s2t_en_text`, with timings in `s2t_seconds`
+and `tts_seconds`. The remaining prediction fields, evaluator, normalization,
+and references are shared.
 
-## 実行
+## Execution
 
-先に4つのroot環境変数を設定し、common manifestを生成・検証してください。
-Docker imageは共有Cascade runtimeを使います。新しいimageは不要ですが変更後の再buildは必要です。
+Set the four root environment variables and generate and validate the common
+manifests first. Rebuild the shared Cascade Docker image after updating the code.
 
 ```bash
 docker compose run --rm cascade s2t-tts run --profile smoke --split test --dry-run
@@ -36,21 +39,24 @@ docker compose run --rm cascade s2t-tts run --profile smoke --split test --limit
 docker compose run --rm cascade s2t-tts run --profile smoke --split test --limit 5 --resume
 ```
 
-Colab/nativeでは同じ引数を`python -m direct_s2st.cli`へ渡せます。
-`--dry-run`はconfig・manifestパス・run ID・出力先・shard計画を表示し、モデルをロードしません。
-`--limit`はshardごとの上限です。全件は省略します。
-`--shard-index 0 --num-shards 2`で既存方式と同じstable shard分割ができます。
-shard出力は`predictions/shard-00000-of-00002`等です。評価前に全shardを統合してください。
-単体CLIは自動統合しません（既存Cascadeと同じ）。
+On Colab or a native runtime, pass the same arguments to `python -m direct_s2st.cli`.
+`--dry-run` displays the config, manifest path, run ID, output location, and shard
+plan without loading models. `--limit` applies per shard. Omit it to run the full
+split. `--shard-index 0 --num-shards 2` uses the same stable sharding as the existing
+systems. Shard outputs are stored under paths such as
+`predictions/shard-00000-of-00002`. Merge all shards before evaluation. Like the
+existing Cascade, the standalone CLI leaves the merge to the caller.
 
-`--resume`は同じ入力・model identity・run ID・split・limit・shard条件が必要です。
-成功済み音声をSHA照合して再利用し、失敗sampleを再試行します。
-成功済み音声が欠落・改変されていれば停止します。確認後に明示的な`--overwrite`で
-再生成するか、新しいrun IDを使ってください。`--overwrite`は選択runのjournalを再作成します。
-CUDA/OOM等のfatal errorは記録してprocessを停止します。
+`--resume` requires identical inputs, model identity, run ID, split, limit, and
+sharding. It verifies the SHA of successful audio, reuses it, and retries failed
+samples. Missing or modified successful audio stops the run. After checking the
+files, regenerate with an explicit `--overwrite` or use a new run ID. The overwrite
+flag recreates the selected run's journal. Fatal errors such as CUDA failures or
+out-of-memory errors are recorded and stop the process.
 
-共通評価は`configs/evaluation/default.yaml`を複製し、`run_id: s2t_tts-smoke`を設定して実行します。
-評価モデル等をS2T→TTSだけ変更しないでください。4方式まとめての計画・実行は以下です。
+For shared evaluation, copy `configs/evaluation/default.yaml` and set
+`run_id: s2t_tts-smoke`. Use the same evaluation settings across all systems.
+The commands below plan, run, and resume all four systems respectively.
 
 ```bash
 python scripts/smoke/suite.py --env-file .env --name benchmark-smoke
@@ -58,32 +64,37 @@ python scripts/smoke/suite.py --env-file .env --name benchmark-smoke --execute
 python scripts/smoke/suite.py --env-file .env --name benchmark-smoke --execute --resume
 ```
 
-vocoder学習ありでは25段階です。`s2t-tts`と`s2t-tts-evaluate`が追加されています。
-最終acceptanceは全common/test ID・実WAV・評価条件と全4方式を要求します。
-以前の3方式の個別結果は引き続き読めますが、3方式だけでは新しい完了判定に通りません。
+The workflow has 25 stages when vocoder training is enabled, including the added
+`s2t-tts` and `s2t-tts-evaluate` stages. Final acceptance requires all common test
+IDs, real WAVs, matching evaluation conditions, and all four systems. Individual
+results from earlier three-system runs remain readable.
 
 ## Colab
 
-[通常用ノートブック](../notebooks/colab_training.ipynb)と
-[テスト用ノートブック](../notebooks/colab_smoke.ipynb)に4方式推論・共通評価・比較セルがあります。
-Drive mount → 固定Python 3.10 setup → corpus/common確認 → 学習またはsnapshot復元
-→ direct推論/vocoder → Cascade → S2T→TTS → 共通評価 → verify/aggregateの順です。
-設定・保存先・再開方法は[Colabガイド](COLAB.md)を参照してください。
+The [training notebook](../notebooks/colab_training.ipynb) and
+[smoke notebook](../notebooks/colab_smoke.ipynb) provide inference, shared evaluation,
+and comparison for all four systems. The workflow mounts Drive, sets up pinned
+Python 3.10, checks the corpus and common manifests, trains or restores snapshots,
+runs direct inference and vocoding, runs Cascade and S2T→TTS, then evaluates,
+verifies, and aggregates. See the [Colab guide](COLAB.md) for configuration, storage,
+and resume instructions.
 
-`setup.py --inference`は`colab-inference.txt`を`colab310.txt`の制約下で追加します。
-torchを別versionに交換しません。ffmpegも導入します。各重い処理は独立したsubprocessで
-終了時にGPUメモリを解放します。S2Tには学習checkpointは不要です。
+`setup.py --inference` installs `colab-inference.txt` under the constraints of
+`colab310.txt`, retains the pinned torch version, and installs ffmpeg. Each heavy
+stage runs in its own subprocess to release GPU memory on exit. S2T needs no
+training checkpoint.
 
-**BLASERの制約:** SONAR/fairseq2の依存は復帰したPython 3.10環境では
-別途互換性確認が必要です。Colabでは既定のBLASER無効設定でASR-BLEU、ECAPA、duration/silence、
-RTF等を使います。`evaluation-core.txt`はこの共通評価依存だけを分離したものです。
-BLASERを有効化して黙って省略する処理は追加していません。
-必要時は対応したDocker評価runtimeで全4方式を評価してください。
-Dockerの既存`evaluation.txt`はSONARを引き続き含みますが、実build・BLASER実行は未検証です。
+**BLASER compatibility.** SONAR and fairseq2 require separate compatibility checks
+in the restored Python 3.10 environment. Colab defaults to BLASER disabled and
+uses ASR-BLEU, ECAPA, duration and silence metrics, and RTF. The
+`evaluation-core.txt` file isolates these shared evaluation dependencies. Enabling
+BLASER does not silently skip it. To use BLASER, evaluate all four systems with a
+compatible Docker evaluation runtime. Docker's existing `evaluation.txt` still
+includes SONAR. An actual Docker build and BLASER run remain unverified.
 
-## 実装・検証報告（2026-09-26）
+## Implementation and verification (2026-09-26)
 
-主な追加ファイル:
+### Main files added
 
 - `configs/s2t_tts/default.yaml`
 - `src/direct_s2st/s2t_tts/{__init__,s2t,pipeline}.py`
@@ -92,25 +103,33 @@ Dockerの既存`evaluation.txt`はSONARを引き続き含みますが、実build
 - `requirements/{colab-inference,evaluation-core}.txt`
 - `tests/unit/test_s2t_tts_pipeline.py`
 
-CLI、SYSTEMS、acceptance、smoke suite、Colab notebook/setup/restore、Docker依存、
-既存テストとREADME/DESIGN/関連文書を更新しました。Qwen実装・既存Cascadeモデル設定は変更していません。
+The change updated the CLI, SYSTEMS, acceptance, smoke suite, Colab notebooks,
+setup and restore, Docker dependencies, existing tests, README, DESIGN, and
+related documentation. It retained the Qwen implementation and existing Cascade
+model settings.
 
-検証コマンド:
+Run the CPU tests from the checkout.
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -m "not gpu" -q -p no:cacheprovider
 ```
 
-Python 3.10復帰後のローカルPython 3.12.14によるCPUテストは126 passed、GPUテスト3件はdeselected。checkpoint検証をmockした
-4方式acceptance、3方式拒否、S2T/TTS呼び出し順、SHA・identity不一致拒否、resume、
-overwrite、shard、共通評価受入、dry-run非ロード、notebook Python構文、復元のみの動作を確認しました。
-実音声E2E成功を意味しません。
-25段階smoke計画の`PLAN_ONLY`成功、`git diff --check`も確認しました。
+After restoring Python 3.10 support, a local CPU test run on Python 3.12.14 reported
+126 passed and 3 GPU tests deselected. Tests covered four-system acceptance with
+mocked checkpoint verification, rejection of only three systems, S2T/TTS call
+order, rejection of SHA and identity mismatches, resume, overwrite, sharding,
+shared evaluator acceptance, dry-run without model loading, notebook Python
+syntax, and restore-only behavior. The 25-stage smoke plan reached `PLAN_ONLY`,
+and `git diff --check` passed.
 
-Python 3.10復帰後に`uv pip compile requirements/colab310.txt requirements/colab-inference.txt
+Dependency resolution for restored Python 3.10 was verified with
+`uv pip compile requirements/colab310.txt requirements/colab-inference.txt
 --python-version 3.10
---python-platform x86_64-unknown-linux-gnu`で依存解決を確認しています。
-これはColab実機へのinstall・import・GPU動作確認ではありません。
+--python-platform x86_64-unknown-linux-gnu`. This check covered dependency
+resolution only.
 
-未検証: 実コーパスでの英語WAV生成、A100での時間/VRAM、Colab実機setupとVM切断復帰、
-Docker build/run、実モデルによる4方式評価、BLASER、音声明瞭度・翻訳品質・論文数値再現。
+Unverified items include English WAV generation on the real corpus, A100 timing
+and VRAM use, Colab installation, imports, GPU behavior and recovery after VM
+disconnection, Docker build and execution, four-system evaluation with real
+models, BLASER, intelligibility, translation quality, and reproduction of the
+papers' numerical results.

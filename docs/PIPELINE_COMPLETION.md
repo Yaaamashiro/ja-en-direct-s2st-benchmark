@@ -1,28 +1,32 @@
-# 実装範囲と4方式の実行手順
+# Implementation scope and four-system workflow
 
-## 今回追加した実装
+## Implemented features
 
-- unit／mel vocoderのtrain専用学習。固定fairseq CodeGenerator／Generatorを使い、
-  MPD・MSD、least-squares GAN、feature matching、mel L1で実際にoptimizer更新する。
-  unit durationは元のHuBERT列のrun lengthに対するlog(1+duration) MSEで学習する。
-  推論では既存の学習済みduration predictorを使用し、等間隔展開で代用しない。
-- generator、識別器、両optimizer、RNG、入力・音声hashをatomic checkpointへ保存。
-  再開時に設定・元音声・unit内容を照合。dev/testでのvocoder fittingは拒否する。
-- TT2は相対位置Conformer・2D subsampling・kernel32・masked BatchNorm、
-  reference preset、独立source/target mel仕様、beam推論、勾配蓄積、DDP、
-  rank別checkpoint再開、dev検証を実装。既定は小型CPU・2updatesである。
-- S2UTは固定criterion/modelを変更せず、主loss・3補助loss・5parameter groupの
-  有限かつ非ゼロの勾配を監査する実行wrapperを追加した。
-- TT2・S2UT・vocoder・Cascadeの失敗記録と再開、評価の入力内容照合。
-  成功したサンプルを再利用する際にも出力hashを確認する。
-- 同一test splitの4方式を25段階で実行し、WAV・ASR結果・評価条件・checkpointを
-  確認してから比較reportを生成する。単なる終了コード0をE2E成功としない。
+- Train unit and mel vocoders on the training split using the pinned fairseq CodeGenerator
+  and Generator. Optimizer updates use MPD, MSD, least-squares GAN losses, feature matching,
+  and mel L1. The unit duration predictor learns from run lengths in the original HuBERT
+  sequence using MSE on log(1 + duration). Inference uses the trained duration predictor.
+- Save the generator, discriminators, both optimizers, RNG state, and input and audio hashes
+  in an atomic checkpoint. Resume verifies the configuration, source audio, and units.
+  Vocoder fitting rejects dev and test data.
+- TT2 implements a relative-position Conformer, 2D subsampling, kernel size 32, masked
+  BatchNorm, reference presets, independent source and target mel settings, beam search,
+  gradient accumulation, DDP, per-rank checkpoint recovery, and dev validation.
+  The default is a small CPU model with two updates.
+- The S2UT training wrapper audits finite, nonzero gradients for the main loss, three
+  auxiliary losses, and five parameter groups using the pinned criterion and model.
+- TT2, S2UT, vocoders, and Cascade record failures and support recovery. Evaluation verifies
+  input content, and reuse of successful samples verifies output hashes.
+- A 25-stage workflow runs four systems on the same test split. It checks WAV files,
+  ASR results, evaluation conditions, and checkpoints before producing the comparison report.
+  A zero exit code alone does not satisfy end-to-end acceptance.
 
-## 環境が決まってから実行する
+## Run after configuring the environment
 
-`.env.example`を参考にCORPUS_ROOT、EXPERIMENT_DATA_ROOT、RUNS_ROOT、CACHE_ROOTを指定する。
-corpusはread-only、派生物はbenchmark側でのみ作成する。固定Docker imageを先にbuildする。
-以下はリポジトリrootから実行する。最初のコマンドは計画を表示するだけである。
+Use `.env.example` to set `CORPUS_ROOT`, `EXPERIMENT_DATA_ROOT`, `RUNS_ROOT`,
+and `CACHE_ROOT`. Mount the corpus read-only and write derived data on the benchmark side.
+Build the pinned Docker images first. Run the following from the repository root.
+The first command prints the plan.
 
 ```sh
 python scripts/smoke/suite.py --env-file .env --name benchmark-smoke --limit 5 --max-updates 2
@@ -30,54 +34,64 @@ python scripts/smoke/suite.py --env-file .env --name benchmark-smoke --limit 5 -
 python scripts/smoke/suite.py --env-file .env --name benchmark-smoke --limit 5 --max-updates 2 --execute --resume
 ```
 
-`--docker-context`で接続先を選択できる。remote Dockerの場合、corpus・出力・repoの
-bind mount元はdaemon側にも存在する必要がある。接続先へのファイル転送は行わない。
-コンテナのconfig mountを変えるなら`.env`のS2ST_CONTAINER_CONFIG_ROOTと
-`--container-config-root`を同じ値にする。
+Use `--docker-context` to choose the Docker host. For remote Docker, the corpus, output,
+and repository bind-mount sources must already exist on the daemon host. The driver
+does not transfer files. To change the container config mount, set
+`S2ST_CONTAINER_CONFIG_ROOT` in `.env` to the same value as `--container-config-root`.
 
-既定では両vocoderをtrain splitでfitする。互換性確認済み重みを使用する場合は
-`--vocoder-mode pretrained`を指定し、configs/vocoder/{unit,mel}.yamlのcheckpoint／configを設定する。
-学習したvocoderを使う場合、生成されるconfigはrun配下のvocoder-unit／vocoder-melを参照する。
-コーパスの再生成は行わない。設定済みモデルは各stageで必要に応じてdownloadされ、
-unit artifactも専用stageで取得する。未指定の代替モデルへ切り替えることはない。
+The default fits both vocoders on the train split. To use verified compatible pretrained
+weights, pass `--vocoder-mode pretrained` and set the checkpoint and config in
+`configs/vocoder/{unit,mel}.yaml`. When fitting vocoders, generated configs reference
+`vocoder-unit` and `vocoder-mel` within the run. Stages download the configured
+models as needed, and a dedicated stage retrieves unit artifacts. The workflow reuses
+the existing corpus and requires explicitly configured models.
 
-生成設定はconfigs/local/<name>、各方式の成果物はRUNS_ROOT/<name>-<system>に置く。
-完了判定はEXPERIMENT_DATA_ROOT/results/e2e-acceptance.json、比較結果は同じresults以下。
-plan、設定、環境ファイルhashが変わった再開は拒否する。成功stageは繰り返さず、失敗stageを再開する。
-初回checkpoint保存前にtrainが停止した場合は自動的に既存runを消去しない。
-ログを確認し、新しいname／派生data rootを使うか、個別コマンドの明示的--overwriteで再実行する。
+Generated configs go to `configs/local/<name>` and system outputs go to
+`RUNS_ROOT/<name>-<system>`. Completion is recorded in
+`EXPERIMENT_DATA_ROOT/results/e2e-acceptance.json`, with comparison outputs in the same
+`results` directory. Resume rejects changed plan, configuration, or environment file
+hashes. It skips successful stages and continues from the failed stage. If training
+stops before the first checkpoint, the existing run is preserved. Inspect its logs and
+use a new name or derived-data root, or explicitly pass `--overwrite` to the individual command.
 
-`--device cpu`はdirect model/vocoder用で、Cascadeとevaluationは各モデル実装の設定を使う。
-GPUを利用しない全パイプラインを保証するオプションではない。
-大規模・multi-GPU学習の性能検証や自動クラウド環境構築は今回の完了判定に含めない。
+`--device cpu` applies to direct models and vocoders. Cascade and evaluation use their
+own model settings, so some stages can still use a GPU. Acceptance here excludes
+large-scale or multi-GPU performance and automated cloud provisioning.
 
-## 実際に検証できたもの／できていないもの
+## Verification and limitations
 
-CPU回帰テストは **92 passed, 3 deselected**。TT2 forward/backward・optimizer更新・checkpoint保存と完全一致再開、
-固定fairseq HiFi-GAN生成器＋公式period識別器のoptimizer更新、duration教師、
-失敗再開・hash拒否・無音WAVの完了拒否・25段階計画を確認した。
-CPU Glooの実2プロセス学習とrank別再開の完全一致も確認した。
-GANのCPUテストはメモリを抑えるため1個のperiod識別器を使う。productionのMPD/MSD全体、
-CodeGeneratorの実音声学習、固定fairseq frontend、Linuxコンテナ統合は未実行である。
-テスト用合成テンソルや制御したEOS出力を実音声E2E成功と扱わない。
+CPU regression tests reported **92 passed, 3 deselected**. They covered TT2 forward
+and backward passes, optimizer updates, checkpoint saving and exact resume, optimizer
+updates with the pinned fairseq HiFi-GAN generator and official period discriminator,
+duration targets, recovery after failure, hash mismatch rejection, rejection of silent
+WAVs during acceptance, and the 25-stage plan. A real two-process CPU Gloo run also
+verified exact recovery with per-rank checkpoints.
 
-このworkspaceには実行可能なDocker／対象corpus／学習済み重みが揃っていないため、
-4方式の実音声E2E成功、収束、音声明瞭度、BLEU結果は未確認である。
-2updatesは実行経路の確認用であり、TT2がEOSを出すことやvocoderの品質を保証しない。
-EOS未到達や出力上限超過は失敗として記録し、強制音素・無音・random出力で補わない。
-原論文との対応と数値未検証箇所は[REFERENCE_PARITY.md](REFERENCE_PARITY.md)に残す。
-独立実装であり原著者の完全再現とは主張しない。
+The CPU GAN test uses one period discriminator to limit memory use. The full production
+MPD/MSD, CodeGenerator training on real audio, the pinned fairseq frontend, and Linux
+container integration were not run. Synthetic tensors and controlled EOS outputs are
+unit-test inputs.
 
-## 外部コードとライセンス
+Docker, the target corpus, and trained weights were unavailable together in this
+workspace. Real-audio end-to-end success across all four systems, convergence,
+intelligibility, and BLEU results remain unverified. Two updates exercise the execution
+path and provide no guarantee of TT2 reaching EOS or of vocoder quality. The pipeline
+records missing EOS and overlong outputs as failures. It does not substitute forced
+phonemes, silence, or random output. The independent implementation's correspondence
+with the papers and unverified numerical results are documented in [REFERENCE_PARITY.md](REFERENCE_PARITY.md).
 
-生成器は変更していない固定fairseq commit
-`3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を使用する。
-識別器／lossは[公式HiFi-GANの固定ソース](https://github.com/jik876/hifi-gan/blob/4769534d45265d52a904b850da5a622601885777/models.py)
-から必要部分を取り込み、importのみ調整した。MITライセンス全文は
-src/direct_s2st/vocoders/HIFIGAN_LICENSEに同梱している。
-学習レシピはsingle-sample segment、固定LR AdamW、mel weight45・duration weight1の
-benchmark実装であり、元の全training scheduleとの一致を主張しない。
-torch／torchaudio 2.7.1のpinは変更していない。weight_normの非推奨警告は互換性維持のため残す。
+## External code and licenses
+
+The generators use the unmodified pinned fairseq commit
+`3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`.
+The discriminators and losses incorporate the necessary parts of the
+[pinned official HiFi-GAN source](https://github.com/jik876/hifi-gan/blob/4769534d45265d52a904b850da5a622601885777/models.py),
+with only import adjustments. The full MIT license is in
+`src/direct_s2st/vocoders/HIFIGAN_LICENSE`.
+The benchmark recipe uses single-sample segments, AdamW with a fixed learning rate,
+a mel weight of 45, and a duration weight of 1. It does not claim to match the entire
+original training schedule. Torch and torchaudio remain pinned at 2.7.1. The
+`weight_norm` deprecation warning remains for compatibility.
 
 ## S2T→TTS / four-system extension
 

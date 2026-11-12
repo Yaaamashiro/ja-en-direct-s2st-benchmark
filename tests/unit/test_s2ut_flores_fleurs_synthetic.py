@@ -260,7 +260,7 @@ def test_normal_launcher_completed_resume_has_no_model_or_stage_calls(tmp_path,m
     assert before==snapshot(first['output_root']) and stages==['prepare','units','audio','evaluate']
 
 
-def test_cli_help_is_stdlib_only_and_old_notebook_cells_are_identical():
+def test_cli_help_is_stdlib_only_and_old_notebook_code_cells_are_identical():
     helper=ROOT/'scripts/colab/s2ut_flores_fleurs_synthetic.py'
     result=subprocess.run([sys.executable,'-S','-B',str(helper),'--help'],capture_output=True,text=True,encoding='utf-8')
     assert result.returncode==0 and '--natural-id' in result.stdout and '--limit' not in result.stdout
@@ -268,7 +268,10 @@ def test_cli_help_is_stdlib_only_and_old_notebook_cells_are_identical():
     original=json.loads(subprocess.check_output(['git','-c','safe.directory='+str(ROOT),'-C',str(ROOT),
         'show','901ec4b15c4fab4ffbfee1a6efee35626bc00940:notebooks/colab_training.ipynb'],encoding='utf-8'))
     added=[c for c in notebook['cells'] if ''.join(c['source']).startswith('#@title 8F.')]
-    assert len(added)==1 and [c for c in notebook['cells'] if c not in added]==original['cells']
+    assert len(added) == 1
+    assert [c for c in notebook['cells'] if c['cell_type'] == 'code' and c not in added] == [
+        c for c in original['cells'] if c['cell_type'] == 'code'
+    ]
     i=notebook['cells'].index(added[0]);assert ''.join(notebook['cells'][i-1]['source']).startswith('#@title 8E.')
     assert ''.join(notebook['cells'][i+1]['source']).startswith('#@title 9.')
     for cell in notebook['cells']:

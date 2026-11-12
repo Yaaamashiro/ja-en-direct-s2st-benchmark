@@ -1,20 +1,12 @@
-# Google Colab：テストと通常実験
+# Google Colab smoke tests and standard experiments
 
-## 新規S2UT：公式Fisherレシピと学習中のBLEU推移
+## New S2UT runs with the official Fisher recipe and training-time BLEU
 
-`S2UT_RECIPE='paper_fisher_v1'` は旧短縮runとは別の新規学習です。
-warmup **10,000**、最大 **400,000 optimizer updates（絶対値）**、独自early stoppingなし。
-モデル、補助タスク、loss係数、Adam、inverse-sqrt、LR 0.0005、FP16、seed 1、
-max_tokens 20,000 / update_freq 4は公式レシピを維持します。
-1 GPUで4 GPU分を勾配蓄積する公式の単一GPU設定であり、4 GPU実行の数値的同一性は保証しません。
+`S2UT_RECIPE='paper_fisher_v1'` starts a fresh run separate from legacy shortened runs. It uses **10,000 warmup updates**, an absolute maximum of **400,000 optimizer updates**, and no custom early stopping. Model, auxiliary tasks, loss weights, Adam, inverse-square-root schedule, LR 0.0005, FP16, seed 1, max_tokens 20,000, and update_freq 4 follow the official recipe. This official single-GPU setup accumulates four GPUs' worth of gradients. Numerical equivalence to a four-GPU run is unverified.
 
-根拠は[原論文](https://arxiv.org/abs/2107.05604)と
-[fairseq公式レシピ](https://github.com/facebookresearch/fairseq/blob/main/examples/speech_to_speech/docs/direct_s2st_discrete_units.md)。
-Fisherではなく日英コーパス、公式配布LJSpeech vocoder（Fisherでfitしたものではない）、
-固定Whisper（原論文のwav2vec2 ASRではない）を使用する点をmetadataへ明記します。
-この変更で翻訳品質の改善を保証するわけではありません。
+Metadata records the Japanese–English corpus, public LJSpeech vocoder weights, and pinned Whisper evaluation ASR. The original study used Fisher, a vocoder fitted on Fisher, and wav2vec2 ASR. Translation quality needs empirical evaluation. See the [paper](https://arxiv.org/abs/2107.05604) and [fairseq recipe](https://github.com/facebookresearch/fairseq/blob/main/examples/speech_to_speech/docs/direct_s2st_discrete_units.md).
 
-通常セル1で以下を設定し、セル5を実行します。4A/4Bの再作成は不要です。
+Set the following in standard Cell 1, then run Cell 5. Reuse the completed 4A and 4B artifacts.
 
 ```python
 TRAIN_TARGET = 's2ut'
@@ -29,359 +21,138 @@ CONFIRM_TRAINING = True
 SESSION_MINUTES = 0
 ```
 
-初回の新recipe取得時は、push後の対応する完全SHAを`TRAIN_CODE_REVISION`へ指定してください。
-未対応の古いlauncherは実行前に拒否します。
-保存名は `s2ut-training-<実験名>-paper-fisher-v1`。
-旧runのoptimizer/checkpoint/configは保持し、新runへ移植しません。
-以後は同じ設定で**セル1→5**により保存済み環境・optimizer・評価結果を復元します。
-旧runを続けるときだけ`legacy_short`、元のwarmup/モード/実保存名を選択します。
-新recipeから旧runを明示選択すると不一致で停止し、update 0へ誤再開しません。
+For the first use of the recipe, set `TRAIN_CODE_REVISION` to the full published SHA. An incompatible old launcher stops before execution. The new run is named `s2ut-training-<experiment>-paper-fisher-v1` and starts with fresh optimizer state. Resume through **Cells 1 → 5** with the same settings to restore the saved environment, optimizer, and evaluation results. To continue an old run, use `legacy_short` and its saved warmup, mode, and run name. Explicitly selecting an old run with the new recipe stops on mismatch.
 
-### 学習中の測定（すべてdev、testは不使用）
+### Training-time measurements on dev
 
-| 測定 | 更新数 | 内容 |
+| Measurement | Update schedule | Procedure |
 |---|---|---|
-| 全Dev loss | 1,000ごと | 全件teacher-forced検証、5種類すべて保存 |
-| 補助text BLEU | 1,000ごと | 固定dev最大500件、日本語音声→target-letter自由生成→英文 |
-| 音声ASR-BLEU | 1k / 5k / 10k / 25k / 50k / 100k / 200k / 400k | 固定dev最大100件、日本語音声→beam10 Unit自由生成→公式Unit vocoder→英語ASR |
+| Full dev loss | Every 1,000 | Teacher-forced evaluation on all dev samples, recording all five losses |
+| Auxiliary text BLEU | Every 1,000 | Up to 500 fixed dev samples, from Japanese speech through free target-letter generation to English text |
+| Audio ASR-BLEU | 1k / 5k / 10k / 25k / 50k / 100k / 200k / 400k | Up to 100 fixed dev samples, from Japanese speech through beam-10 unit generation, official unit vocoder, and English ASR |
 
-補助text BLEUはS2STの正式指標ではありません。2系列を混ぜずに記録します。
-固定IDはseed 1とpair_idのSHA256順で選び、音声100件は500件の部分集合。
-生成モデルへ正解Unit・正解テキスト・previous-output targetを渡しません。
-英文正解はスコア計算専用です。生成失敗も空hypothesisとして全選択件数の分母へ含め、
-failure数・エラーを保存します。Whisperは`openai/whisper-large-v3-turbo`の
-`60be3615a4d667e1258e8ad29130467587c489aa`を固定し、英語transcribeで使用します。
-Unit vocoderの重み/configもSHA256検証します。
+Auxiliary text BLEU is diagnostic and stored separately from audio ASR-BLEU. Fixed IDs use seed 1 and pair-ID SHA-256 ordering. The audio subset is drawn from the 500 text samples. Generation receives no target units, reference text, or previous-output targets. English references are used only for scoring. Failed samples are empty hypotheses and remain in the denominator, with failure counts and errors saved. Use `openai/whisper-large-v3-turbo` at `60be3615a4d667e1258e8ad29130467587c489aa` for English transcription. Verify the unit vocoder weights and config with SHA-256.
 
-評価は同じGPUで学習と交互に行うため、その間optimizer更新は待ちます。
-別GPU/別Colabを要求しません。初回モデル取得の通信・VRAM・ディスク、推論/ASRの時間は追加です。
-項目間で30分の時間予算を確認し、超過後の未処理例は失敗として記録します。
-1件の処理・モデル取得の強制timeoutではありません。評価全体の失敗は欠測（null）として残し、
-偽のBLEUや改善値は作らず、完了した学習更新をlast checkpointへ保存します。
-CUDA OOM・device-side assertは例外で、安全性のためprocess-fatalとし、直前の永続snapshotから復旧します。
-学習modelのmode・buffer・Python/NumPy/Torch RNGを評価後に戻し、optimizerには触れません。
+Evaluation alternates with training on the same GPU and pauses optimizer updates. The first model fetch adds network, VRAM, and disk costs. Inference and ASR add time. Check the 30-minute budget between items and mark remaining items as failed after expiry. The budget does not interrupt an individual item or download. Store a null metric if the evaluation fails as a whole and save completed updates in the last checkpoint. CUDA OOM and device-side assertions stop the process for recovery from the previous durable snapshot. Restore model modes, buffers, and Python, NumPy, and Torch RNG after evaluation. The optimizer remains untouched.
 
-**BLEUでearly stop/最良モデル選択はしません。**
-bestは全Dev `unit_loss`最小の完全checkpoint、再開はlast checkpointです。
-lossはtrain100更新/Dev1000更新の間引き履歴として保存し、400k分の巨大な履歴再生を避けます。
-400k到達済みcheckpointから追加optimizer更新はしません。
+Choose the best full checkpoint by minimum full-dev `unit_loss`. BLEU does not control stopping or model selection. Resume from the last checkpoint. Retain train loss every 100 updates and dev loss every 1000 to bound history replay. A checkpoint at 400k performs no further optimizer updates.
 
-### グラフ・保存・計算資源
+### Charts, storage, and compute
 
-Driveの `PERSISTENT/checkpoints/<実保存run名>/` に
-`training-monitor.svg/.csv/.json`（loss）と `training-bleu.svg/.csv/.json`（2系列）を公開します。
-小さなper-update identity・固定ID・成功/失敗hypothesis・採点signatureも検証済みsnapshotへ同梱します。
-評価重みのSHAとpolicyが一致する成功例だけ再利用し、失敗例は再試行します。
-ASR/vocoderモデル本体や生成WAVを毎回の学習backupへ複製しません。
+Publish `training-monitor.svg/.csv/.json` for loss and `training-bleu.svg/.csv/.json` for both BLEU series in `PERSISTENT/checkpoints/<saved-run-name>/`. Include the small per-update identity, fixed IDs, successful and failed hypotheses, and scoring signature in verified snapshots. Reuse successes only when evaluation weight SHAs and policies match. Retry failures. Model weights for evaluation ASR and vocoding and generated WAVs stay outside recurring training backups.
 
-`S2UT_PAPER_SAVE_INTERVAL=100`でlast checkpointを保存し、通常の非同期backup（既定600秒間隔）、
-Dev評価地点・終了地点の強制backupを使います。評価中のVM強制削除は最後の永続snapshotまで戻ります。
-評価途中のjournalがローカルにしかない場合も同様で、そこからの学習/評価を再実行します。
-全Dev/BLEU測定地点のsnapshotは保持しますが、全更新を永久保存するものではありません。
-Drive既定予算1024GBを超えると安全に停止し、自動削除・無断の予算拡大はしません。
-400kは非常に長いため、保存使用量と実測の更新速度を確認してください。
-短い上限で試運転した場合は原論文相当の学習量を完了したとは扱いません。
+`S2UT_PAPER_SAVE_INTERVAL=100` saves the last checkpoint. Asynchronous backup normally publishes every 600 seconds and is forced at dev evaluation and completion. Losing a VM returns training to the last durable snapshot. Local-only evaluation journals can be lost and then replayed. Keep snapshots for every full-dev and BLEU measurement, with bounded retention for other updates. If the default 1024 GB Drive budget is exceeded, stop and preserve files. Check storage and actual update speed for the long 400k run. A shorter trial records its actual training budget.
 
-## TT2の安定化試験recipe（新規run限定）
+## Experimental TT2 stabilization recipe (new runs only)
 
-`TT2_RECIPE='stabilized_seconds_v1'` をセル1で明示選択すると、通常セル5から
-新しいTT2 runを開始する。既定の`legacy_frames`は旧checkpointの意味を維持する。
-新recipeは自動的に`paper_practical`として記録され、論文完全再現とは扱わない。
+Select `TT2_RECIPE='stabilized_seconds_v1'` explicitly in Cell 1 and start a new run in standard Cell 5. The default `legacy_frames` retains old checkpoint semantics. The new recipe is recorded as `paper_practical`.
 
-- duration headの出力・発話長MSEを秒単位に統一。初期値は音素列の各音響tokenあたり80ms。
-  upsampling・Gaussian幅・推論のmax_framesはフレーム単位で、実際のtarget hopから換算する。
-- peak LR=0.0003、warmup=400を初回から固定。`TT2_WARMUP_UPDATES=400`を使用し、
-  途中短縮のoverlayは適用しない。再開時のLR/warmup/objective変更は拒否する。
-- Fisherのモデル寸法、Adam/L2、loss係数1/10/1、実効batch1024、10更新ごとの全dev評価、
-  policy v3、best=Dev total loss、絶対上限1000は維持する。
-- 開始前VRAM測定は新recipeそのものを使い、同時処理数×蓄積回数=1024を維持する。
-  VRAM上限まで埋めることや最大速度を保証するものではない。
+- The duration head and utterance-length MSE use seconds, initialized at 80 ms per acoustic token in the phoneme sequence. Upsampling, Gaussian width, and inference max_frames use frames converted with the actual target hop.
+- Use peak LR 0.0003 and warmup 400 from the start with `TT2_WARMUP_UPDATES=400`. Resume rejects changes to LR, warmup, or objective. The legacy mid-run shortening overlay does not apply.
+- Keep Fisher dimensions, Adam/L2, loss weights 1/10/1, effective batch 1024, full dev evaluation every 10 updates, policy v3, best by dev total loss, and cap 1000.
+- Probe VRAM with this recipe and keep physical batch × accumulation at 1024. Speed and maximum occupancy require hardware measurement.
 
-使用順序は、更新版ノートブックのセル1で`TRAIN_TARGET='tt2'`、
-`TT2_RECIPE='stabilized_seconds_v1'`、`TT2_WARMUP_UPDATES=400`、
-`TRAIN_RUN_NAME=''`、`RUN_TRAINING=True`、`CONFIRM_TRAINING=True`を設定してセル5。
-既存のlauncher pinがある場合は、**push後に確定した対応40桁SHA**を
-`TRAIN_CODE_REVISION`へ指定する（未pushの変更はColabから取得できない）。
+Set `TRAIN_TARGET='tt2'`, `TT2_RECIPE='stabilized_seconds_v1'`, `TT2_WARMUP_UPDATES=400`, `TRAIN_RUN_NAME=''`, `RUN_TRAINING=True`, and `CONFIRM_TRAINING=True` in Cell 1, then run Cell 5. With an existing launcher pin, set `TRAIN_CODE_REVISION` to the compatible published 40-character SHA.
 
-保存名は`tt2-training-実験名-paper_practical-stabilized-seconds-v1`。
-自動選択は同じTT2 recipe内でのみ行い、旧frame runを誤って再開しない。
-旧run名を明示指定すると不一致で停止する。切断後は同じ設定でセル1→5。
-4A/4B・音声・Mel・音素の再作成、旧runの削除、追加の再開セルは不要。
-duration/total lossの単位・尺度が旧runと違うため、異なるrecipeのloss値を直接比較しない。
-旧runを再開する場合は`legacy_frames`と元の設定・run名を使う。
-S2UTおよびvocoderの学習条件は変更しない。
+The run name is `tt2-training-<experiment>-paper_practical-stabilized-seconds-v1`. Automatic selection stays within the recipe. An explicitly selected legacy run stops on mismatch. After disconnection, use Cells 1 → 5 with the same settings and reuse 4A/4B, audio, mel, and phonemes. Duration and total losses use different scales from legacy runs. Resume old runs with `legacy_frames` and their original settings and names. S2UT and vocoders retain their training conditions.
 
-これはPC診断に基づく実験的な安定化案。TT2論文はdurationの単位・初期化の詳細を
-確定できるほど記述していないため、秒単位を「公式実装の修正」とは主張しない。
-実データ2件の短いCPU検証は、全コーパスの収束・翻訳品質やA100上の性能の証明ではない。
+The recipe came from local diagnostics. The TT2 paper does not establish the exact duration units and initialization. A short two-item CPU check on real data leaves full-corpus convergence, translation quality, and A100 performance unverified.
 
-## 任意：評価専用のpostnet較正を使う新規TT2
+## Optional TT2 recipe with evaluation-only postnet calibration
 
-セル1の`TT2_RECIPE='stabilized_pooled_v2'`は、上記v1と同じ学習objective・初期化・
-LR/warmup・実効batch1024を使い、**検証・推論時だけ**postnetの統計を較正する別recipe。
-既定は変更しない。モデルの重みを修復したり、phone_lossを直接改善する処理ではない。
+`TT2_RECIPE='stabilized_pooled_v2'` in Cell 1 keeps v1's objective, initialization, LR, warmup, and effective batch of 1024. It calibrates postnet statistics only for evaluation and inference. This is a separate recipe with the same notebook default as before. Calibration changes statistics without updating model weights or optimizing phone loss.
 
-- train IDのSHA256順で最大128件を固定選択し、batch4でteacher-forced evalのraw Melを取得。
-  5層を順に、paddingを除く全frameの平均・不偏分散で較正する。dev/testはfitに使わない。
-  最初のraw MelだけCPUに一時保持し、encoder/decoderを5回実行する方式にはしない。
-- 検証後は学習用buffer・RNG・module modeを復元する。optimizer・勾配は変更しない。
-  較正値は更新数・parameter SHA・固定train IDと共にcheckpoint内へ保存するため、
-  通常のsnapshot/セル5の再開に含まれる。学習再開にはnativeのbufferを使用する。
-- single-process、FP32限定。`TT2_WARMUP_UPDATES=400`、`TRAIN_PRECISION='default'`を維持。
-  bestは較正後のDev total lossの最小値で選ぶ。評価は10更新ごと、停止policy v3、
-  上限1000は変更しない。最終updateは較正を保存するが評価間隔外にdev評価を追加しない。
-- 推論は選択checkpointに埋め込まれた較正値を照合して使用する。未較正の途中lastや
-  別の重みの較正値は拒否する。通常は検証済み`checkpoint_best.pt`を選ぶ。
+- Select up to 128 train IDs in SHA-256 order and compute teacher-forced raw mel with batch size four. Calibrate five layers in order with means and unbiased variances over all valid frames. Use train data only. Save raw mel temporarily on CPU and replay the postnet.
+- After validation, restore training buffers, RNG, and module modes. Optimizer and gradients are preserved. Embed calibrated values with the update count, parameter SHA, and fixed train IDs. Standard Cell 5 snapshots carry them, and training resume uses native buffers.
+- Use single-process FP32 with `TT2_WARMUP_UPDATES=400` and `TRAIN_PRECISION='default'`. Best is minimum calibrated dev total loss. Evaluate every 10 updates under v3 with cap 1000. Save final-update calibration without adding an off-schedule dev evaluation.
+- Inference checks and applies the calibration embedded in the selected checkpoint. It rejects uncalibrated intermediate last checkpoints and calibration for different weights. Normally select verified `checkpoint_best.pt`.
 
-セル1で`TRAIN_TARGET='tt2'`、`TT2_RECIPE='stabilized_pooled_v2'`、`TRAIN_RUN_NAME=''`を選択し、
-通常セル5を実行する。保存名は`tt2-training-実験名-paper_practical-stabilized-pooled-v2`。
-切断後は**同じ設定でセル1→5**。既存v1/legacy runの自動移植はせず、過去lossも書き換えない。
-対応コードが未pushの間はColabでは利用できない。push後の対応40桁SHAを`TRAIN_CODE_REVISION`へ指定する。
-4A/4Bの成果物はそのまま使い、旧runは保存する。S2UTは変更しない。
+In Cell 1 set `TRAIN_TARGET='tt2'`, `TT2_RECIPE='stabilized_pooled_v2'`, and `TRAIN_RUN_NAME=''`, then run Cell 5. The name is `tt2-training-<experiment>-paper_practical-stabilized-pooled-v2`. After disconnection, repeat Cells 1 → 5 with the same settings. Set `TRAIN_CODE_REVISION` to the compatible 40-character SHA after publication. Reuse 4A/4B and keep old v1 and legacy runs with their original history. S2UT keeps its own recipe.
 
-少数の実例によるCPU試験ではMelの改善と学習更新への非干渉を確認したが、
-128件較正・Fisher寸法・全コーパス・A100・翻訳品質は未検証。論文再現ではなく実験条件の変更である。
-較正によってDev lossの測定条件が変わるため、旧runの未較正Dev値との大小を
-そのままモデル重みの品質改善とは解釈しない。旧history・anchor・bestの書換えは行わない。
+Small CPU trials on real examples observed improved mel and no interference with training updates. Calibration on 128 items, Fisher size, the full corpus, A100, and translation quality remain unverified. Calibrated dev loss uses different measurement conditions from older runs. Preserve prior history, anchors, and best checkpoints.
 
-## セル5の統合再開
+## Integrated resume in Cell 5
 
-更新済みノートブックでは、切断後は同じ実験名でセル1（設定）→セル5を実行する。
-Drive接続・コード取得・ランタイム構築もセル5から呼ぶ。追加の再開セルは不要。
-`TRAIN_RUN_NAME`は空欄なら、選択したモデルの学習済みrunが1つの場合に自動選択する。
-例えば`experiment-001`のTT2は空のrecipe-v2 runを避け、snapshotを持つ
-`tt2-training-experiment-001-paper_exact-recipe-v2-probe-fix-v1`を選ぶ。
-複数の学習済みrunがある場合は、セル1の`TRAIN_RUN_NAME`に保存名を指定する。
-読み取り可能なmarkerがない既存snapshotや選択ミスからupdate 0へ自動開始しない。
-snapshot本体のSHA/更新数/設定の検証は従来どおり行い、壊れた直近コピーは検証済みの古い保存地点へ戻す。
+After disconnection, run Cell 1 with the same experiment, then Cell 5. Cell 5 connects Drive, fetches code, and rebuilds the runtime as needed. An empty `TRAIN_RUN_NAME` selects the only saved run for the chosen model. For example, `experiment-001` TT2 selects `tt2-training-experiment-001-paper_exact-recipe-v2-probe-fix-v1` when it has a snapshot and the recipe-v2 run is empty. If several trained runs exist, set the saved name in Cell 1. Unreadable markers or incorrect selection stop resume. Verify snapshot SHA, updates, and configuration, falling back to an older verified snapshot if the newest copy is corrupt.
 
-再開するrunは保存済みconfig・batchを使う。セル1の性能設定を変えて既存configを上書きしない。
-学習率scheduleと監視状態はcheckpointから継承する。モデルの総更新上限とセッション時間は今回の指定を使う。
-旧48fcdb7のTT2は既に確認済みのd70516a実行コードを使い、元の依存環境・snapshot identityを維持する。
-S2UTなど新規学習はlauncherの固定SHAを記録して開始し、4A/4Bの準備済みデータを使う。
+Resume uses saved config, batch, LR schedule, and monitor state. The current request supplies the total update cap and session time. TT2 based on `48fcdb7` uses the reviewed `d70516a` execution code with the original dependency and snapshot identity. New training such as S2UT records its pinned launcher SHA and uses prepared 4A/4B data.
 
-初回launcher取得はorigin/mainを完全SHAに解決して`training-launcher-revision.txt`へ保存する。
-次回から同じSHAを使用し、学習runごとの`<RUN_NAME>.launch.json`にも実際のコード・環境を記録する。
-launcherを明示更新する場合だけ`TRAIN_CODE_REVISION`へ対応する新しい完全SHAを指定する。
-launcherの更新自体で保存済みモデルの実行コード・optimizer条件は変更しない。
+On the first launcher fetch, resolve origin/main to a full SHA and save it to `training-launcher-revision.txt`. Reuse it on subsequent runs. `<RUN_NAME>.launch.json` records the actual code and environment. Set `TRAIN_CODE_REVISION` to a compatible full SHA only when explicitly updating the launcher. A launcher update preserves saved execution code and optimizer conditions.
 
-TT2の`TT2_WARMUP_UPDATES`は既定400（選択肢400/500/1000/10000）。通常セル5から
-明示的に学習率スケジュールを短縮し、`paper_practical`の変更履歴をcheckpointへ保存する。
-旧1,000/500短縮済みrunも、既存ウォームアップ終了前なら同じrunで400へ変更できる。
-現在400更新・保存済みwarmup500の場合も、次の更新から400設定を使える。
-400は学習の強制終了点ではなく、dev lossによる早期終了判定の開始目安。
-既定は10更新ごと・patience 5・最低改善率1%。400時点では過去へ遡らず、
-ウォームアップ終了後の410/420/430/440/450で十分な改善がなければ450で終了する。
-停止判定の基準はウォームアップ中の各lossの最小Dev値。1%未満のbest更新も保存するが、
-停止カウンターはリセットしない。いずれかのlossの累計改善が自身のanchorから1%以上になれば
-共有カウンターをリセットし、そのlossのanchorだけを現在値へ更新する。
-重み・Adam状態・絶対更新数・過去loss/学習率・best checkpointは維持する。
-新しい学習率は次の更新から適用するため、過去を400設定で学習したことにはしない。
-再開時の10000選択は保存済みスケジュールを継承し、途中で延長はしない。
-旧固定コードへは、検証済みのmonitor実装に対してスケジュール/監視class/履歴復元の範囲だけを
-変更したローカル実行コピーを作り、全ソース/configのSHAと監査記録を検証する。
-未確認のコード差分や改変済みコピーは拒否し、元コード・snapshotは上書きしない。
-S2UTの通常セルのウォームアップも400に揃える。原論文の設定ファイルは変更しない。
+TT2's `TT2_WARMUP_UPDATES` defaults to 400, with choices 400/500/1000/10000. Standard Cell 5 can explicitly shorten the schedule and record a `paper_practical` transition in the checkpoint. Runs already shortened to 1000 or 500 can adopt 400 before their saved warmup ends. A run at update 400 with warmup 500 can apply the new schedule on the next update. Dev-loss stopping begins after warmup. Defaults are interval 10, patience 5, and at least 1% improvement. With no improvement at 410/420/430/440/450, it stops at 450. Anchors start at each warmup loss minimum. Best values still record improvements under 1%. At least 1% cumulative improvement from any anchor resets the shared counter and updates that anchor. Preserve weights, Adam, absolute update count, past losses and LR, and best checkpoint. The new LR applies prospectively. Selecting 10000 when resuming inherits the saved schedule. The verified local execution copy changes only schedule, monitor classes, and history restoration. Verify source/config SHAs and audit records and reject unreviewed changes or modified copies. Standard legacy S2UT also uses 400 warmup. Paper configuration files retain their original values.
 
-通常セル1はTT2・S2UTの監視policy v3を明示要求する。旧policyからの再開時は、旧履歴・
-旧カウンター・bestのSHAをまず検証し、変更地点と旧/新policyを`policy_history`に記録する。
-過去のlossや学習率、best、モデル/optimizerは変更しない。各anchorを過去のDev最小値から構築し、
-新条件の共有停止カウントだけを0にし、
-max(ウォームアップ終了点, policy変更地点)より後の評価から始める。
-例えば400で変更すれば最短450、430で変更すれば最短480（改善がない場合）。
-再開のたびにカウンターをリセットせず、同じpolicyはそのまま継承する。
-評価間隔の変更やpolicyのダウングレードは拒否する。同一policyでの終了状態は継承するが、
-旧v1/v2で早期終了したrunからv3への明示採用時だけ、停止状態を解除して未来の評価へ進める。
+Cell 1 explicitly requests monitoring policy v3 for TT2 and legacy S2UT. Verify earlier history, counter, and best SHA before migrating. Record the adoption point and both policies in `policy_history`. Preserve past losses, LR, best, model, and optimizer. Initialize each anchor from its historical dev minimum and reset the shared counter. Start counting evaluations after max(warmup end, adoption update). With no improvement, adoption at 400 stops at 450 at the earliest, and adoption at 430 stops at 480. Same-policy resume inherits the counter and stop state. Reject interval changes and downgrades. Explicit migration from stopped v1/v2 can clear its stop for future v3 evaluations.
 
-### Early stopping v3（全Dev loss・絶対上限TT2=1000 / S2UT=3000）
+### Early stopping v3 for all dev losses (TT2 cap 1000, legacy S2UT cap 3000)
 
-TT2は `loss / mel_loss / phone_loss / duration_loss` の4種類、S2UTは
-`loss / unit_loss / source_letter / target_letter / decoder_target_ctc` の5種類を監視する。
-各指標のanchorを `A_i`、現在値を `L_i` とし、`L_i <= A_i * (1 - 0.01)` なら有意な改善。
-1つでも改善すれば共有 `bad_evaluations=0` とし、改善した指標のanchorのみ更新する。
-どの指標も改善しない評価が5回連続すれば停止する。anchor=0はそれ以上改善できない値として扱う。
-全指標を除外せず監視し、合計lossも含める。評価は従来どおり全devを10更新ごとに行う。
+TT2 monitors `loss / mel_loss / phone_loss / duration_loss`. Legacy S2UT monitors `loss / unit_loss / source_letter / target_letter / decoder_target_ctc`. For a metric with anchor `A_i` and current value `L_i`, `L_i <= A_i * (1 - 0.01)` counts as significant improvement. Update only improved anchors and reset shared `bad_evaluations` if any metric improves. Five consecutive evaluations with no significant improvement cause a stop. Zero anchors cannot improve. All dev samples and all losses, including total loss, are evaluated every 10 updates.
 
 Every monitored validation loss has an independent anchor. Training continues while at least one
 monitored validation loss improves by at least 1%. Early stopping is triggered after five consecutive
 validation evaluations in which none of the monitored losses achieves a 1% improvement.
 
-warmup中は停止せず、各指標のwarmup内最小値をanchorとする。旧policyからの移行時は
-保存済みDev履歴全体の各指標の最小値を使うが、過去の停止判定はv3で再解釈しない。
-`policy_history`に移行更新数・旧policy・新policyを記録し、再開では同じanchor/counterを復元する。
-新しい通常ノートブックで同じ実験名・同じ保存run・同じwarmup400を指定し、必要なlauncher更新の
-完全SHAを`TRAIN_CODE_REVISION`へ指定してセル1→5。4A/4Bやデータの再生成、追加の移行セルは不要。
+During warmup, record each metric's minimum as its anchor and defer stopping. When migrating, use the per-metric minimum from the saved dev history and preserve prior decisions. `policy_history` records adoption update and old and new policies. Resume restores anchors and counter. Open the updated standard notebook with the same experiment, saved run, and warmup 400. Set the compatible full launcher SHA in `TRAIN_CODE_REVISION` if needed and run Cells 1 → 5. Reuse 4A/4B data.
 
-`training-monitor.json`とlast checkpoint内に `stopping_metrics / anchors / bad_evaluations /
-best_values / best_updates / policy_history` を保存する。既存の `best_value / best_update / best_sha256`
-は推論用bestの意味を維持する。CSV/SVGには従来どおり全lossのtrain/dev履歴を残す。
-評価ログではloss別の改善率、改善した指標（`*`）、共有counter、停止状態をstderrへ表示する。
-checkpoint_bestはTT2=Dev total loss最小、S2UT=Dev unit_loss最小のまま、停止判定とは独立である。
+`training-monitor.json` and the last checkpoint store `stopping_metrics / anchors / bad_evaluations / best_values / best_updates / policy_history`. `best_value / best_update / best_sha256` still identify the inference checkpoint. CSV and SVG retain train/dev history for all losses. Evaluation logs rates of improvement, marks improved metrics with `*`, and reports shared counter and stopping state on stderr. TT2 still selects the best by dev total loss, and S2UT by dev unit loss, independently of stopping.
 
-TT2の `TOTAL_UPDATES=1000`、S2UTの `S2UT_TOTAL_UPDATES=3000` を安全上限とする。
-通常セル5およびv3 trainerは指定をモデル別上限へ制限する。上限はoptimizer更新の絶対値で、
-S2UTの610からの再開なら最大2390更新、3000到達済みなら追加更新しない。TT2は1000のまま。
-旧v3 S2UTの上限1000を記録したcheckpointも復元し、anchor・counter・best・履歴はリセットしない。
-上限変更だけで早期終了済みのrunを再開することはない。改善やcounter resetは上限を延長しない。
-vocoderの既定更新数は独立の `VOCODER_TOTAL_UPDATES=10000` に移して従来値を保つ。
-元論文のscheduler・optimizer・batch・loss重み・validation split/間隔は変更しない。
+Standard Cell 5 and v3 trainers enforce absolute optimizer-update caps of `TOTAL_UPDATES=1000` for TT2 and `S2UT_TOTAL_UPDATES=3000` for legacy S2UT. Restoring S2UT at 610 permits at most 2390 more updates. At 3000 it performs none. Older S2UT v3 checkpoints recording cap 1000 restore anchors, counters, best state, and history. Raising the cap alone preserves an earlier stop. Patience resets cannot extend the cap. Vocoders retain the separate `VOCODER_TOTAL_UPDATES=10000` default. Scheduler, optimizer, batch, loss weights, validation split, and validation interval are retained.
 
-依存環境の完全なJSONを`.runtime-environments/<SHA256>.json`へatomic保存・readbackする。
-新しいランタイムではその全依存版をconstraintとして構築する。
-異なるrunを同じローカルvenvで順番に使った場合は、版だけでなくパッケージ構成も復元する。
-完全なSHA検証済みmanifestにない余分な通常パッケージは、専用runtime venvであることを確認し、
-変更前のpip freezeと削除対象をローカルreceiptに保存してから、そのvenv内だけで除去する。
-ノートブック本体のPython、コーパス、保存済み環境JSON、checkpointは変更しない。
-旧session.logしかない場合は記録が不完全な可能性があるため、この除去は行わない。
-復元後もSHAが一致しなければ停止し、`/content/s2st-runtime/dependency-recovery-difference-*.json`へ
-不足・余分・版違い・metadataの差分を記録する。照合を無効化して続行することはない。
-復元用constraintは元リポジトリのrequirementsを絶対パスで参照し、
-入れ子の`preparation.txt`等も元ファイルのディレクトリから解決する。
-旧復元用ファイルは通常セル5の構築時に再生成するため、手動コピー・データ削除は不要。
-旧TT2で環境JSONがない場合は、`session.log`の成功した実行記録から依存版の候補を抽出し、
-実際にインストールして再計測したSHAがsnapshotと完全一致した場合だけ採用する。
-一致しない場合は学習を開始せず停止する。保存済みハッシュや環境JSONを偽装しない。
-モデルごとの`tt2-session.log`、`s2ut-session.log`等に構築・復元・学習ログを残す。
-初回のlauncher取得後は旧手動移行セルや通常セル3を追加実行する必要はない。
-CPUテストで選択・復元・中断時の保持を検証しているが、実Colabでの全手順は未検証。
+The complete dependency environment is atomically saved and read back at `.runtime-environments/<SHA256>.json`. A new runtime uses all saved versions as constraints. When reusing the local venv across runs, restore both versions and the installed package set. If a complete verified manifest exists, verify that the venv is the dedicated runtime, record the previous pip freeze and removal list locally, and remove extra ordinary packages only there. The notebook's host Python, corpus, saved environment JSON, and checkpoints are preserved. Old `session.log` records alone may be incomplete and cannot authorize package removal. If the restored SHA differs, stop and record missing, extra, version, and metadata differences in `/content/s2st-runtime/dependency-recovery-difference-*.json`.
 
-S2UTの`S2UT_WARMUP_UPDATES`は既定400更新（選択肢400/500/1000/10000）です。
-短縮時は`paper_practical`と記録し、学習名に`-warmup400`等を付けます。
-`REPRODUCTION_MODE=paper_exact`のままこの短縮を選んだ場合、token予算20,000・
-勾配蓄積4・FP16を維持し、追加バッチ分割の事前測定は無効にします。
-論文設定の10,000を選べば従来の学習名・条件へ戻ります。
-準備済み4A/4Bの再生成は不要です。既存S2UT checkpointのwarmupを途中で変更する機能は
-未対応です。通常セル5は構築/ダウンロード前に不一致を拒否します。
-既存runは元のwarmupで再開し、異なるスケジュールは別実験で開始してください。
-S2UTの`S2UT_MONITOR=True`は全devを10更新ごとに評価し、Unit予測の
-teacher-forced dev lossで最良checkpointを選択します。policy v3ではウォームアップ終了後、
-全5指標のどれも自身のanchorから1%以上改善しない評価が5回連続した場合に停止します。
-いずれかが改善すれば共有counterを0に戻し、改善した指標のanchorだけを更新します。
-400時点の過去5回を遡って停止せず、最短で410/420/430/440/450の評価後に停止します。
-各指標の基準はwarmup中の最小値です。小さなbest更新も保存し、基準から累計1%以上
-改善した時点だけ共有counterをリセットします。各lossのbest値/更新数も別途記録しますが、
-checkpoint_bestの選択はUnit lossのままです。設定は
-`S2UT_MONITOR_INTERVAL=10`、`S2UT_MONITOR_PATIENCE=5`、
-`S2UT_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.01`です。
-旧policy v1はUnit-only、v2はUnit/totalの別counterという従来判定を保持して読み込みます。
-v3への明示変更時は履歴・bestの検証後、変更地点を記録して共有counterをリセットします。
-同じpolicyでの再開はcounterを継承します。既存runの固定実行コードを自動更新はしません。
-合計loss、Unit loss、source_letter、target_letter、decoder_target_ctcのtrain/dev推移を
-`training-monitor.json`・`.csv`・`.svg`へ記録します。
-lossは各タスクのsample_sizeで重み付き平均を取りbits単位で表示し、合計lossには
-補助lossの重みが入ります。Dev lossによる停止判定はBLEUによるモデル選択とは異なります。
-履歴・判定counter・最良checkpointのSHA256をlast checkpoint内に保持し、Drive snapshotに
-グラフ・最良モデルも含めます。再開はlast、推論・比較は検証済みbestを優先します。
-常駐単一プロセス、固定バッチ、全dev、同期checkpoint保存が必要です。
-VRAM事前測定の間は監視を実行しません。同じpolicyで停止後の再開は更新せず`EARLY_STOPPED`を返します。
-旧v1/v2からv3の採用は未来の判定へ続行でき、モデル別のhard limit（TT2=1000、S2UT=3000）は常に維持します。
-Driveの保存先には確認用のグラフとCSVもコピーします。初回有効化以前の履歴は復元しません。
+Restore constraints reference the original requirements by absolute path. Nested files such as `preparation.txt` resolve relative to their original directory. Cell 5 regenerates old restore files. When an older TT2 run lacks its environment JSON, infer candidate versions from successful `session.log` entries, install them, and use the environment only if its measured SHA matches the snapshot exactly. Otherwise stop before training. Keep saved hashes and environment JSON intact. Model logs include `tt2-session.log` and `s2ut-session.log`. After first launcher retrieval, integrated recovery handles the work of the former manual migration cell and standard Cell 3. CPU tests cover selection, restoration, and interruption. The full real Colab workflow remains unverified.
 
-### S2UTの初回FP16 overflow
+For legacy S2UT, `S2UT_WARMUP_UPDATES` defaults to 400, with choices 400/500/1000/10000. Shortening records `paper_practical` and adds a suffix such as `-warmup400`. If `REPRODUCTION_MODE=paper_exact` was selected, keep the 20,000-token budget, accumulation 4, and FP16 and disable extra batch-splitting calibration. Selecting 10000 uses the original name and conditions. Reuse 4A/4B. Mid-run warmup changes are unsupported for S2UT. Cell 5 rejects the mismatch before setup or download. Resume under the original warmup and start a separate experiment for another schedule.
 
-固定fairseqが`gradient overflow detected`でscaleを128→64等へ下げると、
-その試行はoptimizerを更新せず`None`を返します。常駐S2UTはこの場合のみ同じ論理バッチを
-再試行し、`[fp16-retry] update=... retry=... loss_scale=128->64`を記録します。
-optimizer.step未呼び出し・更新数不変・scaleの正常な低下をすべて確認します。
-乱数・model/criterionのbuffer・勾配を復元し、失敗した試行の監視lossとgradient証拠を破棄します。
-低下後のscaleは保持し、成功時だけ更新数、loss履歴、probe完了数を進めます。
-OOMやoptimizer実行後の失敗はこの処理では再試行せず、最小scale到達や上限32回でも停止します。
-FP32/BF16へ黙って切り替えず、token予算・蓄積回数・warmup・Adam設定は維持します。
+`S2UT_MONITOR=True` evaluates all dev data every 10 updates and selects the best checkpoint by teacher-forced unit loss. Under v3, five consecutive post-warmup evaluations with no 1% improvement on any of the five metrics stop training. An improvement resets the shared counter and updates only that anchor. At warmup 400, the earliest stop is after 410/420/430/440/450. Each anchor starts at its warmup minimum. Smaller improvements still update best values, and only cumulative improvement of at least 1% from the anchor resets the counter. Store the best value and update for each loss. Unit loss remains the checkpoint selection metric. Set `S2UT_MONITOR_INTERVAL=10`, `S2UT_MONITOR_PATIENCE=5`, and `S2UT_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.01`.
 
-2486164/e56ca1cで固定済みのrunは、新launcherの通常セル5で検証済みFP16 runtime、
-TrainingAudit、checkpoint検証・保存・異常終了時退避を差し替えた実行コピーを作ります。元checkout・config・基礎依存環境・
-recipe fingerprint・snapshotは保持し、全source/configのSHAを`execution-overlays/`へ記録します。
-未レビューの旧コードや改変されたコピーは拒否します。初回overflowで更新0・snapshotなしの
-場合も、同じ実験名・設定でセル1→5を再実行できます。4A/4Bの再生成は不要です。
-launcherの固定SHAは自動更新しないため、反映時はセル1の`TRAIN_CODE_REVISION`に
-修正を含む公開済みSHAを指定してください。CPUの制御フロー/Adamテストで確認済みですが、
-実A100のFP16オーバーフロー再試行は未検証です。
+Load old v1 with unit-only stopping and v2 with separate unit and total counters. Explicit v3 adoption verifies history and best, records the adoption point, and resets the shared counter. Same-policy resume preserves the counter. The saved execution pin is retained. Write total, unit, source_letter, target_letter, and decoder_target_ctc train/dev curves to `training-monitor.json`, `.csv`, and `.svg`. Weight each loss by task sample_size and report bits. The total includes auxiliary weights. Dev loss drives stopping. The last checkpoint contains history, counters, and best SHA-256, and Drive snapshots include charts and the best checkpoint. Resume from last and prefer verified best for inference and comparison. Monitoring requires a resident single process, fixed batch, full dev, and synchronous checkpoint saves. It is disabled during VRAM probes. Same-policy resume of a stopped run returns `EARLY_STOPPED` with no updates. Explicit v1/v2→v3 adoption can continue future evaluation within the same TT2 and S2UT caps. Drive also gets the chart and CSV. History before initial adoption is unavailable.
 
-### 初回dev評価と未公開checkpointの復旧
+### Initial S2UT FP16 overflow
 
-S2UTのCTCはdev評価時に`editdistance`を必要とします。新規Colab/Docker環境は
-`editdistance==0.8.1`を固定導入します。通常セル5はデータ取得の前に、実際のCTC
-train forward/backwardとdev forward（文字/単語編集距離を含む）を小さなCPU入力で実行します。
-これは実験の学習ではなく、モデル重み・optimizer・データsplitを使用/変更しないランタイム確認です。
+When pinned fairseq logs `gradient overflow detected` and reduces the scale, for example from 128 to 64, that attempt returns `None` without an optimizer update. Only in this case does resident S2UT retry the logical batch and log `[fp16-retry] update=... retry=... loss_scale=128->64`. Verify that optimizer.step did not run, the update count did not change, and the scale decreased normally. Restore RNG, model and criterion buffers, and gradients. Discard monitoring loss and gradient evidence from the failed attempt. Retain the reduced scale and advance the count, loss history, and probe completions only on success. OOM, failure after optimization, minimum scale, and the 32-retry cap stop execution. Preserve FP16, token budget, accumulation, warmup, and Adam settings.
 
-旧環境を復元する場合は保存済みpip freezeとenvironment.jsonをそのまま検証・維持し、
-公式PyPIのCPython3.10/Linux-x86_64 wheelをSHA256検証して評価用パッケージを別置きします。
-配布wheel/manifestは保持し、import用パッケージだけをPYTHONPATHへ追加します。
-基礎venvへ追加インストールせず、追加依存のversion・wheel/hash・基礎環境SHAを
-`.runtime-extras/`へ記録します。CER/WERを省略したり、未知文字へ置換したりはしません。
+For runs pinned to `2486164` or `e56ca1c`, the new launcher in Cell 5 creates an execution copy with the reviewed FP16 runtime, TrainingAudit, and checkpoint validation, saving, and abnormal-exit recovery. Keep original checkout, config, base dependencies, recipe fingerprint, and snapshot. Record all source/config SHAs in `execution-overlays/`. Reject unreviewed old code and altered copies. If initial overflow left zero updates and no snapshot, rerun Cells 1 → 5 with the same experiment and settings. Reuse 4A/4B. Set `TRAIN_CODE_REVISION` in Cell 1 to a published fix SHA. CPU control-flow and Adam tests cover this path. A100 FP16 retry is unverified.
 
-Driveへ未公開の新しいS2UT `checkpoint_last.pt`が同じVMにある場合、通常セル5が
-先に入力hash、checkpointの有限なmodel/Adam状態、recipe fingerprint、監視履歴/カウンター、
-bestのSHAとreportの一致を検証します。すべて一致する場合だけ別の不変コピーをDriveへ公開し、
-その地点から再開します。元ローカルと旧Drive snapshotは残します。VMを削除済みなら
-ローカル状態は回収できず、最後の検証済みDrive地点から再開します。4A/4Bの再生成は不要です。
+### First dev evaluation and unpublished checkpoint recovery
 
-通常の10分間隔に加えて、S2UTはdev評価後と早期終了/完了時にもbackupを強制します。
-trainerがエラー終了した場合も、終了後に最後のローカルcheckpointを検証して退避します。
-Driveへ公開できない場合はローカルの`.pending-recovery-*`等を保持し、保存成功とは表示しません。
-ColabがVMを強制削除すると退避コード自体を実行できないため、毎更新の永続化保証ではありません。
-`learned_at_least`はローカル保存済み進捗も反映し、`durable_updates`はDrive公開済みだけを示します。
+S2UT CTC needs `editdistance` for dev evaluation. New Colab and Docker runtimes pin `editdistance==0.8.1`. Before retrieving data, standard Cell 5 runs real CTC training forward/backward and dev forward, including character and word edit distance, on a small CPU input. This runtime probe leaves experiment weights, optimizer, and splits untouched.
 
-デフォルトの無制限ローカル保存は、直近2個のinterval checkpointと直近1epochへ制限します。
-last・bestとDriveの過去snapshotは保持します。fairseqが古いローカル中間checkpointを整理しますが、
-実験データ・コーパス・Driveの復旧地点は削除しません。学習のbatch/精度/LR/warmupは変えません。
+For an old environment, verify and preserve saved pip freeze and `environment.json`. Verify SHA-256 for the official PyPI CPython 3.10 Linux x86_64 wheel and install separately. Keep the wheel and manifest and add only the import path to PYTHONPATH. Record the added version, wheel/hash, and base environment SHA in `.runtime-extras/`. CER/WER and original labels are retained.
 
-## 使うノートブック
+If a newer unpublished local `checkpoint_last.pt` still exists on the VM, Cell 5 first verifies input hash, finite model and Adam state, recipe fingerprint, monitor history and counters, and agreement of best SHA with the report. On success, publish a separate immutable copy to Drive and resume there. Preserve the local file and old snapshots. If the VM was deleted, resume from the last verified Drive snapshot. Reuse 4A/4B.
 
-| 用途 | ノートブック | データ・学習 | Drive保存先 |
+In addition to the normal ten-minute interval, S2UT forces a backup after dev and after early stop or completion. After trainer failure, verify and back up the last local checkpoint. If publishing fails, keep local recovery such as `.pending-recovery-*` and report the failure. Forced VM deletion can prevent the recovery code from running. `learned_at_least` includes local saves, and `durable_updates` counts only Drive-published updates.
+
+Local intermediate retention is bounded to the last two interval checkpoints and one epoch. Keep last, best, and historical Drive snapshots. Fairseq prunes local intermediate files only. Training batch, precision, LR, and warmup remain tied to the run.
+
+## Choose a notebook
+
+| Use | Notebook | Data and training | Drive location |
 | --- | --- | --- | --- |
-| 最初の動作確認 | [colab_smoke.ipynb](../notebooks/colab_smoke.ipynb) | 各split 5件・2更新・小型TT2 | OUTPUT_BASE/smoke/実験名 |
-| 通常の学習・比較 | [colab_training.ipynb](../notebooks/colab_training.ipynb) | 全件・更新数を明示指定・Fisher paper_exact | OUTPUT_BASE/training/実験名 |
+| Initial smoke test | [colab_smoke.ipynb](../notebooks/colab_smoke.ipynb) | Five samples per split, two updates, small TT2 | `OUTPUT_BASE/smoke/<experiment>` |
+| Standard training and comparison | [colab_training.ipynb](../notebooks/colab_training.ipynb) | Full corpus, explicit update count, Fisher paper_exact | `OUTPUT_BASE/training/<experiment>` |
 
-コーパス側のノートブックと同様、最初の設定フォームを編集して番号順に実行します。
-コーパスのコード・データは変更しません。smokeの数値を品質評価として使わないでください。
-通常用はFisher形状・optimizer・実効batchを論文に寄せますが、16kHz target Mel・eSpeak・日英コーパスを維持するため完全再現ではありません。
-新しい設定と移行上の注意は[論文レシピ](PAPER_RECIPES.md)を参照してください。
+Edit the first configuration form and run cells in order. The corpus code and data are read-only. Smoke results exercise wiring. Standard experiments follow the published Fisher shape, optimizer, and effective batch while retaining 16 kHz target mel, eSpeak, and the Japanese–English corpus. See [paper recipes](PAPER_RECIPES.md) for settings and migration.
 
-## 手順
+## Workflow
 
-`OUTPUT_BASE` の既定値は `/content/drive/MyDrive/ja-en-direct-s2st-benchmark-data` です。
-既存実験を再開するときは、その実験で使用した出力先を引き続き指定してください。
-既定値の変更によって旧保存先のデータが自動移動されることはありません。
+`OUTPUT_BASE` defaults to `/content/drive/MyDrive/ja-en-direct-s2st-benchmark-data`. For resume, use the experiment's original destination. A default change leaves old data at its original path.
 
-1. ColabでCPUランタイムを選択します（最初からGPUでも実行できます）。
-2. セル1でコーパスの保存先・出力先・実験名を指定します。
-3. セル4AでCPUデータ準備を実行します。Drive接続・コード取得・環境構築（セル2・3相当）は自動実行されます。
-   通常用は続けてCPUのままセル4A.5で音声ZIPを準備します。完了・Driveへの保存を確認後、GPUに切り替えて同じ設定でセル1→4Bを実行し、HuBERT Unit抽出とS2UT準備を行います。
-4. セル1のTRAIN_TARGETをtt2 / s2ut / unit / melから選び、セル5で学習します。
-   通常設定ではtt2・s2ut・unitの3runが必要です。unitはこのコーパスの英語train音声で学習します。S2UT_VOCODER_MODE=paperは公式LJSpeech重みの代替であり、原論文のFisher学習条件とは異なります。TT2をHiFi-GANで復元する場合はmelも学習します。smokeは従来の4runです。
-   通常用は各targetの初回にVRAM事前測定を行い、結果を保存してから初期重みで本学習を開始します。
-   `TRAIN_CALIBRATE_BATCH=True`、安全余裕10%が既定です。TT2実効1024は維持し、再開時は選択値を固定します。
-5. 学習が終わったらRUN_BENCHMARKをONにし、セル6〜8で復元・4方式推論・共通評価・比較を実行します。
+1. Select a CPU runtime in Colab. A GPU runtime also works for preparation.
+2. Set the corpus location, output location, and experiment name in Cell 1.
+3. Run CPU preparation in Cell 4A. Drive connection, code retrieval, and setup equivalent to Cells 2 and 3 are automatic. In the standard notebook, continue on CPU with Cell 4A.5 to stage audio ZIPs. Verify publication to Drive, switch to GPU, and run Cells 1 → 4B with the same settings for HuBERT extraction and S2UT preparation.
+4. Choose `TRAIN_TARGET` from `tt2`, `s2ut`, `unit`, or `mel` in Cell 1 and train in Cell 5. The standard trained-vocoder workflow uses TT2, S2UT, and unit runs. The unit vocoder fits on the corpus's English train audio. `S2UT_VOCODER_MODE=paper` uses public LJSpeech weights, which differ from the paper's Fisher-trained weights. Train mel for TT2 HiFi-GAN. Smoke uses four runs. The first standard run per target probes VRAM, saves the result, and starts from initial weights. Defaults are `TRAIN_CALIBRATE_BATCH=True` and 10% safety margin. TT2 keeps effective batch 1024, and resume fixes the selected batch.
+5. After training, enable `RUN_BENCHMARK` and run Cells 6–8 to restore, infer with four systems, evaluate, and compare.
 
-通常用はCONFIRM_FULL_DATAが既定でONであり、セル4A・4Bでは全コーパスを前処理します。
-OFFにした場合は準備開始前に停止します。
-RUN_TRAININGは初期状態でOFFです。学習する場合だけONにし、
-TOTAL_UPDATES（累計の更新数）とCONFIRM_TRAININGを設定してください。
-通常TT2/S2UTはそれぞれTOTAL_UPDATES=1000 / S2UT_TOTAL_UPDATES=3000を絶対上限とします。
-vocoderはVOCODER_TOTAL_UPDATES=10000を使用します。長期学習の自動開始はしません。
-旧4Bの補助ラベルは別のfairseq-unigram-allchars-v1へ移行し、S2UTはrecipe-v3の新しい学習runを使用します（TT2はrecipe-v2のまま）。
-既存のMel・Unit・旧checkpointを削除する必要はありません。
-データの全件使用と長期学習の許可は別々に確認します。勝手にfull学習を開始しません。
-SESSION_MINUTESは既定で0（時間上限なし）です。セル5は目標更新数まで学習を続け、
-60分ごとの自動停止はしません。Colab側の切断・実行上限を無効にする設定ではありません。
-切断後は同じrunの検証済みDrive snapshotから再開し、未保存の更新だけ再計算します。
-任意に正の値を指定した場合だけ学習subprocessに時間上限を設けます。
-その時間には学習中のdev検証とsubprocess内の保存処理も含まれます。
-準備・事前測定・入力preflightは時間予算の外であり、Driveバックアップ完了待ちも別です。
-CLIの--session-secondsも既定0で同じ動作です。学習開始の明示確認は引き続き必要です。
+Standard `CONFIRM_FULL_DATA` defaults on and prepares the full corpus in 4A/4B. Turning it off stops before preparation. `RUN_TRAINING` defaults off. Enable it only for training and set cumulative `TOTAL_UPDATES` and `CONFIRM_TRAINING`. The shortened caps are `TOTAL_UPDATES=1000` for TT2 and `S2UT_TOTAL_UPDATES=3000` for legacy S2UT. Vocoders use `VOCODER_TOTAL_UPDATES=10000`. Approval to use all data and to train for a long run are separate. Migrate old 4B auxiliary labels to `fairseq-unigram-allchars-v1`. S2UT uses a new recipe-v3 run, and TT2 remains recipe-v2. Retain existing mel, units, and checkpoints.
 
-### 4Bが未知文字エラーで停止した場合
+`SESSION_MINUTES=0` by default sets no local time cap. Cell 5 continues toward its update target without a periodic 60-minute stop. Colab's own limits still apply. Resume from the same run's verified Drive snapshot and recompute only unsaved updates. A positive time budget applies to the training subprocess, including dev checks and its saves. Preparation, calibration, input preflight, and Drive backup wait are outside it. CLI `--session-seconds` defaults to the same zero behavior. Training requires explicit confirmation.
 
-`unknown source_letter tokens ... ['汎']` 等は、trainにないdev/test文字を旧辞書が拒否したエラーです。
-新コードでは日本語・英語の文字辞書にtrain/dev/testの文字を登録し、最適化はtrainのみで行います。
-CTCのUnigramモデルは引き続きtrain英語文だけで学習し、未知pieceは正しく`<unk>`へ符号化します。
-この語彙登録方針は実験lockに明記します。原論文が全split登録を指定しているという意味ではありません。
+### Unknown character errors in 4B
 
-保存済みrevisionを明示更新した後、同じ出力先・実験名で次の追加セルを実行できます。
-CPUで実行可能です。Unit抽出・モデルダウンロード・4A/Mel生成・学習は実行しません。
-保存済みUnitと日本語音声ZIPが必要で、欠けていれば自動で再抽出せず停止します。
-未完了の準備・検証には時間がかかります。正常終了後の同じセル再実行は完了receiptを再利用します。
+`unknown source_letter tokens ... ['汎']` is an example of a legacy dictionary rejecting a dev/test character missing from train. The updated Japanese and English character dictionaries register all train/dev/test characters, while optimization uses only train. The CTC Unigram model still fits on English train text and encodes unknown pieces as `<unk>`. The lock records this implementation choice. The original paper does not specify registration from all splits.
+
+After explicitly updating the saved revision, use this additional CPU cell with the same destination and experiment. It requires stored units and Japanese audio ZIPs and stops if either is missing. It skips unit extraction, model download, 4A/mel generation, and training. Incomplete preparation and validation can take time. A completed rerun reuses the receipt.
 
 ```python
 ensure_runtime(require_gpu=False)
@@ -390,21 +161,13 @@ run(PYTHON, '-m', 'direct_s2st.preparation_workflow',
     '--stage', '4b-finish', '--profile', PROFILE)
 ```
 
-更新前のS2UT学習checkpointは、変更した語彙のモデルへ継続学習しません。
-学習へ進む前に最新ノートブックのセル1を同じ設定で実行し、S2UT recipe-v3のrun名を使用してください。
+S2UT checkpoints from the previous vocabulary cannot continue on the new model. Before training, run Cell 1 in the latest notebook with the same settings and use the S2UT recipe-v3 run name.
 
-### 4Bの検証でsample ID alignment failureが出た場合
+### Sample ID alignment failure in 4B validation
 
-旧検証コードには、補助ラベル先頭の引用符`"`をCSVの囲み文字として解釈し、
-後続サンプルを同じ行に取り込む不具合がありました。fairseqと同じQUOTE_NONEへ修正しています。
-生成済みTSVを書き換える修正ではなく、読み取り側の修正です。
-実際のID不一致は引き続き拒否し、全splitのID確認を音声の存在確認より先に行います。
-エラーには欠落・余分なIDの件数、例、読み取りファイルを表示します。
+Old validation treated an opening `"` in an auxiliary label as a CSV quote and swallowed later samples into one row. The reader now uses fairseq's QUOTE_NONE, leaving generated TSVs intact. Genuine alignment failures still stop execution. Check IDs for all splits before audio existence. Errors include counts and examples of missing and extra IDs, and the file path.
 
-今回のように生成後の検証で停止し、preparedのdata-lock.jsonが保存されている場合は、
-明示的にコードrevisionを更新した後、保存済みTSVだけを検証して読み取り不具合の解消を確認できます。
-次は読み取り専用です。音声の存在確認は省略し、ID・辞書・Unit列・CTC整合性を確認します。
-学習前のpreflightでは通常の音声確認も実行します。未知文字エラーで生成前に止まった場合の代替ではありません。
+If validation stopped after generation and the prepared `data-lock.json` exists, explicitly update the code revision and run this read-only check of the saved TSVs. It verifies IDs, dictionaries, units, and CTC while skipping audio existence. Training preflight still checks audio. If an unknown character stopped generation before output, use the previous recovery procedure.
 
 ```python
 ensure_runtime(require_gpu=False)
@@ -414,871 +177,375 @@ from pathlib import Path
 from direct_s2st.s2ut.migrate_labels import paper_data_root
 from direct_s2st.s2ut.multitask import validate_prepared
 root = paper_data_root(Path(sys.argv[1]))
-assert (root / 'data-lock.json').is_file(), 'prepared data-lockがありません。4b-finishを再開してください'
+assert (root / 'data-lock.json').is_file(), 'Prepared data-lock is missing. Resume 4b-finish.'
 print(json.dumps(validate_prepared(root, check_audio=False), ensure_ascii=False))
 ''', DATA)
 ```
 
-検証成功後はセル5へ進めます（4A・HuBERT抽出・補助ラベルを再生成しません）。
-4B工程の完了receiptも残す場合は、通常の4b-finishを再実行してください。
-新コードでもID不一致が出る場合は、表示されたmissing/extra/pathを確認し、検証を無効化して学習しないでください。
+After validation succeeds, continue to Cell 5 with existing 4A, HuBERT, and auxiliary labels. To also write the 4B completion receipt, rerun standard `4b-finish`. If alignment still fails, inspect missing/extra/path before training.
 
-smoke用は5件・2更新に固定され、通常用は件数制限を設けません。
-通常用のPROFILE=pilotはCLI設定選択用であり、コーパスを10時間に切り詰めるものではありません。
-前処理ではS2UTの補助ラベルやTT2の音素・melも生成します。
+Smoke fixes five examples per split and two updates. The standard notebook has no sample limit. Its `PROFILE=pilot` selects CLI settings without trimming the corpus to ten hours. Preparation generates S2UT auxiliary labels and TT2 phonemes and mel.
 
-### CPU準備 → Unit抽出 → A100学習
+### CPU preparation, GPU unit extraction, and A100 training
 
-| 工程 | セル | 内容 |
+| Stage | Cells | Work |
 | --- | --- | --- |
-| CPU（GPU不要） | 1 → 4A → 4A.5（通常用） | 全件取込・WAV/SHA検証・音素化・TT2 Mel作成と検証、英語・日本語WAVの永続ZIP準備 |
-| GPU | 同じ設定で1 → 4B | 完成ZIPをローカルへ取得・展開してHuBERT Unit抽出、S2UT用データ作成と検証 |
-| A100など学習用GPU | 同じ設定で1 → 5 | 選択モデルの学習／checkpoint再開 |
+| CPU | 1 → 4A → 4A.5 (standard notebook) | Full import, WAV/SHA verification, phonemes, TT2 mel and validation, and durable English/Japanese WAV ZIPs |
+| GPU | 1 → 4B with the same settings | Download and extract completed ZIPs, run HuBERT, and prepare and verify S2UT data |
+| Training GPU such as A100 | 1 → 5 with the same settings | Train or resume the selected model |
 
-GPUの変更はColabのランタイム設定から手動で行ってください。切り替えるとPython変数も消えるため、
-**セル1は再実行が必要**です。CORPUS_PATH・OUTPUT_BASE・EXPERIMENTは同じ値を使います。
-以後のセルはDrive接続（認証操作が必要な場合あり）、保存済みrevisionのコード取得、Python/fairseq/eSpeak環境の
-再構築、環境変数の復元を自動実行します。既存の構築済み環境は再インストールせず動作確認して使います。
-セル2・3は手動で先に実行したい場合の入口として残しています。
+Switch GPU manually in Colab's runtime settings. Switching clears Python variables, so **rerun Cell 1** with the same `CORPUS_PATH`, `OUTPUT_BASE`, and `EXPERIMENT`. Later cells mount Drive, possibly requiring authentication, fetch the pinned code, rebuild Python/fairseq/eSpeak, and restore environment variables. A usable existing environment is checked and reused. Cells 2 and 3 remain manual entry points.
 
-4A完了後に4Bや5へ進む際、4Aは自動でやり直しません。準備データはDrive上の同じ保存先を参照します。
-4BをCPUで実行するとGPU必須のエラーで停止し、黙ってCPU抽出へ切り替えることはありません。
-通常用の4Bは必要な英語・日本語ZIPが全て公開済みかをモデル取得前に確認します。
-不足時はセル4A.5へ戻る案内を出して停止し、GPU上で原本からZIPを作り始めません。
-ZIP取得・展開、k-means、S2UT整備・検証はGPU使用率が低い区間として残ります。
-通常用のgpu80設定は学習向けであり、4Bの抽出には使いません。他のGPUでの速度・VRAM使用量は未検証です。
-TT2/melだけを学習する場合、Unitを使わないため4Bは不要です。4方式比較にはUnit準備も必要です。
+4B and 5 use the existing 4A Drive data. 4B requires a GPU and checks that all English and Japanese ZIPs are published before fetching the model. If they are incomplete, return to 4A.5. ZIP transfer and extraction, k-means, S2UT setup, and validation can leave GPU utilization low. The `gpu80` preset applies to training. Speed and VRAM on other GPUs remain unverified. TT2/mel-only training can skip 4B. Four-system comparison requires the units.
 
-CPU/Drive待ちの間にGPUを確保しないことでGPU利用時間を減らせます。ただし切り替えのたびに環境構築が必要で、
-総所要時間が短くなる保証はありません。CPU準備でも互換性維持のためCUDA対応PyTorchをインストールします。
-料金や利用枠の削減量は契約・処理時間によるため固定値では示せません。
+CPU staging avoids GPU allocation during CPU and Drive work. Runtime rebuilds can offset overall time savings. CPU preparation installs CUDA-enabled PyTorch for compatibility. Billing and quota savings depend on plan and timings.
 
-## 保存・切断後の再開
+## Storage and resume after disconnection
 
-同じノートブック、実験名、設定でセル1を実行し、必要な工程のセルへ進みます。
-学習snapshotがあれば自動でresumeします。snapshotが壊れていれば停止し、
-黙って初めから学習し直すことはありません。最初の保存区間が完了するまでは復元点はありません。
-学習対象を切り替えても、run名とローカル作業先は実験名・用途・対象別に分離されます。
+Run Cell 1 with the same notebook, experiment, and settings, then continue to the needed stage. A saved training snapshot triggers resume. A corrupt snapshot stops the run. Before the first durable save, no recovery point exists. Run names and local work paths distinguish experiment, use case, and target.
 
-- data/: common manifest・前処理データ
-- checkpoints/: hash検証付き学習snapshot
-- runs/: 各方式の予測音声・JSONL・metrics
-- data/results/: 比較レポート・acceptance
-- session.log: コマンドの標準出力とエラー（セルにも逐次表示）
+- `data/` holds common manifests and prepared data.
+- `checkpoints/` holds SHA-verified training snapshots.
+- `runs/` holds each system's audio predictions, JSONL, and metrics.
+- `data/results/` holds comparison and acceptance reports.
+- `session.log` contains stdout and errors, also streamed to the cell.
 
-切断時の学習再計算は最後の保存区間以降です。
-推論は成功済みpairのSHAを照合して再利用します。
-比較セルは不足するローカルcheckpointをDriveから復元します。
-既存の比較レポートを更新する場合だけ、セル6のOVERWRITE_COMPARISONをTrueにしてください。
+Training repeats updates after its latest durable save. Inference verifies and reuses successful pairs by SHA. The comparison cell restores missing local checkpoints from Drive. Use `OVERWRITE_COMPARISON=True` in Cell 6 only to update an existing report.
 
-コードrevision、学習設定、データ、環境lockの不一致は再開を拒否します。
-条件変更時は新しい実験名を使ってください。過去のcheckpointやsnapshotは削除しません。
-旧版のsmoke-dataや手動run名は自動移動しません。旧実験を継続する場合は、そのrevisionの
-ノートブックを使ってください。旧保存先に新しいlockを上書きしてはいけません。
+Resume checks revision, training settings, data, and environment lock. Use a new experiment for changed conditions and preserve past snapshots. Old smoke-data and manual run names stay where they were saved. Continue an old experiment with its matching notebook revision and original lock.
 
-## ランタイムと性能
+## Runtime and performance
 
-Colab標準Pythonとは独立したPython 3.10.18とtorch/torchaudio 2.7.1を使用します。
-3.13で構築途中のVMを再利用せず、新しいGPUランタイムで開始してください。
-requirements/colab310.txtで従来の依存を固定し、setup.py --inference（CPU準備では追加で--allow-cpu）で
-Cascade・S2T→TTS・共通評価の依存も導入します。
+The dedicated environment uses Python 3.10.18 and torch/torchaudio 2.7.1 independently of Colab host Python. Start a fresh GPU runtime if setup was interrupted on 3.13. `requirements/colab310.txt` pins dependencies. `setup.py --inference` installs Cascade, S2T→TTS, and shared evaluation dependencies. CPU preparation also passes `--allow-cpu`.
 
-通常用はPERFORMANCE=gpu80（TT2 batch8、vocoder batch16、workers4、
-S2UT max-tokens20000）を使います。VRAM使用量の保証ではありません。
-paper_exactのTT2はupdate_freq128で実効1024、S2UTはupdate_freq4を保持します。
-smoke用は小さいbatchとworkers0です。
-詳細設定が必要な場合はdirect_s2st.colab.make_configの引数を変更しますが、
-既存runの条件は途中変更しないでください。
+The standard `PERFORMANCE=gpu80` preset sets TT2 batch 8, vocoder batch 16, workers 4, and S2UT max-tokens 20000. Actual VRAM depends on the run. TT2 exact uses update_freq 128 at batch 8 for effective 1024, and S2UT uses update_freq 4. Smoke uses small batches and workers 0. Additional controls are arguments to `direct_s2st.colab.make_config`. Saved runs keep their original conditions.
 
-モデルはsubprocessの終了時にGPUメモリを解放します。
-BLASERは既定で無効です。SONARの依存は別途検証が必要であり、
-有効化時に黙って省略しません。全方式で同じ評価条件を使ってください。
+Subprocess exit releases model GPU memory. BLASER defaults off. Verify SONAR dependencies separately before enabling it. An explicit request to enable it is honored or fails. Evaluate all systems under the same conditions.
 
-## 検証範囲
+## Verification scope
 
-### 長時間処理の進捗ログ
+### Progress logs for long operations
 
-データ取込・WAV/SHA-256検証・音素化・Mel/Unit作成・モデル読込・学習・推論・評価・
-checkpoint保存/検証/復元は、開始/終了時と実行中およそ10秒ごとに`[progress]`を出します。
-Colabでは画面と`session.log`に記録されます。学習・推論の外部プロセス出力も
-画面へ転送し、従来の`runs/.../logs/process.log`にも保存します。
+Corpus import, WAV/SHA-256 validation, phonemes, mel/units, model loading, training, inference, evaluation, and checkpoint save, validation, and restore log `[progress]` at start and end and about every ten seconds. Colab shows the messages and appends them to `session.log`. Training and inference subprocess output also streams to the cell and remains in `runs/.../logs/process.log`.
 
-例（数値は説明用）:
+This example shows WAV validation at item 121.
 
 ```text
 [progress] corpus: validate WAV and SHA256 status=running checked=120/5000 no_advance=2.1s elapsed=30.0s current=pair-121 activity=SHA256: pair-121.wav bytes=1048576
 ```
 
-- `checked`はループで処理済みの件数（再利用/対象外判定/失敗記録も含み、成功件数ではありません）。総件数を事前取得しないストリームは`?`を表示します。
-- `elapsed`はその工程の経過秒、`no_advance`は件数が最後に進んでからの秒数です。
-- `current`は処理中のID/ファイル/更新番号、`activity`はハッシュ検証やダウンロード中のファイルと読み取りバイト数などです。
-- モデル読込など件数を定義できない工程は、工程名と経過時間を表示します。全体と内側の工程のログが並ぶ場合があります。
-- `running`は監視スレッドが動いていることを示すだけで、処理が前進した保証ではありません。件数やバイト数が変化しているかを確認してください。ランタイム切断やプロセス停止中はログを出せません。
+- `checked` counts processed items, including reuse, skips, and failures. An unknown total is `?`.
+- `elapsed` is stage time in seconds. `no_advance` is seconds since the count last increased.
+- `current` identifies the current item, file, or update. `activity` can show hashing, downloading, and bytes read.
+- Stages such as model loading without countable items show the stage and elapsed time. Outer and inner stages can log together.
+- `running` reports the monitor thread's liveness. Check changing counts or bytes to see advancement. A disconnected or stopped process cannot emit logs.
 
-進捗はstderrへ即時出力するため、CLIのstdoutのJSONは従来どおり利用できます。
-成果物の形式は変更していません。4A/4Bの`--resume`時の検証再利用は下記を参照してください。
-修正前から動いているプロセスには自動適用されません。新コードを取得して起動した処理から有効です。
+Progress is flushed to stderr, keeping CLI JSON on stdout and artifact formats intact. See the following section for 4A/4B verification reuse. Already-running processes keep their current code. Restart under the new code to use the logging.
 
-### 4A/4Bの並列処理と中断再開
+### Parallel preparation and resume in 4A/4B
 
-新規Mel抽出はVMのローカル一時ディスクで処理し、最大128件・目安256MiBずつの
-非圧縮ZIPにまとめ、読戻しSHA256を確認してDriveへ保存します。
-Driveへ14万個のNPYを個別保存する方式ではありません。
-ZIPと不変receiptは`packs-v1/<先頭2桁>/`へ保存し、次回はZIP単位で検証・再利用します。
-旧版の`features/`・`features-v2/`やcheckpointは削除・移動しません。
-[既存MelのZIP救済手順](RESUME.md#大量のmel-npyでdriveのinputoutput-errorが出た場合)を使えます。
-以前に完成・作成開始した旧形式の学習用ZIPは互換経路で維持します。
+New mel extraction uses local VM storage. Pack up to 128 items or about 256 MiB per uncompressed ZIP, verify SHA-256 by readback, then publish to Drive. This replaces individual NPY writes for the roughly 140,000 items. ZIPs and immutable receipts under `packs-v1/<first-two-characters>/` are verified and reused per archive. Retain old `features/`, `features-v2/`, and checkpoints. Existing legacy training ZIPs remain compatible, including partially built sets. See [mel ZIP recovery](RESUME.md#drive-inputoutput-errors-with-many-mel-npys).
 
-セル1に次の設定があります。セル5の学習設定・バッチサイズは変更しません。
+Set preparation limits and reuse behavior in Cell 1. These settings are independent of Cell 5 training batches.
 
-- `PREP_MAX_WORKERS=32`: CPU/I/Oワーカー数の上限（1〜32、実際にはCPU数以下）。2以下から開始し、約10秒ごとに処理速度・CPU使用率・空きRAMから増減します。Driveが律速で速度が落ちる場合は減らします。
-- `HUBERT_MAX_BATCH=32`: HuBERTの最大バッチ（1〜32）。空きVRAMと測定速度で調整し、OOM時は縮小して再試行します。1件でもOOMなら停止して記録済み部分を残します。32固定で処理する設定ではありません。
-- `RECHECK_AUDIO=False`: 再開時、前回SHA-256/WAV検証に成功し、期待SHA・パス・サイズ・更新時刻・行の内容が一致する音声は検証を再利用します。**毎回全音声のバイト列を再検証するにはTrue**にしてください。サイズと更新時刻を保った改変は通常の再利用では検出できません。コーパスを不変に保つ前提です。
+- `PREP_MAX_WORKERS=32` caps CPU/I/O workers from 1 to 32 and never exceeds CPU count. Start at two or fewer and adjust about every 10 seconds based on throughput, CPU utilization, and free RAM. Reduce workers when Drive becomes the bottleneck.
+- `HUBERT_MAX_BATCH=32` caps the adaptive HuBERT batch from 1 to 32. Adjust from free VRAM and measured speed. Retry OOM with a smaller batch. A single-item OOM stops and retains saved progress.
+- `RECHECK_AUDIO=False` reuses a successful SHA-256/WAV check if expected SHA, path, size, mtime, and row content match. **Set True to verify all audio bytes again.** Fast reuse cannot detect edits that preserve size and mtime. Treat the corpus as immutable.
 
-4Aではパス解決・WAV/SHA検証・eSpeak音素化・Mel抽出・音声ヘッダー読込を並列化します。
-4Bでは音声読込とS2UT用変換を並列化し、HuBERTモデルは1個を使います。
-HuBERTの畳み込み正規化にパディングが影響するため、**同じサンプル数の音声だけ**を
-`max(16, HUBERT_MAX_BATCH)`件（上限32）の読込ウィンドウ内でまとめます。長さが異なる音声は単独推論になるため、
-GPU使用率100%や最大速度、特定の高速化倍率を保証するものではありません。
-精度変更（FP16/TF32の強制、有音部分の切捨て）はしません。
+4A parallelizes path resolution, WAV/SHA checks, eSpeak phonemes, mel extraction, and WAV header reads. 4B parallelizes audio reads and S2UT conversion and uses one HuBERT model. Padding affects HuBERT convolution normalization, so group only **equal-length waveforms** in a read window of `max(16, HUBERT_MAX_BATCH)`, capped at 32. Different lengths may run singly. GPU utilization, maximum speed, and speedup depend on the data. Precision and full audio content are retained.
 
-保存先は実験のDriveデータ領域です。コーパス側には書き込みません。
+Drive stores preparation artifacts within the experiment.
 
-- WAV検証: `data/.prep-checkpoints/corpus/`
-- 音素: `data/translatotron2/phonemes/.checkpoints/`
-- Mel: `data/translatotron2/.prep-checkpoints/mel/`（新方式は`packs-v1/`のZIP。学習用ZIPの分も別途容量が必要。旧NPYは保持）
-- Unit: `data/s2ut/units/.checkpoints/` と既存の`.units`ファイル
+- WAV validation under `data/.prep-checkpoints/corpus/`
+- Phonemes under `data/translatotron2/phonemes/.checkpoints/`
+- Mel under `data/translatotron2/.prep-checkpoints/mel/`, with new ZIPs in `packs-v1/`. Training ZIPs need separate space. Keep old NPYs.
+- Units under `data/s2ut/units/.checkpoints/`, with existing `.units` files retained.
 
-Mel以外の完了記録を64件または約10秒ごと（次の結果受取時）に小さなJSONへ原子的に保存します。
-通常の例外・中断でも受取済み結果を保存します。VMの強制終了では未保存チャンクと
-処理中の小さなウィンドウをやり直します。最終TSV/ZIPの作成中に止まった場合は、
-抽出済みデータを使ってその集約工程をやり直します。破損した公開済み記録・成果物は
-黙って上書きせず停止します。モデル・入力が変わった場合は旧結果を無条件再利用しません。
+For non-mel stages, atomically publish small completion JSON after 64 items or roughly 10 seconds at the next result. Normal exceptions and interruptions save collected results. Forced VM termination can lose the unpublished chunk and small in-flight window. If final TSV/ZIP aggregation is interrupted, rebuild it from saved extracts. Stop on corrupt published data. Model or input changes require verification before reuse.
 
-新方式のMelは最大128件/256MiBのZIPごとに保存し、32件以上たまった場合は
-約60秒経過時（次の結果受取時）にも保存します。正常な例外・中断では受取済みの
-小さな残りZIPも保存します。VM強制終了では未公開ZIPと処理中のワーカー分だけを
-やり直します。`persisted`がDrive保存済み件数、`pending_local`がローカルだけの件数です。
-`S2ST_MEL_LOCAL_WORK`でローカル作業親ディレクトリを指定できます（既定はローカルtemp）。
-Driveパスやコーパス内を作業場所に指定しないでください。
+Mel publishes each ZIP at the 128-item/256 MiB limit, or after about 60 seconds at the next result when at least 32 items are ready. Graceful interruption also saves a small remainder. Forced termination repeats unpublished ZIPs and in-flight work. `persisted` counts Drive items, and `pending_local` counts local-only items. `S2ST_MEL_LOCAL_WORK` overrides the local temp parent. Use local VM storage outside Drive and the corpus.
 
-中断後は**同じ実験名・同じコードrevision・同じ設定でセル1→4Aまたは4B**を実行してください。
-`--resume`はセルに設定済みで、VM消失/GPU変更後の環境構築も自動実行します。
-旧コードで既に走っている処理には適用されません。旧処理が保存していない途中結果は復元できません。
-同じ出力に複数の準備プロセスを同時実行しないでください。
+After interruption, use the **same experiment, revision, and settings in Cells 1 → 4A or 4B**. The cell passes `--resume` and rebuilds the environment on a new VM or GPU. Already-running old code is unaffected and unsaved work cannot be recovered. Use one preparation process per output.
 
-ログには`checked`・`remaining`（総件数が既知の場合）、CPUワーカー数・速度・空きRAM、
-HuBERTの実バッチ数・次の上限・空きVRAM、終了時のcheckpoint保存/再利用件数が出ます。
-CLIでは対応する環境変数`S2ST_PREP_WORKERS`、`S2ST_HUBERT_BATCH_MAX`、
-`S2ST_PREP_RECHECK=1`を指定できます。`S2ST_PREP_ADAPTIVE=0`はCPUワーカーを上限に固定します。
+Logs show `checked`, `remaining` when the total is known, CPU workers, speed, free RAM, actual HuBERT batch, next cap, free VRAM, and final save/reuse counts. CLI equivalents are `S2ST_PREP_WORKERS`, `S2ST_HUBERT_BATCH_MAX`, and `S2ST_PREP_RECHECK=1`. Set `S2ST_PREP_ADAPTIVE=0` to fix CPU workers at the cap.
 
-### Unit / Mel ボコーダーの早期終了
+### Early stopping for unit and mel vocoders
 
-通常セル1→5で`VOCODER_MONITOR=True`（既定）を使用します。
-`VOCODER_MONITOR_INTERVAL=10`、`VOCODER_MONITOR_PATIENCE=5`、
-`VOCODER_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.01`です。
-MelはdevのMel再構成L1、Unitはそれに加えてduration MSE（log1p run length）を監視します。
-各指標の独立anchorからいずれか1%以上改善すればカウンターを0に戻し、
-全指標が5評価連続で改善しなければ停止します。GANのdiscriminator/adversarial/feature/total
-lossは敵対学習で単調減少を期待できないため停止指標には使いません。従来のtrain lossログは維持します。
+Standard Cells 1 → 5 default to `VOCODER_MONITOR=True`, `VOCODER_MONITOR_INTERVAL=10`, `VOCODER_MONITOR_PATIENCE=5`, and `VOCODER_MONITOR_MIN_RELATIVE_IMPROVEMENT=0.01`. Mel monitors dev mel reconstruction L1. Unit also monitors duration MSE on log1p run lengths. At least 1% improvement against any metric's anchor resets patience. Stop after five evaluations without significant improvement. GAN discriminator, adversarial, feature, and total losses can fluctuate and are retained in train logs only.
 
-`VOCODER_MONITOR_START_UPDATES=400`までは停止せず、各dev lossの最小値をanchorにします。
-これは停止判定のguardであり、**学習率warmupを新設する設定ではありません**。
-dev全件から固定の中央segment（既定32 frames）を評価し、発話ごとの平均を取ります。
-Unitのdurationは発話全体のoriginal Unitを使用します。testは使用せず、devでoptimizer更新しません。
-乱数・モデルbuffer・train/eval状態を評価前後で復元します。
-音声の自然さ、翻訳精度、MOSを直接測る指標ではありません。
+Through `VOCODER_MONITOR_START_UPDATES=400`, collect minimum dev values as anchors and defer stopping. This guard controls stopping only. Evaluate every dev utterance on a fixed center segment, 32 frames by default, and average over utterances. Unit duration uses original units for the full utterance. Evaluation performs no optimizer updates and excludes test. Restore RNG, buffers, and train/eval modes afterward. These losses do not directly measure naturalness, translation accuracy, or MOS.
 
-再開用は従来どおり`generator.pt`（generator/discriminatorと両optimizer、乱数）です。
-監視状態・dev入力identityも同梱し、切断再開でanchor/patience/historyをリセットしません。
-最良のdev Mel L1のfull checkpointを`checkpoints/checkpoint_best.pt`へ別保存し、比較用音声生成は
-SHA確認済みbestを使用します。best未作成の旧runはlastを使用します。
-JSON/CSV/SVGは確認済みsnapshotに含め、通常のDriveダッシュボードにも公開します。
+Resume uses `generator.pt` with both models and optimizers and RNG. It includes monitoring state and dev input identity so anchors, patience, and history survive disconnection. Save a separate full best checkpoint by dev mel L1 under `checkpoints/checkpoint_best.pt` and verify its SHA for comparison synthesis. Old runs without a best use last. Include JSON, CSV, and SVG in verified snapshots and publish them to the Drive dashboard.
 
-監視なしの既存ボコーダーrunには、対応する新launcherが検証済み旧コードへ監視のみをoverlayし、
-保存済みoptimizer/configを維持して、再開した更新以降から記録します。過去lossは捏造しません。
-未知の旧実装や監視開始後のpolicy/guard/dev入力変更は拒否します。設定OFFでも保存済み監視は継承します。
-初回に最新launcherを明示選択する必要がある場合は`TRAIN_CODE_REVISION`へ対応する完全SHAを指定します。
-以後は通常セル1→5で再開できます。追加セルは不要です。
-`VOCODER_TOTAL_UPDATES=10000`の絶対上限は独立して維持します（再開後に10000追加ではありません）。
+For an existing unmonitored vocoder run, a compatible launcher applies only the reviewed monitoring overlay and keeps saved config and optimizer. History begins at resume. Reject unknown old implementations or changes to the policy, guard, or dev inputs after adoption. Saved monitoring persists even if the setting is off. Set `TRAIN_CODE_REVISION` to a compatible full SHA if needed for initial launcher selection. Resume through standard Cells 1 → 5. `VOCODER_TOTAL_UPDATES=10000` is an independent absolute cap.
 
-#### VRAM測定後に`ExistingOutputError`になった場合
+#### ExistingOutputError after a VRAM probe
 
-93b04bf以前では、launcherが保存した`batch-calibration.json`だけでも初回の
-ボコーダーが「既存の学習出力」と誤判定する場合がありました。修正版は通常セル5の
-private preflight receiptで保存先・許可済み準備ファイル名・SHA-256を照合してから開始します。
-generator/checkpoint・監視履歴・未知ファイルがあれば従来どおり保護し、
-`--overwrite`を自動追加したり、チェックを丸ごと無効化したりしません。
-更新済みlauncherを選び、同じ実験名でセル1→5を再実行してください。
-保存済みVRAM測定と入力ZIP/検証cacheは再利用します。未完のローカル出力は通常の
-auto-resumeが`.interrupted-...`に保持します。Driveのデータや既存checkpointの削除は不要です。
+Through `93b04bf`, a vocoder could treat the launcher's `batch-calibration.json` as existing training output. The fix checks the destination, allowed prep filenames, and SHA-256 using a private standard Cell 5 preflight receipt. Generator files, checkpoints, monitoring history, and unknown files remain protected. Use the updated launcher and rerun Cells 1 → 5 with the same experiment. Reuse calibration and input ZIP/validation caches. Auto-resume preserves incomplete local output under `.interrupted-...`. Keep Drive data and checkpoints.
 
-### セル5の常駐学習・開始前VRAM測定
+### Resident training and VRAM calibration in Cell 5
 
-通常ノートブックの `TRAIN_OPTIMIZE=True` は、1 GPU・1学習プロセスをセッション中
-常駐させます。従来の100更新ごとの再起動は行わず、`CHUNK_UPDATES` は旧方式だけに適用します。
-APIの `make_config` は互換性のため `optimize=False` が既定です。
+Standard `TRAIN_OPTIMIZE=True` keeps one training process resident on one GPU for the session. `CHUNK_UPDATES` and the 100-update restarts apply to legacy execution. The `make_config` API defaults to `optimize=False` for compatibility.
 
-通常用は `TRAIN_CALIBRATE_BATCH=True` で、TT2/S2UT/Mel・Unit vocoderごとに開始前の
-別プロセス試運転を行います。選択値・ピークVRAM・時間・GPU条件をDriveに記録し、
-試運転weightsを捨ててから本学習をupdate 0から開始します。TT2は実効1024を維持して
-物理batchを選び、GANは実batch数を選びます。S2UTのpaper_exactは公式の
-max_tokens20000/update_freq4のVRAM収容確認だけを行い、追加分割・拡大はしません。
-不足時は停止し、より大きいGPUまたは別runのpaper_practicalを明示選択します。
-S2UTの分割上限の選定はpaper_practical限定です。再開時は保存した設定を固定します。
-`TRAIN_CALIBRATION_MAX_BATCH=1024`、`TRAIN_VRAM_RESERVE_RATIO=0.10`、
-`TRAIN_CALIBRATION_STEPS=3`が既定です。MAX_BATCHはS2UT paper_exactには影響しません。
-最大容量と最大速度は同じとは限りません。
-TRAIN_CALIBRATION_OBJECTIVE=throughput（既定）は安全な候補から試運転の処理数/秒で選びます。
-capacityは収まる最大数を選ぶ旧方針です。いずれもS2UT paper_exactのbatchは変更しません。
-GPU使用率サンプル、VRAM、処理数/秒、TT2のstream読み込み待ちをログで確認できます。
-GPU変更時の扱いと安全余裕は[論文レシピ](PAPER_RECIPES.md)を参照してください。
+`TRAIN_CALIBRATE_BATCH=True` runs separate-process trials before training TT2, S2UT, and mel or unit vocoders. Record selection, peak VRAM, timing, and GPU on Drive. Discard probe weights and start training at update 0. TT2 chooses physical batch with effective 1024, and GAN chooses physical batch. S2UT exact only checks fit at max_tokens 20000 and update_freq 4. If it fails, use a larger GPU or explicitly start a separate practical run. Only S2UT practical selects a split cap. Resume uses the recorded settings. Defaults are `TRAIN_CALIBRATION_MAX_BATCH=1024`, `TRAIN_VRAM_RESERVE_RATIO=0.10`, and `TRAIN_CALIBRATION_STEPS=3`. MAX_BATCH does not affect S2UT exact. `TRAIN_CALIBRATION_OBJECTIVE=throughput` selects by measured work per second among safe candidates. `capacity` selects the largest fit. Both preserve S2UT exact batching. Logs include utilization samples, VRAM, throughput, and TT2 streaming wait. See [paper recipes](PAPER_RECIPES.md) for GPU changes and margins.
 
-試運転は`python -m direct_s2st.batch_probe`で起動します。終了通知は全trainerで
-共通の型を使用し、指定回数の有限・正の測定値が揃った場合だけ成功とします。
-通常エラー・測定不足はOOMと区別して停止し、不完全な測定を再利用可能として保存しません。
-既存の測定結果とGPU変更時の確認にも同じ検証を適用します。
-S2UTの処理数/秒は、勾配蓄積した全サンプル数をoptimizer更新全体の時間で割ります。
-ログのmicrobatchは実際の最大同時処理数であり、全処理数とは区別します。
-途中で停止した候補は再測定し、それより前に完了・保存された候補だけ再利用します。
+Probes use `python -m direct_s2st.batch_probe`. Every trainer uses the same completion signal and requires the requested count of finite positive measurements. Errors and insufficient data stop separately from OOM. Incomplete measurements are not marked reusable. Existing probe results and GPU changes use the same validation. S2UT throughput divides all accumulated samples by the complete optimizer update time. Microbatch reports the largest number processed simultaneously. Repeat interrupted candidates and reuse earlier published ones.
 
-`ProbeComplete`で試運転後に停止した旧コードから更新する場合は、
-`scripts/colab/use_paper_recipe.py --separate-code-fix-runs --overwrite`で
-保存済みrevisionをバックアップして更新し、学習run名に`-probe-fix-v1`などの別名を付けます。
-実験名と準備済みデータの場所は変更しません。旧設定・checkpointは保持されますが、
-旧runのoptimizer状態は新runへ引き継ぎません。本学習前の失敗なら、新runで測定から開始できます。
-ランタイム切替後も同じ別名を設定してからセル5を実行してください。
-選択済みの同時処理数を黙って変更したり、試運転の重みを本学習へ持ち込んだりしません。
-TT2/vocoderの試運転ログは最後のoptimizer更新も数えて完了表示します。
-実際の`-m`起動はCPUのCUDA/trainerモックで回帰テストし、TT2の3回のbackward/Adamと
-試運転checkpoint非公開は実CPUモデルでも確認します。実GPU収容確認とは別のテストです。
+To upgrade a legacy probe that stopped at `ProbeComplete`, use `scripts/colab/use_paper_recipe.py --separate-code-fix-runs --overwrite` to back up and update the revision pin and add a run suffix such as `-probe-fix-v1`. Keep the experiment name and prepared data. Old configs and checkpoints remain, and the fresh run uses new optimizer state. If training never began, start at calibration. Set the same suffixed name after switching runtimes before running Cell 5. Calibration retains the selected batch and discards trial weights. TT2/vocoder probe logs count the final update. CPU tests exercise the actual `-m` entry point with CUDA/trainer mocks. A real small CPU TT2 model also verifies three backward/Adam updates and no trial checkpoint publication. GPU fit needs a separate test.
 
-- `TRAIN_MAX_WORKERS=8`: 読込み並列数の上限。TT2/vocoderはCPU負荷・空きRAM・測定速度で約10秒ごとに調整。S2UTはfairseqのepoch境界でのみ調整します。0は逐次読込みです。
-- `TRAIN_CACHE_GB=8`: 旧方式のローカルLRUキャッシュ上限。新しいDrive安全モードでは必要な音声とMel ZIPを先に全てローカルへ取り込むため、全データを8GiBに制限する設定ではありません。ローカル容量不足時は学習開始前に停止し、Driveへの読込みに黙って戻りません。
-- `TRAIN_SAVE_INTERVAL=1`: 通常用のoptimizer更新単位の保存間隔。最終更新・時間予算到達時にも保存します。ローカル固定コピーは同期、その後のDriveコピー・SHA-256検証は別スレッドで1件ずつ実行。未確認コピーは最大2件で、遅いDriveには待ち合わせます。
-- `TRAIN_BACKUP_MIN_SECONDS=600`: 常駐学習でDriveへ転送する最短間隔。ローカルの50更新ごとの保存は維持し、最初・最終・時間予算到達時の保存は間隔によらず転送します。強制切断では前の`durable_updates`から再開し、未確認更新を再実行します。
-- `TRAIN_BACKUP_MAX_GB=1024`: そのrunのDriveバックアップ総容量上限（1024GiB = 1TiB）。旧snapshot・未完コピーも数えます。予約容量ではなく上限です。上限到達時は既存復旧点を削除せず停止します。Drive全体の空き容量も別に必要です。明示的に設定済みの値は自動変更しません。
-- `TT2_MONITOR=True`: policy v3で全4指標を監視。`TT2_MONITOR_INTERVAL=10`更新ごとに全devを評価し、いずれかが自身のanchorから1%以上改善すれば共有counterをリセット。全指標が改善不足の評価が`TT2_MONITOR_PATIENCE=5`回連続すれば終了。best保存はDev total lossの絶対最小値で選択。warmup既定400中は停止せず、各指標の最小値をanchorにする。v3の絶対上限は1000更新で、学習率・バッチ・loss定義/重みは変更しない。
-- TT2監視は`training-monitor.json`（全履歴・policy・指標別anchor/best・共有カウンタ・条件変更履歴）、CSV、SVGをローカルrunに保存し、確認済み学習snapshotへ同梱。`checkpoints/checkpoint_best.pt`はDev total loss最小のモデルとoptimizer、`checkpoint_last.pt`は再開位置。切断後はsnapshotを復元すると履歴・最良モデル・カウンタが戻る。旧checkpointからの監視初回有効化はその更新から履歴を開始し、過去の指標を捏造しない。既存v1/v2からv3への明示採用は記録済みDev最小値をanchorとし、将来の評価だけに適用する。詳細はセル5の統合再開節を参照。
-- 確認済みsnapshotの公開後、`PERSISTENT/checkpoints/<実際のrun名>/training-monitor.svg`・CSV・JSONへ閲覧用コピーを保存する。Driveからグラフを開けるため、学習セルの流れるログを追う必要はない。履歴のJSONは最後の永続保存まで、グラフ/CSVは直近の評価時点までを表示する。閲覧用コピーにI/Oエラーが出ても検証済みsnapshotは保持し、監視データはsnapshotから復元可能。
-- TT2推論は既定で検証済みdev-bestを選択し、旧runや初回評価前はlastを使用。`--checkpoint-selection last/best`で明示指定可能。bestが記録されているのに欠落・破損した場合はlastへ黙って戻らない。**これはdev BLEUによるモデル選択や原論文の停止規則の再現ではない**。自由生成の音声・ASR BLEU評価は別途必要。最良モデルもsnapshotへ同梱するためバックアップ容量は増える。古い復旧点は自動削除しない。
-- `TRAIN_ADAPTIVE_BATCH=False`: ONはTT2/S2UT限定。論理バッチ・サンプル順・更新回数を維持して分割を調整します。ただしTT2のBatchNorm統計やdropoutは変わるため、同一学習結果は保証しません。別の実験条件です。vocoderは2 optimizerを一組として扱い、分割・OOM再試行はしません。
-- `TRAIN_PRECISION='default'`: 既存精度を維持（TT2/vocoder FP32、S2UTのレシピFP16）。明示的にFP32/BF16を選べます。BF16非対応GPUでは停止し、黙って精度を変更しません。
+- `TRAIN_MAX_WORKERS=8` caps parallel loading. TT2/vocoder adjust about every 10 seconds from CPU load, RAM, and throughput. S2UT changes only at fairseq epoch boundaries. Zero is sequential.
+- `TRAIN_CACHE_GB=8` limits the legacy local LRU cache. Drive-safe staging of complete inputs uses separate disk capacity. Insufficient local space stops before training, preserving verified local reads.
+- `TRAIN_SAVE_INTERVAL=1` sets the standard optimizer-update save interval. Save also at the final update or time cap. Freeze the local copy synchronously, then copy to Drive and verify SHA-256 in a thread, one at a time. At most two copies may remain unverified. Slow Drive can block.
+- `TRAIN_BACKUP_MIN_SECONDS=600` is the minimum Drive transfer interval for resident training. Local saves every 50 updates are retained. Initial, final, and time-budget saves transfer regardless of interval. Forced disconnection resumes from `durable_updates` and recomputes unverified updates.
+- `TRAIN_BACKUP_MAX_GB=1024` caps Drive backups per run at 1024 GiB (1 TiB), including old snapshots and partial copies. At the limit, stop and retain recovery points. The Drive account must also have enough free space. Explicit settings are retained.
+- `TT2_MONITOR=True` uses v3 for four metrics. Evaluate full dev every `TT2_MONITOR_INTERVAL=10` updates. At least 1% improvement on any anchor resets the shared counter. Stop after `TT2_MONITOR_PATIENCE=5` insufficient evaluations. Save best by minimum dev total loss. The default 400-update warmup gathers anchors before stopping. V3 caps at 1000 updates and retains LR, batch, and loss definitions and weights.
+- TT2 writes `training-monitor.json` with full history, policy, per-metric anchors and best values, shared counter, and transitions, plus CSV/SVG. Verified snapshots contain them. `checkpoints/checkpoint_best.pt` includes model and optimizer at minimum dev total loss. `checkpoint_last.pt` is for resume. Initial adoption on a legacy checkpoint starts its history at that update. Explicit v1/v2→v3 uses saved dev minima and applies to future evaluations. See integrated Cell 5 resume above.
+- After publishing a verified snapshot, copy monitor SVG, CSV, and JSON to `PERSISTENT/checkpoints/<saved-run-name>/training-monitor.svg` and matching extensions. The JSON covers the latest durable save. The chart and CSV cover the latest evaluation. A dashboard I/O failure preserves the verified snapshot, which can restore monitor data.
+- TT2 inference defaults to verified dev-best, using last for older runs or before the first evaluation. Override with `--checkpoint-selection last/best`. Missing or corrupt recorded best stops. This implementation selects by loss. Free-generated audio and ASR-BLEU need separate evaluation. Including best increases backup size. Old recovery points are preserved.
+- `TRAIN_ADAPTIVE_BATCH=False` can be enabled for TT2/S2UT. It adjusts splitting while keeping logical batch, order, and update count. TT2 BatchNorm and dropout differ, so treat it as a separate condition. Vocoder uses both optimizers together and does not split or retry OOM.
+- `TRAIN_PRECISION='default'` keeps TT2/vocoder FP32 and recipe FP16 for S2UT. FP32 and BF16 can be selected explicitly. A GPU without BF16 support stops when BF16 is required.
 
-自動分割ON時だけ、optimizer更新前のCUDA OOMを捕捉して勾配・RNG・モデルbufferを戻し、
-同じサンプルを小さい分割で再試行します。1件でもOOM、optimizer中のOOM、device assertは停止します。
-この旧オンライン適応は`paper_practical`でのみ選択でき、開始前測定とは併用しません。
-開始前測定をOFFにして明示的に選択した場合、校正は短い試行後に固定し、以後のOOMでは縮小します。GPUが変わると分割校正をやり直します。
-これは最大速度を保証する探索ではありません。GANのOOMは保存済みcheckpointから復旧してください。
+Only adaptive mode catches CUDA OOM before an optimizer update, restores gradients, RNG, and model buffers, and retries the same samples in smaller groups. Single-item OOM, optimizer OOM, and device assertions stop. Online adaptation is practical-only and mutually exclusive with pre-training probing. Explicit adaptation fixes calibration after a short trial, shrinks on later OOM, and recalibrates on GPU change. Resume GAN OOM from the saved checkpoint.
 
-`[training-performance]` は処理時間の累計、frames/units等の速度、CPU・RAM・VRAMを表示します。
-CUDA時間には区間内の待ちも含まれ、GPU稼働率そのものではありません。
-`[recovery] learned_at_least` はローカル保存済み更新、`durable_updates` はDriveマウントへの
-コピー検証まで完了した更新です。Driveサーバー側同期の完了までは保証しません。
-切断直前の未保存/未確認更新は再実行します。時間予算はupdate境界で判定し、保存処理の完了待ちは
-予算を超える場合があります。30秒の猶予後も学習が止まらなければ終了を要求し、最後の確認済み保存を使います。
+`[training-performance]` reports cumulative timings, frames or units per second, CPU, RAM, and VRAM. CUDA interval timing includes waits and does not directly measure utilization. `[recovery] learned_at_least` includes local saves, while `durable_updates` reports copies verified through the Drive mount. Drive server synchronization is independent. Recompute unsaved or unverified updates after disconnection. Check time at update boundaries. Waiting for saves can exceed the budget. After 30 seconds of grace, request termination and use the last verified save.
 
-旧runのconfig/revisionを上書きして移行しないでください。新設定は新runで利用します。
-同一設定の再開は従来どおりセル1→5。実GPUでの速度・BF16品質・実Drive切断復旧は未検証です。
+Use a separate run for changed settings and preserve older configs and pins. Same-settings resume uses Cells 1 → 5. Real GPU speed, BF16 quality, and Drive interruption recovery remain unverified.
 
-S2UTの通常セル5は、音声ZIPを全件取得する前に保存snapshotを検証・復元し、
-recipeとcheckpoint内の識別子を照合します。先行検査ではWAV原本の存在確認だけを省き、
-入力取得後の全件検査と使用前のSHA検証は省略しません。学習条件が違う場合は
-`recipe.warmup_updates`や`command[番号]`などの差分項目を表示して停止します。
-修正版の実行コピーへ切り替わってPythonファイルの場所だけが変わった場合は、
-元のrecipe-lockとcheckpointのfingerprintを変更せず再開します。実験名の変更や4A/4Bの再生成は不要です。
+S2UT Cell 5 verifies and restores snapshots before fetching all audio ZIPs, checking recipe and checkpoint identities. The early check omits only source WAV existence. Verify all inputs and SHA after retrieval before use. Mismatches report fields such as `recipe.warmup_updates` or `command[index]`. A reviewed execution copy that changes only the Python file location can retain recipe-lock and checkpoint fingerprint. Reuse the same experiment and 4A/4B.
 
-セル5はフォルダの存在ではなく**検証済みsnapshotの有無**で自動再開します。
-初回コピーが途中で止まり、まだ公開済みsnapshotがなければ、未完コピーを保持して
-`starting at update 0`と明示して開始します。未公開ローカルファイルは
-`.interrupted-<ID>`へ退避します。公開済みsnapshotがすべて破損している場合は、
-勝手に0から開始せず停止します。CLIの明示的な`--resume`は復旧点がない場合も停止します。
+Auto-resume requires a **verified snapshot**. If the initial copy stopped before any publication, preserve the partial copy, report `starting at update 0`, and archive unpublished local files under `.interrupted-<ID>`. If published snapshots are all corrupt, stop. Explicit CLI `--resume` also stops when no recovery point exists.
 
-Vocoderの全train音声/Unitの入力検証は、学習セッションの時間予算を開始する**前**に行います。
-検証は4Aと同じ適応ワーカーを使い、`data/.prep-checkpoints/vocoder-inputs/`に
-サンプル単位で保存します。再開では期待SHA、パス、サイズ、更新時刻が一致する検証を再利用します。
-`RECHECK_AUDIO=True`（CLIでは`S2ST_PREP_RECHECK=1`）なら再ハッシュします。
-サイズ・更新時刻を保った改変は高速再利用では検出できないため、コーパスは不変にしてください。
-学習に渡す検証証明はセッション専用の一時ファイルで、snapshotには混ぜません。
-サンプル読込み時にもサイズ・更新時刻を確認し、検証後の変更を検出したら停止します。
+Verify all vocoder train audio and units before starting the training time budget, using 4A's adaptive workers. Save per-sample evidence to `data/.prep-checkpoints/vocoder-inputs/`. Resume checks expected SHA, path, size, and mtime. `RECHECK_AUDIO=True` or CLI `S2ST_PREP_RECHECK=1` rehashes audio. Fast reuse assumes immutable source files. The training proof is a temporary session file and excluded from snapshots. Recheck size and mtime on sample reads and stop on post-validation changes.
 
-音素辞書と既存ラベルの移行は[音素の移行手順](RESUME.md#音素生成と辞書の新方式への移行)を参照してください。
+See [phoneme migration](RESUME.md#migrate-phoneme-generation-and-dictionaries) for dictionaries and existing labels.
 
-### Driveの大量ファイル・学習I/O対策
+### Drive file counts and training I/O
 
-通常の学習ノートブックは`S2ST_DRIVE_SAFE=1`を設定します。`direct_s2st.colab`のCLIも
-既定で有効です（Python APIの既定は互換性維持）。コーパス原本・旧Mel・旧Unitは削除しません。
+The standard notebook sets `S2ST_DRIVE_SAFE=1`. The `direct_s2st.colab` CLI also defaults on. The Python API retains compatibility defaults. Preserve corpus originals and old mel and unit outputs.
 
-- 4Bの新Unitはoriginal/reduced列をJSONLへまとめ、途中結果は既存のUnit checkpointへ保存します。
-  1件ごとの`.units`ファイルを新たに大量作成しません。旧ファイル方式は読み取り可能です。
-  旧manifestからの移行は`manifest.inline.shard-...jsonl`という別ファイルへ保存し、
-  同じモデル・入力のcheckpointがあれば再抽出しません。S2UT準備・Unit vocoderが両形式に対応します。
-- 安全モードのcheckpoint JSONは256バケットへ分散します。旧直下のチャンクも読み取ります。
-- 4AのMel準備は必要なWAVを128件単位の不変ZIPへまとめ、通常用のセル4A.5はCPUで
-  全splitの英語・日本語ZIPを完成させます。4A.5では音素・Mel・Unitを再生成せず、
-  全音声をローカルに展開しないため、作業ディスクは作成中のZIPを置ける容量で足ります。
-  保存先は`data/.drive-audio-packs/`であり、コーパス内には書きません。
-  初回は既存WAVを個別に読みSHA256を照合する必要があります。次のVMでは完成ZIPを取得して
-  ローカルへ展開するため、元WAVの個別読込みを繰り返しません。
-  4Bは完成ZIPの利用専用です。既存の55a5a90形式と同じ名前・識別子を使うため、
-  旧4Bで作成した途中までのZIPもCPUセルで再利用します。
-  原本は不変とする契約です。変更時は新しいcommon manifestを作り、古いZIPを無条件再利用しないでください。
-- ZIP公開は計画・コピーのSHA256検証・完了記録の順です。VM強制終了でやり直すのは未公開ZIP分のみ。
-  コピー後・完了記録前に止まったZIPも計画とSHA256が一致すれば復旧できます。
-- セル5のTT2は既定の`TRAIN_STREAM_INPUTS=True`で、メタデータだけ先に取り込みます。
-  学習順に必要なWAV ZIP・Mel ZIPを取得し、学習と並行して次のZIPを先読みします。
-  転送は最大2件、待ち行列は最大16件です。取得済み順にサンプルを選んだり、未取得サンプルを
-  飛ばしたりしません。必要なZIPが間に合わない時は待つため、GPUの待ち時間が完全になくなる保証はありません。
-  実効batch1024、optimizer、サンプル順、試運転後の固定batchは変更しません。
-  開始時のMel識別子は準備済み`data-lock.json`のSHA256を使い、未使用ZIP全体を事前に再読込みしません。
-  **各ZIPの実データは取得時にSHA256を照合し、WAVも個別に照合してから学習に渡します。**
-  同じVMでは完了記録とローカルSHA256を確認して再利用、新VMでは再開位置以降に必要なZIPから取り直します。
-  初回のVRAM測定もtrainの測定用サンプルに必要なZIPだけを取得します。
-  旧単一巨大Mel ZIPは最初の使用前にそのZIP全体の取得が必要です。既存ZIPは勝手に再分割しません。
-  保存済みMel SHA256のない旧形式は`TRAIN_STREAM_INPUTS=False`で従来方式を使ってください。
-  S2UT・vocoderは入力の全件事前検証があるため、今回も全件事前取り込みのままです。
-  `TRAIN_STREAM_INPUTS=False`のTT2も必要なWAVと**Mel ZIP全体**を学習開始前に取り込みます。
-  元パス・SHA256・入力識別子は維持し、実際の読込みのみローカルへ切り替えます。
-  ローカルの途中コピーと完成コピーはVMが残っていれば再利用できます。
-  VM消失時はDriveのZIPから取り直します。ローカル取り込み容量は`TRAIN_CACHE_GB`とは別です。
-  先読みは全データをメモリに載せる仕組みではありません。使用済みZIPはローカルに保持するため、
-  1周分のローカルディスク容量は必要です。容量不足・通信失敗は未検証入力で続行せず停止します。
-  `[stream-download] ready=...`は取得/照合完了ZIP数で、学習update数ではありません。
-  設定JSON/optimizerの識別子には取得方式を加えないため、同じコード・学習設定ならON/OFFで再開互換です。
-  ただし保存済みrevision/環境lockへの新コードの移行は別問題です。稼働中の旧実験を無断で更新しません。
-- Drive snapshotは多数のファイルではなく1個のZIPで保存します。旧snapshotも復元できます。
-  SHA256 readback検証を維持し、容量不足・保存上限では前の復旧点を保持します。
+- New 4B outputs store original and reduced units inline in JSONL, with progress in existing unit checkpoints. Old loose `.units` files remain readable. Migration writes separate `manifest.inline.shard-...jsonl` files and reuses matching model/input checkpoints. S2UT and unit vocoding accept both formats.
+- Safe-mode checkpoint JSON uses 256 buckets and can read old top-level chunks.
+- 4A packs needed mel input WAVs into immutable 128-item ZIPs. Standard CPU 4A.5 completes English and Japanese ZIPs across splits under `data/.drive-audio-packs/`. It needs disk for ZIPs in progress and does not rebuild phonemes, mel, or units or extract all audio. Initial staging reads and hashes individual WAVs. Fresh VMs download and extract completed ZIPs. 4B consumes published ZIPs. The format keeps names and identities from `55a5a90` and reuses ZIPs partially built in legacy 4B. If originals change, create a new common manifest and verify inputs.
+- Publish ZIPs in plan, copy SHA-256 verification, then completion receipt order. Forced VM deletion repeats only unpublished work. A copied ZIP without a receipt is recoverable if plan and SHA match.
+- TT2 Cell 5 defaults to `TRAIN_STREAM_INPUTS=True`, starting with metadata. Fetch WAV and mel ZIPs in training order and prefetch during training, with two transfers and 16 queued jobs at most. Keep sample order and wait for required ZIPs. Retain effective batch 1024, optimizer, and calibrated batch. The initial mel identity uses prepared `data-lock.json` SHA-256. Verify ZIP contents and individual WAV SHAs on retrieval before training. Reuse verified local copies on the same VM. A fresh VM fetches from the resume position. Calibration fetches only required train probe ZIPs.
+- An old monolithic mel ZIP must download completely before first use and stays intact. For old data without saved mel SHA-256, use `TRAIN_STREAM_INPUTS=False`. S2UT and vocoders still stage all data upfront for input validation. TT2 with streaming off also retrieves all required WAVs and whole mel ZIPs before training. Local paths are used for reads while original paths, SHA values, and identities remain. Reuse local partial and complete copies on the same VM, and restore from Drive after VM loss. Local staging capacity is separate from `TRAIN_CACHE_GB`. Keep disk space for one pass because used ZIPs remain local. Disk or network failures stop before unverified input is used.
+- `[stream-download] ready=...` counts retrieved and verified ZIPs. Streaming mode is outside config/optimizer identity, so the same code and training settings can resume with it on or off. Saved revision and environment migration are separate.
+- Save each Drive snapshot as one ZIP with SHA-256 readback. Older snapshots remain restorable. Storage errors or caps preserve the previous recovery point.
 
-DriveのAPI/転送量・容量制限そのものを解除するものではありません。
-最初の原本取得、ZIP転送、checkpoint保存で制限が出る可能性は残ります。
-空き容量確認にはマウントの報告を使いますが、Driveサーバー側の正確な残容量・同期完了は保証しません。
-容量エラーやquotaエラーで停止しても、既存データを削除せず同じ設定で再開してください。
-実GPU・実Drive上での性能と切断復旧は未検証です。
+Drive API, bandwidth, and storage limits still apply during original reads, ZIP transfer, and checkpoint publication. Free space uses mount reporting and may differ from server storage or sync status. After quota or capacity errors, keep existing data and resume with the same settings once resolved. Performance and interruption recovery on real GPU and Drive remain unverified.
 
-### fairseqコピーで停止した場合
+### Fairseq copy failures
 
-`kaldi_self_train/st/utils`・`steps`の参照先が存在しないことによるコピー失敗は、
-リンクを参照先の内容ではなくリンク自体としてコピーすることで回避します。
-一時ディレクトリでコピーを完了してから公開し、完了マーカーがない既存コピーは
-`/content/s2st-runtime/fairseq.incomplete-<ID>`へ退避します。削除はしません。
-コピー中断時の一時ディレクトリも診断用に保持し、次回は新しいコピーを作ります。
+Copy symlinks as links so dangling `kaldi_self_train/st/utils` and `steps` targets do not fail. Publish only after copying into a temporary directory. Preserve copies without completion markers at `/content/s2st-runtime/fairseq.incomplete-<ID>`. Keep interrupted temporary directories for diagnosis and make a new copy on retry.
 
-修正版setupを取得した後は、同じVMでセル3を再実行できます。コーパス・checkpointや
-インストール済みPython環境の削除は不要です。学習中にsetupを同時実行しないでください。
-コード取得は保存済みGit revisionに戻るため、新コードを使う場合は最新コードを取得した新しいVMで新しい実験名を使い、
-旧実験のrevision/環境lockを無理に上書きしないでください。
+With the fixed setup, rerun Cell 3 on the same VM and retain corpus, checkpoints, and installed Python. Run setup while training is stopped. Retrieval checks out the saved Git revision. For new code, use a new experiment and VM with the updated checkout, preserving old revision and environment locks.
 
-### 学習後、まず3件を試聴する（通常セル6・7）
+### Listen to three examples after training (standard Cells 6 and 7)
 
-選択した方式で必要な学習が終わったら、ノートブックを開き直し、セル1で
-`RUN_TRAINING=False`、`RUN_PREVIEW=True`、`RUN_BENCHMARK=False`、
-`PREVIEW_SAMPLES=3`（1〜10件）を設定して **セル1 → 6 → 7** を実行します。
-旧launcherを保存している実験では、`TRAIN_CODE_REVISION`に試聴機能対応の
-完全SHAを明示してください。学習用の保存revisionや実験名を変える必要はありません。
+After training the required models, reopen the notebook. In Cell 1 set `RUN_TRAINING=False`, `RUN_PREVIEW=True`, `RUN_BENCHMARK=False`, and `PREVIEW_SAMPLES=3` (allowed range 1–10). Run **Cells 1 → 6 → 7**. For an experiment pinned to an old launcher, set `TRAIN_CODE_REVISION` to a full SHA that supports preview. Keep the saved training revision and experiment name.
 
-セル6・7はセル1の`TT2_VOCODER_MODE`・`S2UT_VOCODER_MODE`を試聴にも適用します。
+Cells 6 and 7 apply the `TT2_VOCODER_MODE` and `S2UT_VOCODER_MODE` from Cell 1.
 
-| 設定 | 試聴で使う音声化方式 | 自前vocoderの学習snapshot |
+| Setting | Preview synthesis | Trained vocoder snapshot |
 |---|---|---|
-| `TT2_VOCODER_MODE='griffin_lim'` | 保存済みTT2 Mel仕様によるGriffin–Lim（32反復・seed=1） | Melは不要 |
-| `TT2_VOCODER_MODE='hifigan'` | 自前Mel HiFi-GANの検証済みbest | Melが必要 |
-| `S2UT_VOCODER_MODE='paper'` | SHA256固定の公式LJSpeech Unit HiFi-GAN | Unitは不要 |
-| `S2UT_VOCODER_MODE='trained'` | 自前Unit HiFi-GANの検証済みbest | Unitが必要 |
+| `TT2_VOCODER_MODE='griffin_lim'` | Griffin–Lim with saved TT2 mel specification, 32 iterations, seed 1 | None |
+| `TT2_VOCODER_MODE='hifigan'` | Verified best trained mel HiFi-GAN | Mel |
+| `S2UT_VOCODER_MODE='paper'` | Official SHA-256-pinned LJSpeech unit HiFi-GAN | None |
+| `S2UT_VOCODER_MODE='trained'` | Verified best trained unit HiFi-GAN | Unit |
 
-公式Unitとの切り分けは`griffin_lim`＋`paper`で行えます。必要な学習済みrunはTT2とS2UTのみです。
-公式Unitは初回に重み・configを取得し、SHA256を検証して再利用します。
-保存済みS2UTデータのHuBERT revision・層・クラスタ数・k-means SHA256も照合します。
-`paper`はLJSpeech話者の配布モデルで、Fisherや対象コーパスで学習した重みではありません。
-音声の話者が変わり得るため、対象話者の保持性能とは区別してください。
+Use `griffin_lim` and `paper` to diagnose synthesis with only trained TT2 and S2UT runs. On first use, fetch the official unit weights and config, verify SHA-256, and cache them. Also verify saved HuBERT revision, layer, cluster count, and k-means SHA. The public LJSpeech vocoder uses a different training source from Fisher or the target corpus. Its voice can differ and should be considered when assessing speaker preservation.
 
-セル6は、必要な`last-training-run-{tt2,s2ut,unit,mel}.json`を優先して実際の保存名を選びます。
-ポインタがなければ学習済みrunが一意のときだけ自動選択し、複数候補は
-`PREVIEW_RUN_NAMES`で指定します。例えばTT2の`-probe-fix-v1`も実名のまま復元し、
-更新ゼロのデフォルト名を使って新規学習することはありません。
-snapshot ZIP・ファイル・保存configの整合性を照合して専用ローカル領域に復元します。
-学習入力の全件取り込みはせず、同じdev IDの日本語/英語WAVだけを検証コピーします。
-学習済みcheckpoint ZIPの取得は必要です。モデルによっては数GBあり、Driveの転送制限は残ります。
+Cell 6 prefers `last-training-run-{tt2,s2ut,unit,mel}.json` for required runs. Without pointers, automatically select only a unique saved trained run. Resolve multiple choices with `PREVIEW_RUN_NAMES`. For example, restore the actual TT2 `-probe-fix-v1` run. Verify snapshot ZIPs, files, and config before restoring to a dedicated local area. Copy only selected Japanese and English dev WAVs with verification. Checkpoint ZIPs still need downloading and can be several GB. Drive limits apply.
 
-セル7はGPUを使用します。各runの保存されたコード位置・依存環境を順に復元してから、
-現在の固定revisionの推論コードでdevの選択件数だけを生成します。
-同じVMでの再実行も各runの完全な依存manifestに合わせて復元するため、Unit/Mel用の追加依存が
-旧TT2環境に残ってSHA不一致になる場合も、通常セルの復元処理で調整します。
-環境identityはGPU機種を含みません。GPU変更だけで保存lockを変更する必要はありません。
-再学習、optimizer更新、4A/4Bのやり直し、ASR/スコア評価は行いません。
-原音（日/英）、正解Melの再構成、正解の短縮Unitの再構成、TT2/S2UT翻訳音声を並べます。
-**Unit再構成もdurationはvocoderの予測値であり、正解の時間長を復元するものではありません。**
-試聴の表示名・`listening.json`には実際に選んだ音声化方式と公式重みの識別情報を記録します。
-方式や重みが異なる場合は別の試聴識別子で保存し、以前の自前vocoderの音声は上書きしません。
-セル6の後に方式を変更した場合、セル7は停止してセル6の再実行を案内します。
-旧試聴planは自前HiFi-GANの意味のまま扱い、公式重みへ暗黙変換しません。
-旧launcherに固定されている場合は対応版の`TRAIN_CODE_REVISION`を指定してください。
-正式評価や学習済みモデルのconfig・checkpointは、この試聴の切替では変更しません。
-この比較で、vocoder自体の再構成品質と翻訳モデルの出力品質を分けて確認できます。
-生成失敗はエラー表示のまま残し、代替音声は作りません。
-試聴launcher・各推論子プロセスは通常のINFOログを使用し、固定fairseqが有効化する
-Numba等のDEBUGダンプを抑制します。進捗、INFO、警告、エラー、例外、結果JSONは残します。
-JITコンパイルやモデルの計算自体を無効化する変更ではありません。
+Cell 7 uses a GPU. It restores each run's saved code location and dependencies in turn and runs the current pinned inference code on the selected dev samples. Same-VM reruns restore the full package manifest as well, including removing extra Unit/Mel dependencies that cause a TT2 environment SHA mismatch. Environment identity excludes GPU model. Preview uses saved weights and prepared data and skips training, optimizer updates, 4A/4B, ASR, and scoring.
 
-試聴成果物は`<実験>/preview/<識別子>/listening.json`と`audio/`へ保存します。
-既存checkpoint・元コーパス・全件testのpredictions/resultsは変更しません。
-切断後は同じ設定で通常のセル1 → 6 → 7を再実行します。
-専用ローカルコピーは失われますが、Driveの保存snapshotと試聴成果物は保持されます。
-セル8は試聴を正式比較として評価しません。正式な全件test評価へ進む場合は
-`RUN_PREVIEW=False`、`RUN_BENCHMARK=True`としてセル6から準備します。
-実Colab/GPUでのこの新しい試聴E2Eは未検証です。
-音声化方式の4組合せ、不要vocoderの復元省略、設定変更時の別保存、旧planの意味の維持、
-SHA/Unit IDの不一致拒否、生成失敗の保持、保存依存環境への振分けはCPUテストで確認します。
-公式Unit重み・configの実ファイルもSHA256検証し、同じ推論adapterで正解Unit3件と予測Unit3件を
-CPU音声化できることを確認しました。これはWindows/Python 3.13で固定fairseqの生成器・duration予測器を
-そのまま分離読込した確認であり、Colab/Python 3.10の全fairseq import・GPU E2Eや音質評価の代わりではありません。
-今回の切替のために追加パッケージは導入せず、既存のTT2/S2UTの保存済み依存環境を使用します。
+Compare Japanese and English originals, reconstruction from reference mel or reduced units, and TT2/S2UT translations. **Unit reconstruction uses predicted duration.** Display labels and `listening.json` record the actual synthesis method and official weight identity. A different method or weights produce a separate preview identity. If settings change after Cell 6, rerun it before Cell 7. Legacy preview plans retain their trained HiFi-GAN interpretation. Set a compatible `TRAIN_CODE_REVISION` for an old launcher. Formal evaluation, model config, and checkpoints are preserved. The outputs allow separate inspection of reconstruction and translation. Generation failures are shown as errors.
 
-S2UT推論は1件ずつ処理し、`--required-batch-size-multiple 1`も明示します。
-既定値8のままだと、固定fairseqのバッチ生成で最後の1件が除外されるためです。
+The launcher and inference subprocesses use normal INFO logging and suppress fairseq-triggered Numba DEBUG dumps. Progress, INFO, warnings, errors, exceptions, and result JSON still appear. JIT and model computation remain enabled.
 
-### S2UTだけの正式test評価と生成音声の保存（通常セル6～9）
+Preview artifacts go to `<experiment>/preview/<identity>/listening.json` and `audio/`. Checkpoints, corpus, and formal test predictions and results are read-only. After disconnection, repeat Cells 1 → 6 → 7 with the same settings. Local copies are temporary and Drive snapshots and previews are durable. For formal evaluation, set `RUN_PREVIEW=False` and `RUN_BENCHMARK=True` and start at Cell 6. Cell 8 evaluates formal test predictions.
 
-TT2をまだ再学習していない場合も、S2UTだけを評価できます。セル1は
-`RUN_TRAINING=False`、`RUN_PREVIEW=False`、`RUN_BENCHMARK=True`、
-`BENCHMARK_TARGET='s2ut'`、`S2UT_VOCODER_MODE='paper'`、`DATA_LIMIT=None`、
-`CONFIRM_FULL_DATA=True`とします。`BENCHMARK_RUN_NAME=''`は保存済み
-`last-training-run-s2ut.json`を優先し、なければ一意な実保存runを選択します。
-複数候補があれば実名を指定してください。`TRAIN_TARGET`は評価対象を決めません。
-保存launcherが旧版の場合は対応版の完全SHAを`TRAIN_CODE_REVISION`に明示指定します。
-元の学習revision・依存lock・snapshotは書き換えません。
+CPU tests cover four vocoder combinations, skipping irrelevant snapshots, separate identities for settings changes, legacy plan compatibility, SHA and unit-ID mismatch rejection, failure retention, and runtime dispatch. Verified actual official unit weight/config SHAs and synthesized three reference and three predicted unit sequences on Windows/Python 3.13 using the isolated pinned fairseq generator and duration predictor. Full fairseq import and GPU E2E on Colab/Python 3.10 and audio quality remain unverified. Preview uses existing saved TT2/S2UT dependencies.
 
-1. **セル6**: S2UTの保存snapshot、元の依存環境identity、prepared metadataを照合。
-   `checkpoint_best.pt`をdev unit lossの最良値・SHAと照合し、選択updateを表示します。
-   学習最終400000 updateとdev-bestのupdateは異なり得ます。test全ID・正解英語は
-   checkpoint-boundのtarget文字ラベルと照合します。取得対象WAVはtestの日英のみ。
-   既存の音声ZIPは再利用し、欠けたtest ZIPだけ元コーパスを読んで別領域へ作成します。
-2. **セル7**: 固定fairseq、beam10でtest全件のUnit生成、公式HuBERT L6/KM100
-   LJSpeech Unit HiFi-GAN（SHA固定、duration予測）で音声化。
-   TT2・自前Unit/Mel・train音声・新たな学習/optimizer更新は不要です。
-3. **セル8**: 元の保存依存環境を復元し、固定revisionの
-   `openai/whisper-large-v3-turbo`で英語ASR、既存の英語正規化＋sacreBLEUでcorpus BLEU。
-   生成/ASR失敗も空仮説として**全test件数を母数に含めます**。失敗件数、ASR成功率も保存します。
-   BLASER・話者類似度はこの単独経路では実行せず、4方式acceptanceとは別の報告です。
+S2UT inference uses one item at a time and explicitly sets `--required-batch-size-multiple 1`. The pinned fairseq default of 8 can otherwise drop the last item.
 
-生成Unitの完了shard、WAVの32件グループ、ASRの32件ごとのjournalを、SHA検証付き
-不変ZIPとしてDriveへ保存します。切断後は同じ設定で**セル1→6→7→8**。
-ローカル環境/入力が失われても、完了receiptとZIPを検証して復元します。
-保存前に失われた実行中グループは再処理され得ます。Drive転送制限やマウント切断を
-回避できる保証はありませんが、生成WAVをDriveに1件ずつ置く方式は使いません。
-保存済みZIPは削除せず、追記・完了indexのatomic更新で公開します。
+### Formal S2UT-only test evaluation and audio storage (standard Cells 6–9)
 
-保存先は`<実験>/benchmarks/s2ut/<評価ID>/`です。
+To evaluate S2UT independently, set `RUN_TRAINING=False`, `RUN_PREVIEW=False`, `RUN_BENCHMARK=True`, `BENCHMARK_TARGET='s2ut'`, `S2UT_VOCODER_MODE='paper'`, `DATA_LIMIT=None`, and `CONFIRM_FULL_DATA=True`. An empty `BENCHMARK_RUN_NAME` prefers `last-training-run-s2ut.json` and then a unique saved run. Specify the exact name if several exist. `BENCHMARK_TARGET` selects evaluation independently of `TRAIN_TARGET`. If needed, set `TRAIN_CODE_REVISION` to a compatible full launcher SHA. Training revision, dependency lock, and snapshots are preserved.
 
-- `plan.json`: 実run名、checkpoint/環境/metadata SHA、ASR revision、全test ID。
-- `audio/part-....zip`: 生成WAV（32件ごと）。隣接JSONはZIPと各WAVのSHAを持つreceipt。
-- `audio-index.json` / `audio-index.csv`: pair ID→ZIP名・ZIP内WAV・正解英語・成否。
-- `predictions.jsonl`: 全件の生成結果（ローカルパスは記録当時のもの。再生はZIP/indexを使用）。
-- `results/metrics.json` / `report.md`: 全件S2UT単独ASR-BLEU。
-- `results/per_sample.jsonl` / `.csv`: 正解文、ASR文、sentence BLEU、失敗理由。
+1. **Cell 6** verifies the saved S2UT snapshot, original environment identity, and prepared metadata. Check `checkpoint_best.pt` against the minimum dev unit loss and SHA and display its update. The best update can precede final update 400000. Match every test ID and English reference against checkpoint-bound target letter labels. Fetch only test WAVs in both languages, reusing audio ZIPs and reading originals only to create missing test ZIPs in a separate location.
+2. **Cell 7** generates all test units with pinned fairseq and beam 10. Use official SHA-pinned HuBERT L6/KM100 LJSpeech unit HiFi-GAN with duration prediction. This path uses only trained S2UT and the official vocoder, with no optimizer updates.
+3. **Cell 8** restores the saved dependencies and uses pinned `openai/whisper-large-v3-turbo` for English ASR. Apply existing English normalization and sacreBLEU. **Every test example is included**, with generation or ASR failures scored as empty hypotheses. Save failure counts and ASR success rate. This standalone report excludes BLASER and speaker similarity and is separate from four-system acceptance.
 
-**後から聴くには、CPUでセル1→9だけ**実行します。
-`BENCHMARK_LISTEN_ID`にpair ID、または空欄のまま`BENCHMARK_LISTEN_INDEX`に0始まりの番号を指定。
-保存ZIPから選択WAVをSHA検証して取り出し、日本語原音・英語正解・S2UT翻訳・ASR文を表示します。
-モデル/venv/GPUは不要、再推論や再学習もしません。元音声は元コーパスから読み取るため、
-日本語/英語原音も聴くにはコーパスを保持してください。原音が取得できなくても保存済み
-翻訳音声の試聴は継続し、原音の取得失敗を表示します。生成WAV自体はZIPをPCへ取得して
-展開するだけでも再生できます。試聴は評価結果・既存のpreviewを変更しません。
+Persist verified immutable ZIPs of completed unit shards, 32-item WAV groups, and ASR journals in groups of 32. After disconnection, run **Cells 1 → 6 → 7 → 8** with the same settings. Verify and restore receipts and ZIPs on a fresh VM. A group interrupted before publication can be repeated. Drive limits and disconnects still apply. Keep published ZIPs and atomically update the completion index as new groups finish.
 
-新しい経路はCPUテストで保存・SHA拒否・再開・母数・通常セル分岐を確認します。
-実Colab/GPUでの全test E2Eや品質・実行時間の保証ではありません。
-従来の4方式比較は`BENCHMARK_TARGET='all'`で維持します。
-この設定は少数試聴・全件推論の双方に適用し、学習batchは変えません。
-旧設定の不完全な生成シャードは保持しますが、新しいキャッシュ識別子で再生成します。
-`preview generated unexpected or missing sample IDs`が出た旧版は、対応する
-`TRAIN_CODE_REVISION`に更新し、通常のセル1 → 6 → 7で再実行してください。
-checkpointや準備済みデータの削除・再学習は不要です。
+Evaluation outputs go to `<experiment>/benchmarks/s2ut/<evaluation-id>/`.
 
-### 保存済みCascade結果のKFTT/JESC別診断（セル8A）
+- `plan.json` records the run, checkpoint/environment/metadata SHAs, ASR revision, and test IDs.
+- `audio/part-....zip` stores groups of 32 WAVs, with ZIP and WAV SHAs in adjacent JSON receipts.
+- `audio-index.json` and `audio-index.csv` map pair IDs to ZIP names and members, English references, and status.
+- `predictions.jsonl` stores all generations and the original local paths. Playback uses ZIPs and the index.
+- `results/metrics.json` and `report.md` report standalone ASR-BLEU.
+- `results/per_sample.jsonl` and `.csv` store references, ASR text, sentence BLEU, and failure reasons.
+
+For playback, run **Cells 1 → 9 on CPU**. Set a pair ID in `BENCHMARK_LISTEN_ID`, or leave it empty and set a zero-based `BENCHMARK_LISTEN_INDEX`. The cell verifies and extracts the chosen WAV and shows Japanese original, English reference audio, S2UT output, and ASR text. Playback uses saved output without a model or dedicated venv. Originals are read from the corpus. A missing original is reported and saved translation audio still plays. You can also download and extract WAV ZIPs locally. Playback preserves evaluation and preview artifacts.
+
+CPU tests cover persistence, SHA rejection, resume, the denominator, and standard-cell branching. Full-test real Colab GPU E2E, quality, and runtime remain unverified. Use `BENCHMARK_TARGET='all'` for the four-system comparison. The S2UT single-item batch setting applies to preview and full inference and leaves training batches unchanged. Incomplete old shards are kept and new generation uses a new cache identity. If an old version reports `preview generated unexpected or missing sample IDs`, update `TRAIN_CODE_REVISION` and run standard Cells 1 → 6 → 7 using existing checkpoints and prepared data.
+
+### Diagnose saved Cascade results by KFTT and JESC (Cell 8A)
 
 Cell 8A is a diagnostic-only analysis that recomputes Cascade metrics separately
 for KFTT/JESC from saved Cell 8 results. It performs no inference and does not
 modify the official benchmark result.
 
-セル8の直後の**8A「Cascade KFTT-only 診断」**で、All / KFTT / JESCの
-日本語ASR CER・MT corpus BLEU・最終ASR-BLEUを表示します。分類はmanifestの
-`corpus`、結合は`pair_id`を使用します。AllのASR-BLEUが正式保存値と一致することを
-確認し、元の評価と同じ失敗サンプルの扱いを維持します。結果行の欠落・重複・参照不一致は
-記録済みの生成失敗と区別して停止します。CERはNFKC正規化＋空白除去（句読点保持）の
-文字編集距離合計÷正解文字数合計です。MT BLEUはTTS失敗時にも保存済みMT文を利用します。
+The Cell 8A KFTT-only diagnostic shows Japanese ASR CER, MT corpus BLEU, and final ASR-BLEU for All, KFTT, and JESC. Group by manifest `corpus` and join by `pair_id`. Verify that All ASR-BLEU matches the official result and keep its failure handling. Missing or duplicate rows and mismatched references are integrity errors. CER divides total character edit distance by total reference characters after NFKC and whitespace removal, retaining punctuation. Saved MT text contributes to MT BLEU even when TTS failed.
 
-通常は`CASCADE_DIAGNOSTIC_TARGET='auto'`で保存済みCascade評価を選択します。
-`BENCHMARK_TARGET='all'`の場合は4方式比較内のCascade、それ以外（セル1の既定の`s2ut`を含む）は
-Cascade単独評価の`latest.json`を使用し、学習・評価対象の設定自体は変更しません。別の保存済みCascade評価を
-確認するときだけ`CASCADE_DIAGNOSTIC_EVALUATION_ROOT`を指定します。CPUで処理し、既存の
-`sacrebleu==2.5.1`環境を優先します。既存の`PYTHON`、ローカルvenv、Colab Pythonを順に
-実import・短いCPU BLEU計算で確認し、`all`ではPyYAMLも確認します。利用可能な環境がなければ、
-不足依存とPythonのパスを表示します。`CASCADE_DIAGNOSTIC_INSTALL_CPU_DEPS=True`の場合だけ、
-既存環境が使えなければ`/content/s2st-diagnostic-deps/`へ固定版のCPU評価依存を導入・検証して
-再利用します。`requirements/diagnostic-cpu.txt`のwheelだけを`pip --isolated --no-deps --target`で
-導入し、NumPyはPython 3.13にもwheelがある2.1.3をこの隔離フォルダだけで使用します。
-sacreBLEU 2.5.1・正規化・tokenizerは正式評価と同じで、Allの保存値との照合も必須です。
-既存の学習venv・システムのパッケージ・Driveは変更しません。自動導入をOFFにした場合は不足時に停止します。
-GPU・モデルロード・保存済みWAV/評価ZIPの読取り・結果保存は行いません。`CASCADE_DIAGNOSTIC_FETCH_CODE=True`は不足する診断コードだけを
-実験/コーパス外のローカルGit作業ツリーへ取得する許可です。学習用checkoutや保存revisionは
-変更しません。KFTTの低スコア例を表で表示し、全件はノートブック変数
-`cascade_corpus_diagnostic['kftt_samples']`に保持します。
-KFTT/JESCの差だけでコーパス品質が原因と断定するものではありません。
-子プロセスの進捗・エラー本文はColabのセル出力へ中継します。単なる`CalledProcessError`で
-原因が見えなくなるのを防ぎ、失敗時にも保存結果の自動修復・再推論は行いません。
+`CASCADE_DIAGNOSTIC_TARGET='auto'` selects Cascade from the four-system result when `BENCHMARK_TARGET='all'`. Otherwise, including default `s2ut`, it uses standalone Cascade `latest.json`. Set `CASCADE_DIAGNOSTIC_EVALUATION_ROOT` to inspect another saved result. Use CPU and prefer existing `sacrebleu==2.5.1`. Try `PYTHON`, local venv, and host Python with a real import and short CPU BLEU calculation. Check PyYAML for `all`. Report missing dependencies and Python paths if unavailable. With `CASCADE_DIAGNOSTIC_INSTALL_CPU_DEPS=True`, install only pinned wheels from `requirements/diagnostic-cpu.txt` with `pip --isolated --no-deps --target` into `/content/s2st-diagnostic-deps/`, then verify and reuse. NumPy 2.1.3, with a Python 3.13 wheel, is used only in that directory. SacreBLEU, normalization, and tokenizer match formal evaluation. The All score check is required. The training venv, host packages, and Drive stay read-only. If installation is off and dependencies are missing, stop.
 
-### 正解日本語とASR日本語の翻訳比較（セル8B、GPU）
+The cell reads stored text and score records. It does not load models or open saved WAVs and evaluation ZIPs. `CASCADE_DIAGNOSTIC_FETCH_CODE=True` permits retrieving missing diagnostic code into a local worktree outside the experiment and corpus. Training checkout and pin are preserved. Show low-scoring KFTT examples in a table and keep all rows in `cascade_corpus_diagnostic['kftt_samples']`. Differences between subsets alone do not establish a corpus quality cause. Relay subprocess progress and error details to the cell. Failure leaves saved results untouched.
 
-正式なCascade test評価が保存済みなら、GPUランタイムで同じ実験設定の**セル1 → 8B**を
-実行します。8Aの実行変数には依存せず、8B内でも保存済みAll ASR-BLEU・ID・参照・SHAを
-検証します。セル3・6〜8の再実行やWhisper/TTS/音声再生成は不要です。
-`TRAIN_CODE_REVISION`は現在のままで、8B対応コードがなければ診断コードだけ別のローカル
-worktreeに取得します。セル1〜8Aの挙動と、既存の正式評価結果は変更しません。
+### Compare translation from gold and ASR Japanese (Cell 8B, GPU)
 
-保存済みplanの同一NLLBで、各testサンプルの`ja_text`（正解日本語）と`asr_ja_text`
-（保存済み日本語ASR）をそれぞれ翻訳します。英語参照文はBLEU計算にだけ使います。
-All / KFTT / JESCごとに、保存済みMT BLEU・正解日本語からのMT BLEU・ASR日本語の再翻訳BLEU・
-両者の差・再翻訳と保存済みMTの一致件数・失敗件数を表示します。すべてcorpus BLEUで、
-失敗した翻訳は空仮説として選択サンプル全件の分母に残します。KFTT/JESC分類はmanifestの
-`corpus`を使用し、結合と再開は`pair_id`で検証します。
+With a saved formal Cascade test evaluation, run **Cells 1 → 8B** on GPU with the same experiment settings. It independently validates saved All ASR-BLEU, IDs, references, and SHAs. Reuse existing ASR and TTS results and skip Cells 3 and 6–8. Keep `TRAIN_CODE_REVISION`. If needed, fetch diagnostic code to a separate local worktree. Earlier cells and formal results keep their existing behavior and contents.
 
-`MT_DIAGNOSTIC_LIMIT=0`は全test、正数はpair_idのハッシュ順で固定抽出する診断用subsetです。
-`MT_DIAGNOSTIC_TARGET='auto'`は8Aと同じ対象選択です。`MT_DIAGNOSTIC_RUN_LABEL`を変更すると
-元の診断を残した別runになります。結果は`<実験>/diagnostics/cascade-gold-mt/<ID>/`の
-`metrics.json`・`per_sample.csv`・`report.md`に保存します。NLLBの言語トークン・dtype・実生成設定・
-依存バージョン・GPUも記録します。モデル・入力・実環境・コードが一致する場合だけ再開し、
-8件の翻訳分岐ごとに小さなJSONチャンクを永続化します。通常の中断では未保存分もflushし、
-ランタイム強制終了では最後の未保存最大7分岐を再処理する可能性があります。
-完了済みの診断はNLLBを再ロードせず再集計できます。CUDA/OOM等は全件failedとして流さず停止します。
+Use the same NLLB from the saved plan to translate `ja_text` (gold Japanese) and `asr_ja_text` (saved Japanese ASR) for each test item. English references are scoring-only. For All, KFTT, and JESC, display saved MT BLEU, gold-source MT BLEU, ASR-source retranslating BLEU, their difference, matches to saved MT, and failure counts. These are corpus BLEU scores over the selected set, with failed translations as empty hypotheses. Group by manifest `corpus` and verify joins and resume by `pair_id`.
 
-GPUと固定版のNLLB依存を事前に実import・CUDA演算で検証します。既存環境を優先し、
-`MT_DIAGNOSTIC_INSTALL_DEPS=True`で不足時だけ`/content/s2st-mt-diagnostic-runtime/`に
-専用Python 3.10.18・torch 2.7.1+cu126・Transformers 4.57.3等を構築します。
-`requirements/diagnostic-mt.txt`の固定版を使い、学習venv・Colabのシステムパッケージは変更しません。
-新しいNLLB重みとキャッシュは`/content/s2st-mt-diagnostic-cache/`だけに保存します。
-GPUがない場合は依存を導入せず停止し、CPUにはfallbackしません。
+`MT_DIAGNOSTIC_LIMIT=0` uses all test items. A positive value selects a deterministic pair-ID hash subset. `MT_DIAGNOSTIC_TARGET='auto'` selects as in 8A. Change `MT_DIAGNOSTIC_RUN_LABEL` to start a separate run. Write `metrics.json`, `per_sample.csv`, and `report.md` under `<experiment>/diagnostics/cascade-gold-mt/<ID>/`. Record NLLB language tokens, dtype, actual generation settings, dependency versions, and GPU. Resume requires matching model, input, environment, and code. Publish JSON every eight translation branches and flush pending items on graceful interruption. Forced termination can repeat up to seven branches. Completed diagnostics can aggregate without loading NLLB. CUDA/OOM stops execution.
 
-生成条件は、[SHA固定の公式NLLB設定](https://huggingface.co/facebook/nllb-200-distilled-600M/blob/f8d333a098d19b4fd9a8b18f94170487ad3f821d/generation_config.json)と
-[Transformers 4.57.3 NLLB文書](https://huggingface.co/docs/transformers/v4.57.3/en/model_doc/nllb)を確認しています。
-元のadapterと同じ日本語`src_lang=jpn_Jpan`・英語`forced_bos_token_id`を使い、モデル既定の
-最大生成長200・beam/sampling/repetition設定・FP32・1文ずつの呼び出しを維持します。
-反復を見て都合のよい生成設定へ変更しません。EOS・生成長上限到達は診断情報として残し、
-元のMT出力条件を黙って修正しません。再翻訳が保存済みMTと異なる場合は、実環境・生成設定の
-記録を先に確認してください。正解日本語で低BLEUでも、対訳の破損を単独で証明するものではありません。
-これは原因切り分け用であり、正解テキストを使う値を正式な音声翻訳スコアへ置き換えません。
+Check imports for pinned NLLB dependencies and a real CUDA operation before loading. Prefer an existing runtime. With `MT_DIAGNOSTIC_INSTALL_DEPS=True`, install missing dependencies to `/content/s2st-mt-diagnostic-runtime/`, using Python 3.10.18, torch 2.7.1+cu126, Transformers 4.57.3, and the other pins in `requirements/diagnostic-mt.txt`. Preserve training and host packages. New NLLB weights and cache use `/content/s2st-mt-diagnostic-cache/`. A missing GPU stops before installation.
 
-### カスケードだけの正式test評価（通常セル6～9）
+Use the original adapter's `src_lang=jpn_Jpan` and English `forced_bos_token_id`, model-default maximum generation length 200 and beam, sampling, and repetition settings, FP32, and one sentence per call. Record EOS and reaching the length limit as diagnostics. If outputs differ from saved MT, inspect environment and generation records. A low score on gold Japanese alone cannot establish broken bitext. Treat gold-source scores as diagnostic. See the [pinned official NLLB config](https://huggingface.co/facebook/nllb-200-distilled-600M/blob/f8d333a098d19b4fd9a8b18f94170487ad3f821d/generation_config.json) and [Transformers 4.57.3 NLLB docs](https://huggingface.co/docs/transformers/v4.57.3/en/model_doc/nllb).
 
-セル1で`RUN_TRAINING=False`、`RUN_PREVIEW=False`、`RUN_BENCHMARK=True`、
-`BENCHMARK_TARGET='cascade'`、`CONFIRM_FULL_DATA=True`、`DATA_LIMIT=None`にします。
-対応版の完全SHAを`TRAIN_CODE_REVISION`に指定してセル1→6→7→8を実行します。
-`TRAIN_TARGET`、`BENCHMARK_RUN_NAME`、TT2/S2UTのvocoder設定はこの経路では使いません。
+### Formal Cascade-only test evaluation (standard Cells 6–9)
 
-- **セル6**: common/test全件・dataset lockを確認し、testの日英WAVだけを既存ZIPから
-  取得・検証。TT2/S2UT/Unit/Melの保存runやcheckpointを探さず、再学習・4A/4B再処理もしません。
-- **セル7**: `configs/cascade/default.yaml`のSHA固定モデルによる
-  Whisper日本語ASR → NLLB日英MT → Qwen英語TTS。モデルは段階ごとに別プロセスで動かし、
-  同時にGPUへ載せません。モデル/設定/共通test以外の入力は不要です。
-  参照日本語・参照英語をASR/MT/TTSの入力へ渡さず、ASR出力をMTへ、MT出力をTTSへ渡します。
-  現在の既存Qwen adapterはBF16固定なので、生成にはBF16対応CUDA GPUが必要です。
-  CPUへ暗黙fallbackしたり、別の音声合成モデルに置き換えたりはしません。
-- **セル8**: S2UT単独評価と同じ固定英語Whisper・英語正規化・sacreBLEUを使用。
-  失敗例は空仮説としてtest全件の母数に残します。BLASER/話者類似度は実行しません。
-- **セル9**: `BENCHMARK_TARGET='cascade'`のままID/番号を指定し、保存WAVをCPUで試聴。
+Set `RUN_TRAINING=False`, `RUN_PREVIEW=False`, `RUN_BENCHMARK=True`, `BENCHMARK_TARGET='cascade'`, `CONFIRM_FULL_DATA=True`, and `DATA_LIMIT=None` in Cell 1. Set `TRAIN_CODE_REVISION` to the supported full SHA and run Cells 1 → 6 → 7 → 8. Cascade uses its own pinned model config, independent of training-target and direct-model vocoder settings.
 
-学習環境とは別の評価用環境receipt（`runtime.json`）と元の実依存manifest
-（`environment.json`）を保存します。切断後は通常のセル1→6→7→8で実依存を復元し、
-ASR/MTの32件ごとのjournal ZIP、32件グループのTTS WAV ZIP、評価ASR journalを検証・再利用します。
-保存前の実行中グループは再処理され得ます。モデル・参照・コードを変えた場合は別の評価IDです。
-CUDA OOM/device-side assertはprocess-fatalとし、残りを全件failed扱いで流しません。
-サンプル固有の失敗は原因と中間文を残して評価へ進めます。
-全件再利用できる段階ではモデルをロードせず、参照テキストで出力を補完することもありません。
+- **Cell 6** verifies all common test items and the dataset lock, then retrieves and checks Japanese and English test WAVs from existing ZIPs. Uses no training checkpoints and skips 4A/4B.
+- **Cell 7** runs Whisper Japanese ASR, NLLB JA→EN MT, and Qwen English TTS from `configs/cascade/default.yaml`. Run stages separately in sequence. Pass ASR output to MT and MT output to TTS. References never enter inference. The Qwen adapter requires a BF16-capable CUDA GPU.
+- **Cell 8** uses the same pinned English Whisper, normalization, and sacreBLEU as standalone S2UT. Include every test item and use empty hypotheses for failures. BLASER and speaker similarity are excluded.
+- **Cell 9** plays saved WAVs on CPU with `BENCHMARK_TARGET='cascade'` and the chosen ID or index.
 
-保存先は`<実験>/benchmarks/cascade/<評価ID>/`です。既存`benchmarks/s2ut/`は変更しません。
-`results/report.md`・`results/metrics.json`に単独評価レポート、
-`results/per_sample.csv`に正解英語・生成音声の英語ASR・sentence BLEUに加えて
-日本語ASR文（`asr_ja_text`）・MT英語文（`mt_en_text`）を保存します。
-`predictions.jsonl`には段階別の処理時間・失敗理由、`audio/`にはWAV ZIP、
-`audio-index.csv/json`にはIDとZIP内WAVの対応を残します。
-4方式acceptanceとは別のレポートです。従来の4方式比較は`BENCHMARK_TARGET='all'`で維持します。
+Save the separate evaluation receipt `runtime.json` and actual dependency manifest `environment.json`. After disconnection, use Cells 1 → 6 → 7 → 8 to restore dependencies and verify and reuse 32-item ASR/MT journal ZIPs, TTS WAV ZIPs, and evaluation ASR journals. Unpublished in-flight groups may repeat. A model, reference, or code change uses a different evaluation ID. CUDA OOM or device assertions stop the process. Sample-specific failures retain cause and intermediate text. Fully reusable stages skip model loading. References are used only for evaluation.
 
-新規依存は追加せず、既存の`requirements/colab-inference.txt`に含まれる
-`qwen-tts==0.1.1`、`transformers==4.57.3`などの固定依存を使用し、モデル取得前にimportを確認します。
-CPU/モックでは通常セルの対象分岐・参照漏洩防止・ZIP復元・段階再利用・失敗の母数保持・
-依存receipt一致・S2UT保存先の非変更をテストします。実Colab/GPU・実Qwen全件生成は未検証です。
+Store results in `<experiment>/benchmarks/cascade/<evaluation-id>/`. The standalone report and metrics go to `results/report.md` and `results/metrics.json`. `results/per_sample.csv` includes English reference, generated English ASR, sentence BLEU, `asr_ja_text`, and `mt_en_text`. `predictions.jsonl` records stage timings and failure reasons. `audio/` holds WAV ZIPs and `audio-index.csv/json` maps IDs to members. S2UT results and four-system acceptance are independent. Use `BENCHMARK_TARGET='all'` for four systems.
 
-#### Qwenトークナイザー取得エラーと、ASR/MTを保持する再開
+Use the pinned dependencies in `requirements/colab-inference.txt`, including `qwen-tts==0.1.1` and `transformers==4.57.3`. Check imports before fetching models. CPU and mock tests cover notebook branching, leakage prevention, ZIP restore, stage reuse, failure denominators, receipt checks, and preservation of S2UT output. Real Colab/GPU and full Qwen generation remain unverified.
 
-以下のloader-only overlayは旧版の経緯です。現在の公式sampling/EOS対策では
-**旧WAVへ合流せず、完了ASR/MTだけを共有する別評価**を作ります。
-通常セル1→6→7→8を使用し、旧plan/receiptを書き換えないでください。
-設定変更の理由・公式との差・検証範囲は[Qwen TTS監査記録](CASCADE_TTS_AUDIT.md)を参照してください。
-新policyはmain/subtalker sampling=True、文ごとseed固定、120秒相当1501 token上限、
-600秒の協調的時間保護を明示します。EOS未確認音声を切り詰めて成功扱いにはしません。
-Qwen実GPUで問題が解消したことはまだ未確認です。
+#### Qwen tokenizer retrieval and resume with saved ASR/MT
 
-`qwen-tts==0.1.1`は指定revisionを受け取っても、内部の音声トークナイザーの
-`cached_file`やprocessor取得でそのrevisionを引き継がない経路があります。
-本体を`f00cf13...`から取得した一方、`speech_tokenizer`を別snapshotから参照して
-`preprocessor_config.json`が見つからなくなる場合があります。
-FlashAttention未導入の警告とは別の問題です。
+The loader-only overlay below documents the legacy recovery path. The current official sampling and EOS policy starts a separate evaluation sharing only completed ASR/MT. Use standard Cells 1 → 6 → 7 → 8 and retain old plans and receipts. The policy explicitly sets both sampling flags True, a fixed seed per sentence, a 1501-token cap corresponding to 120 seconds, and a 600-second cooperative guard. Unverified EOS fails the sample. Real Qwen GPU behavior remains to be verified. See the [Qwen TTS audit](CASCADE_TTS_AUDIT.md).
 
-修正版は固定SHAの**完全snapshotを先に取得し、root processor・tokenizer・重み・
-speech_tokenizerの必須ファイル/JSONを確認してから、SDKへローカルディレクトリだけを渡します**。
-SDKの内部取得で`main`へ戻ることを避け、既存のHub blobは再利用します。
-セル7はGPU確認→保存済みASR/MTの読み取り専用検証→固定snapshot→実Qwenロード→
-固定文 `This is a synthesis test.` の試験合成→未生成TTS、の順で進みます。
-CUDA/BF16非対応時はロード前に停止し、GPU名・対応状況・bfloat16/SDPAをログへ残します。
-試験合成はWAV保存・読み戻し・mono・有限値・非無音・durationを検証し、失敗なら
-正式test音声を1件も生成しません。成功記録とWAVは別の`preflight/`へ保存し、
-正式predictions/index・BLEU母数へ混ぜません。試験前後で乱数状態も復元します。
-旧loader-only修正では依存version・モデルSHA・話者・言語・BF16/SDPA・正式デコード条件を変更していません。
-新しいsampling policyは正式デコード条件の変更なので、上記の別評価方式を使用します。
+`qwen-tts==0.1.1` can fail to forward the requested revision to internal tokenizer `cached_file` or processor calls. The main model can come from `f00cf13...` while `speech_tokenizer` resolves to another snapshot missing `preprocessor_config.json`. This retrieval error is independent of the FlashAttention warning.
 
-`f9f1520047bca2c0e977b581cab70168892091e2`で**最初のTTSロード前に停止した評価**は、
-対応修正版の`TRAIN_CODE_REVISION`で通常のセル1→6→7→8を実行してください。
-セル6はモデル設定・test全ID/manifest SHAが同じなら元planの再利用を検討します。
-レビュー済みGit差分（TTS loader/試験合成・通常launcher・説明/テスト）と、
-worker内ASR/MT/identity関数のAST不変を確認し、
-初回のloader修正採用はTTS WAVがない場合に限定し、`execution-overlays/<修正revision>.json`を保存します。
-元plan・ASR/MT journal・完了pointer・runtime SHAを上書きしません。
-元と同じeditable build位置から実依存を復元し、修正ソースだけを別のPYTHONPATHから使用します。
-したがってASR/MT完了分を再計算せず、TTSから続行できます。
-`ASR: reuse 1196/1196`・`MT: reuse 1196/1196`と表示し、Whisper/NLLBはロードしません。
-pointer・identity・journal・ZIP・SHA・全ID・成功状態・入力文/時刻の対応を検証し、
-不足や破損は明確に停止させます。旧結果を再生成したり、元ファイルを更新したりしません。
-新規runで初めてASR/MTを生成する経路は残しますが、保存途中のtext段階がある場合も
-自動再推論しません。不完全なtext段階をやり直す場合は別途原因・復旧方法の確認が必要です。
-同じ修正revisionを再開する場合は、その採用後に生成したWAVも再利用します。
-すでに`c741fca0c8408d67750a480cb989370fbcab9071`の修正採用記録がある場合は、
-元plan SHA・採用receipt・Git系統・固定snapshot処理・モデルロード/合成引数のAST不変を
-確認した場合に限り、生成済みWAVを保持して試験合成/再開対応版へ移行できます。
-新しいoverlayへ親receiptのSHAを記録し、旧receiptやWAVを変更しません。
-最終metrics/reportに元revisionと実行修正revisionを記録します。
+Fetch and verify the **complete snapshot at its pinned SHA**, including root processor, tokenizer, weights, and required speech_tokenizer files and JSON. Pass the local directory to the SDK and reuse existing Hub blobs. Cell 7 checks the GPU, verifies saved ASR/MT read-only, resolves the pinned snapshot, loads Qwen, synthesizes `This is a synthesis test.`, then generates pending TTS. Unsupported CUDA/BF16 stops before loading. Log GPU, capability, bfloat16, and SDPA. Preflight saves and reads back WAV and verifies mono, finite values, non-silence, and duration. On failure, no formal test audio is generated. Store preflight records and WAV under `preflight/` outside formal predictions, index, and BLEU denominator. Restore RNG. The loader-only fix retained dependency versions, model SHA, voice, language, BF16/SDPA, and formal decoding. The new sampling settings use a separate evaluation.
 
-検証済み修正採用記録のない旧版が既にWAVを生成していた場合、不変ZIPが未公開の場合、元plan/依存receiptが不一致の場合、
-ASR/MT/モデル設定/依存を含む未レビュー差分がある場合は自動合流せず停止します。
-古いsnapshotから音声トークナイザーだけを手作業でコピーしたり、`environment.json`や
-保存planのrevisionを書き換えたり、コーパス/ASR/MT結果を削除したりしないでください。
-CPUテストは実TransformersのEncodec feature extractorによるローカル設定読込も含みますが、
-Qwen本体重みを使う実GPU合成は未検証です。
+For an evaluation that stopped **before the first TTS load** at `f9f1520047bca2c0e977b581cab70168892091e2`, set `TRAIN_CODE_REVISION` to the compatible fix and run standard Cells 1 → 6 → 7 → 8. Cell 6 can reuse the plan if model config, all test IDs, and manifest SHA match. Verify reviewed Git differences for loader, preflight, launcher, docs, and tests, plus unchanged worker ASR/MT/identity ASTs. Initial loader-fix adoption requires no existing TTS WAVs and records `execution-overlays/<fix-revision>.json`. Keep the original plan, journals, completion pointers, and runtime SHA. Restore dependencies from the original editable build path and use the fix via separate PYTHONPATH.
 
-TTSは先に全保存グループのjournal/identity・WAV SHA/形式を確認し、
-`TTS: saved=... remaining=...`、`[cascade-tts] reused=... computed=... remaining=...`を表示します。
-成功済みWAVは再生成せず、`mt_en_text`だけを入力します。同じVMでの中断なら
-未公開グループの成功済みWAVも再利用します。VMごと消失した場合はDrive保存済み32件単位から
-再開するので、最後の最大31件は再生成され得ます（500件処理、480件公開なら480件を保証）。
-全成功WAVが保存済みならQwenロード・試験合成も不要です。セル8の評価定義は変更しません。
-ASR/MTバッチ化・TTSバッチ化・FlashAttention追加は今回実施していません。
+Completed text stages report `ASR: reuse 1196/1196` and `MT: reuse 1196/1196` and skip Whisper/NLLB loading. Verify pointers, identities, journals, ZIPs, SHAs, IDs, successful status, and input text and timing associations. Stop on missing or corrupt artifacts. A new run can generate ASR/MT normally. An incomplete stored text stage requires investigation before rerunning. Resume with the same fix reuses WAVs generated after its adoption.
 
-実モデル用GPUテストは`tests/gpu/test_cascade_qwen_preflight.py`に分離しています。
-固定Colab環境のL4で`S2ST_RUN_QWEN_GPU_TEST=1`を明示した場合のみ、モックなしで
-Qwen本体/音声tokenizerのロードとWAV生成を行います。CPUテスト成功はL4実機成功を意味しません。
-運用確認は同じ実験の通常セル1→必要なら6→7で、試験合成成功後の正式音声を確認し、
-セル7を中断→再実行して保存済み件数と再利用ログを確認してください。追加セルは不要です。
+If adoption of `c741fca0c8408d67750a480cb989370fbcab9071` is already recorded, verify original plan SHA, adoption receipt, Git ancestry, complete-snapshot processing, and unchanged ASTs for model load and synthesis arguments. Then migrate preflight and resume while retaining generated WAVs. Record parent receipt SHA in the new overlay and retain old receipts and WAVs. Final metrics and reports record both original and execution revisions.
 
-### 外部データの3条件診断（セル8C、GPU・再開可）
+Stop if legacy WAVs lack a verified adoption receipt, immutable ZIPs are unpublished, plan or dependency receipts mismatch, or unreviewed ASR/MT/model/dependency changes exist. Keep tokenizer files, `environment.json`, plan revisions, corpus, and saved text results intact. CPU tests include local config loading with the real Transformers Encodec feature extractor. Real Qwen synthesis remains unverified.
+
+TTS first checks all saved group journals, identities, WAV SHAs, and formats. Progress includes `TTS: saved=... remaining=...` and `[cascade-tts] reused=... computed=... remaining=...`. Use `mt_en_text` as input and reuse successes. The same VM can reuse successful unpublished WAVs. A lost VM resumes from published 32-item groups and can repeat at most 31 items in the last group. For example, 480 of 500 processed items are durable if 480 were published. When all successes are saved, skip Qwen load and preflight. Cell 8 retains its evaluation definition. Batching and FlashAttention remain outside this change.
+
+The opt-in GPU test is `tests/gpu/test_cascade_qwen_preflight.py`. `S2ST_RUN_QWEN_GPU_TEST=1` on the pinned Colab L4 setup loads actual Qwen and its audio tokenizer and generates a WAV. CPU success verifies only the CPU scope. To check operations, use standard Cells 1 → 6 if needed → 7 on the same experiment, inspect formal WAVs after preflight, then interrupt and rerun Cell 7 and verify saved counts and reuse logs.
+
+### Three-condition external diagnostic (Cell 8C, GPU, resumable)
 
 **Cell 8C is an external diagnostic and is not part of the formal benchmark.
-It does not alter official KFTT/JESC results.** セル1と同じ実験設定でセル8Cを
-実行します。8A/8Bの実行変数や学習環境には依存しません。保存済みCascade評価の
-Allスコア・manifest・plan/モデルSHAを再確認し、そのASR/MT/TTS/英語評価ASRを使用します。
+It does not alter official KFTT/JESC results.** Run Cell 8C with the experiment settings from Cell 1. It is independent of 8A/8B variables and the training environment. Recheck the saved Cascade All score, manifest, and plan and model SHAs, then reuse its ASR, MT, TTS, and English evaluation ASR settings.
 
-`FLORES_FLEURS_LIMIT=300`（0のみ全一致文）。公式FLEURS `ja_jp` のvalidation/testを、
-公式FLORES+ `jpn_Jpan` のdev/devtest本文とNFKC＋Unicode空白統一だけで一意に照合します。
-英語は同じFLORES+ `(split,id)` で取得します。行番号・あいまい一致・翻訳による補完は使いません。
-一致する一意文が300未満なら停止します。重複録音は内容とID/パスのSHAで1件選び、
-文もcanonical IDのSHA順で固定選択します。未一致・曖昧一致・重複録音数を記録します。
+`FLORES_FLEURS_LIMIT=300` selects 300 sentences. Only 0 selects all matches. Uniquely match official FLEURS `ja_jp` validation/test text to official FLORES+ `jpn_Jpan` dev/devtest text with NFKC and Unicode whitespace normalization only. Find English by the same FLORES+ `(split,id)`. Use exact text matching and exclude ambiguous cases. Stop if there are fewer than 300 unique matches. Select one duplicate recording deterministically by content and ID/path SHA. Select sentences by canonical ID SHA. Record unmatched, ambiguous, and duplicate counts.
 
-取得元と固定revision（2026-10-24に公式API/実Parquetスキーマ確認）：
+The dataset revisions and files were verified against official APIs and Parquet schemas on 2026-10-24.
 
-| データ | revision | 使用範囲 |
+| Dataset | Revision | Files used |
 |---|---|---|
 | `google/fleurs` | `70bb2e84b976b7e960aa89f1c648e09c59f894dd` | `parquet-data/ja_jp/{validation,test}-00000-of-00001.parquet` |
 | `openlanguagedata/flores_plus` | `e707e62e762a9e2faca3933aa315f4665cc3cd8f` | `{dev,devtest}/{jpn_Jpan,eng_Latn}.jsonl` |
 
-FLORES+は[公式ページ](https://huggingface.co/datasets/openlanguagedata/flores_plus)で
-利用条件をacceptし、ColabのHugging Faceログインまたは`HF_TOKEN`で認証してください。
-tokenは出力・結果保存しません。アクセス不可時は停止し、第三者mirrorに切り替えません。
-FLEURSは公式Parquetのテキスト列を先に範囲読み出しし、選択録音のWAVだけDriveへ保存します。
-Parquetのrow group単位で音声を読むため、ネットワークでは未選択録音を含むブロックの転送が
-発生することがあります。元Parquet全体をDriveへ複製しません。学習用途には使用しません。
+Accept the FLORES+ terms and authenticate using Hugging Face login in Colab or `HF_TOKEN`. Tokens stay out of output and artifacts. Failed access stops the run. Read text columns of official FLEURS Parquet first using range reads. Save only selected WAVs to Drive. Parquet audio is read by row group, so network blocks can include unselected recordings. Keep full Parquet off Drive and exclude external data from training. See the [official FLORES+ page](https://huggingface.co/datasets/openlanguagedata/flores_plus).
 
-同じ日本語・英語参照でGold本文、FLEURS自然音声、元コーパス条件の合成日本語を比較します。
-モデルは工程ごとの別processで逐次ロードし、GPUから解放します。300文なら日本語合成300件、
-source ASR 600件、MT 900件、英語TTS 900件、英語ASR 900件が追加されます。
-8A/8Bより長時間です。Qwenの条件を保持するためCUDA/BF16対応GPUが必要です。
-保存設定の日本語TTS batchが大きい場合は、それを収容できるVRAMも必要です。
-メモリ不足を回避するためにsource batchを勝手に小さくすることはありません。
+Compare gold Japanese text, natural FLEURS speech, and Japanese synthesis under the original corpus conditions with identical texts and English references. Load and release models sequentially in separate processes. For 300 items, run 300 Japanese TTS, 600 source ASR, 900 MT, 900 English TTS, and 900 English ASR operations. This is longer than 8A/8B. Use a BF16-capable CUDA GPU with sufficient VRAM for the saved Japanese TTS batch. The run preserves the source batch setting.
 
-**この実験では「コーパスnotebookの設定を変更せず生成した」というユーザー確認を採用します。**
-`FLORES_FLEURS_SOURCE_CONFIG_CONFIRMED=True`が既定です。
-`FLORES_FLEURS_SOURCE_PROVENANCE`と`FLORES_FLEURS_SOURCE_CODE`は空欄のまま、
-GPUランタイムで**セル1→8C**を実行できます。追加セル・手動provenanceファイル作成は不要です。
-`TRAIN_CODE_REVISION`は従来のままで、旧8C v1しかない場合も診断コードだけv2へ取得し直します。
-HFの利用条件accept・認証は引き続き必要です。
+**This experiment uses the user's confirmation that corpus generation used unchanged notebook settings.** `FLORES_FLEURS_SOURCE_CONFIG_CONFIRMED=True` is the default. Leave `FLORES_FLEURS_SOURCE_PROVENANCE` and `FLORES_FLEURS_SOURCE_CODE` empty and run **Cells 1 → 8C** on GPU. Keep `TRAIN_CODE_REVISION`. When only old 8C v1 code is present, fetch v2 diagnostic code separately. HF terms and authentication still apply.
 
-確認の対象をcorpus repo `efe987934c48ee78b02132e97144815589ebeea7`に固定し、
-`configs/colab-pro.yaml`、`notebooks/colab_pro.ipynb`、依存ファイルのSHAを検証します。
-元のnotebook Cell 5から、VRAM 70GiB以上ならTTS batch 72、未満なら1というルールを読みます。
-dtypeの`auto`も元のルールで解決します（8C対応のBF16 GPUならbfloat16）。
-この設定を元のcorpus runnerへ渡し、instruct・sampling・max tokens・出力形式等を保持します。
-実batch、dtype、GPU、モデルSHA、設定SHAと確認の根拠をidentity/model-auditへ保存します。
+The confirmation is bound to corpus revision `efe987934c48ee78b02132e97144815589ebeea7` and verified SHAs of `configs/colab-pro.yaml`, `notebooks/colab_pro.ipynb`, and dependencies. Original Cell 5 selects TTS batch 72 at VRAM 70 GiB or above, otherwise 1. Resolve dtype `auto` with the original rule, bfloat16 on a supported 8C GPU. Pass these settings to the original runner and preserve instruct, sampling, token limits, and format. Identity and model audit record actual batch, dtype, GPU, model and config SHAs, and the basis of confirmation.
 
-記録の根拠は`basis=user_confirmation`です。過去の実行ログや実行commitを復元できたという
-意味にはしません。元音声と同じ乱数や同じバイト列の再生成を保証するものでもありません。
-独自変更を加えて生成した別実験ではこの確認をTrueにせず、保存済み設定を指定してください。
-`FLORES_FLEURS_SOURCE_PROVENANCE`を明示した場合はそのファイルを優先して厳密に検証し、
-不一致・破損をユーザー確認で自動的に置き換えません。確認も保存記録もない場合は停止します。
-方式の区別と記録項目は[8Cの再現性メモ](FLORES_FLEURS_DIAGNOSTIC.md)を参照してください。
+`basis=user_confirmation` identifies a user statement. Historical execution logs, commit, random state, and byte-identical synthesis are unverified. For a customized corpus run, turn confirmation off and supply saved settings. An explicit `FLORES_FLEURS_SOURCE_PROVENANCE` takes priority and must validate. Corruption or mismatch stops without falling back to confirmation. Absence of both forms of evidence also stops. See [8C reproducibility notes](FLORES_FLEURS_DIAGNOSTIC.md).
 
-成功済みstageは入力本文SHA・モデル/環境/データidentity・WAV SHAを検証して再利用します。
-失敗は同じセル8Cで再試行できます。日本語TTSは成功した各WAVを個別にSHA検証し、
-同じbatchの他の文が失敗しても成功文を再生成しません。未処理・失敗文だけを元runnerへ渡します。
-設定上のbatch上限と元のseed関数は保持します。再試行の実batchメンバーとseedも記録します。
-日本語sourceは元runnerのattempt 0を使い、元コーパスのCERによる生成選別はしません。
-これは外部の音声品質を測るための明示的な診断差分で、全失敗は空の仮説として分母に残します。
+Resume verifies input-text SHA, model, environment, data identities, and WAV SHA per successful stage. Rerun Cell 8C to retry failures. Verify individual successful Japanese WAVs and reuse them even if another member of their batch failed. Pass only pending or failed items to the original runner. Keep the configured batch cap and original seed function, and record actual retry batch members and seed. Use attempt 0 for source Japanese synthesis. The original corpus's CER-based generation selection is omitted as an explicit diagnostic difference. Failures remain empty hypotheses in the denominator.
 
-保存先は`<PERSISTENT>/diagnostics/flores-fleurs-cascade/<identity>/`。
-`metrics.json`、`report.md`、`per_sample.jsonl/csv`、各audit、選択WAV、stage checkpointを保存します。
-通常セルは`--overwrite`を8C helperへ明示し、このidentity内の派生レポートだけを再試行後に
-更新します。成功済みWAV・不変checkpoint・正式結果は上書きしません。
-セルには`flores_fleurs_diagnostic["per_sample"]`も残ります。
-表示BLEUは既存benchmarkのEnglish normalize＋sacreBLEUによる**corpus BLEU**です。
-source CERはNFKC＋空白除去・句読点保持、編集距離総和÷参照文字総数です。
+Save `metrics.json`, `report.md`, `per_sample.jsonl/csv`, audits, selected WAVs, and stage checkpoints to `<PERSISTENT>/diagnostics/flores-fleurs-cascade/<identity>/`. The standard cell passes `--overwrite` to update derived reports within this identity after retry. Preserve successful WAVs, immutable checkpoints, and formal results. The cell retains `flores_fleurs_diagnostic["per_sample"]`. Report **corpus BLEU** with benchmark English normalization and sacreBLEU. Source CER divides total edit distance by total reference characters after NFKC and whitespace removal, retaining punctuation.
 
-| 観測 | 次に疑う箇所（単独原因の証明ではありません） |
+| Observation | Possible contributor to investigate |
 |---|---|
-| Gold MT高 / Natural高 / Synthetic低 | 現在の合成日本語source音声 |
-| Gold MT高 / Natural低 / Synthetic低 | source ASR / Whisper・録音条件 |
-| Gold MT低 / Natural低 / Synthetic低 | NLLB、BLEU/reference/domainの相性 |
-| MT高 / final ASR-BLEUだけ低 | 英語target TTS / 英語評価ASR |
+| High Gold MT and Natural, low Synthetic | Synthetic Japanese source audio |
+| High Gold MT, low Natural and Synthetic | Source ASR, Whisper, or recording conditions |
+| Low Gold MT, Natural, and Synthetic | NLLB, BLEU, reference, or domain compatibility |
+| High MT, low final ASR-BLEU only | English TTS or English evaluation ASR |
 
-既存のセル8/8A/8B、正式predictions、metrics、manifest、学習checkpointは書き換えません。
-新規依存は8C専用環境で固定し、既存学習Pythonへ追加しません。
-CPU fixtureでの再開・失敗・SHA検証の成功は、実GPUモデルによる3条件の成功を意味しません。
+Treat these patterns as hypotheses. Cells 8/8A/8B, formal predictions and metrics, manifests, and training checkpoints retain their existing artifacts. Pin dependencies in a separate 8C environment. CPU fixtures cover resume, failure, and SHA validation. Real GPU results for all three conditions require separate verification.
 
-### セル10: 任意日本語文の2方式試聴・参考BLEU・性能比較
+### Compare two systems on a custom Japanese sentence (Cell 10)
 
-セル1→10で使用します。Qwen生成の同じ日本語音声をCascadeと、
-`INTERACTIVE_MODEL`で選ぶS2UT/TT2/S2T→TTSへ入力し、音声・ASR文・参考BLEU・速度・RAM/VRAMを並べます。
-Cascade英訳は自動参照であり正解保証はありません。正式ベンチマークとは別の`interactive/`に保存し、
-GPU推論は逐次実行します。性能値は初回1文の簡易測定で、キャッシュ再利用時は元の測定値です。
-設定根拠、再開、性能の計測範囲は[任意文比較の説明](INTERACTIVE_COMPARISON.md)を参照してください。
+Run Cells 1 → 10. Qwen synthesizes shared Japanese audio for Cascade and the S2UT, TT2, or S2T→TTS system selected by `INTERACTIVE_MODEL`. Display audio, ASR text, diagnostic BLEU, timing, RAM, and VRAM. Cascade English supplies the automatic reference. Store the comparison under `interactive/` and run GPU inference sequentially. Timing describes the first inference on one sentence. Cached results retain original measurements. See the [custom comparison guide](INTERACTIVE_COMPARISON.md) for settings, resume, and timing scope.
 
-### テストの範囲
+### Test scope
 
-工程別の保存単位・再開手順・旧データの制約は[中断・再開の範囲](RESUME.md)を参照してください。
+See [interruption and resume](RESUME.md) for durable units of work, recovery, and legacy data limitations.
 
-ノートブック構文、テスト/通常の設定分離、全件処理の確認ガード、ログ表示コード、
-既存の学習snapshot・再開処理、CPU/GPU工程分離、VM消失後の自動構築・環境再利用をCPU/モックでテストします。
-実Colabでの環境構築・GPU学習・Drive切断復帰・実音声4方式E2Eは未検証です。
-Python 3.10/Linux向けの学習＋推論依存解決は確認済みです。
-## Cell 8D: 日英テキスト対の人手盲検監査（CPU）
+CPU and mock tests cover notebook syntax, separation of smoke and standard settings, the full-data guard, log display, existing snapshots and resume, CPU/GPU staging, automatic rebuild after VM loss, and environment reuse. Python 3.10/Linux dependency resolution for training and inference was checked. Real Colab setup, GPU training, Drive reconnection, and four-system real-audio E2E remain unverified.
 
-**セル1 → セル8D**で開始・再開できます。セル2/3/8Cの実行、GPU、Hugging Face認証は不要です。
-セル1は既存の`OUTPUT_BASE`と`EXPERIMENT=experiment-001`を指定し、他の学習設定は変更不要です。
-8DがDrive接続と必要な診断コードの取得だけを行い、学習環境やモデルを構築しません。
+## Cell 8D: Blinded human audit of Japanese–English text pairs (CPU)
+
+Start or resume with **Cells 1 → 8D** using the existing `OUTPUT_BASE` and `EXPERIMENT=experiment-001` in Cell 1. The cell mounts Drive and retrieves diagnostic code if needed. It uses CPU and works without Cells 2/3/8C or Hugging Face authentication.
 
 Cell 8D is a blinded human audit of JA–EN text-pair quality.
 It performs no model inference and does not alter official benchmark results.
 Do not inspect corpus identity before completing annotation, because doing so
 can bias the manual quality judgment.
 
-`TEXT_AUDIT_PER_STRATUM=100`・`TEXT_AUDIT_SEED=20261025`が既定です。
-実験の`data/common/{train,test}.jsonl`と`dataset-lock.json`からのみ抽出し、
-`train/test × KFTT/JESC`各層100件、通常計400件を混ぜて表示します。
-コーパスは保存済みの明示的なmetadataで確認し、pair IDの接頭辞から推測しません。
-不足した由来を厳密joinで確認できない行は理由付きで除外し、必要populationの由来を証明できなければ停止します。
+Defaults are `TEXT_AUDIT_PER_STRATUM=100` and `TEXT_AUDIT_SEED=20261025`. Draw only from the experiment's `data/common/{train,test}.jsonl` and `dataset-lock.json`. Mix 100 per train/test × KFTT/JESC stratum, normally 400 total. Verify corpus from explicit metadata. If an exact join cannot establish a row's origin, exclude it with a reason. Stop if the required population's origin cannot be verified.
 
-画面で日本語と英語を読み、5ラベルのいずれかを人手で判定してください。
-任意のflags・confidence・noteはラベルを押す**前**に設定します。
-ラベルボタンは**即保存して次へ**進みます。ラベル選択欄＋`Save & Next`でも保存できます。
-`Previous`で戻った場合だけ既存判定を明示的に修正できます。
-全文判定まではコーパス・split・ID・自動スコア・層別品質率を画面に出しません。
-`Show provenance`はraw/TTS本文だけを表示します。
+Read both texts and choose one of five labels. Set optional flags, confidence, and note before pressing a label. A label button saves immediately and advances. The label selector and `Save & Next` also save. Use `Previous` to explicitly revise a saved judgment. Before completion, the UI hides corpus, split, ID, automatic score, and per-stratum quality rates. `Show provenance` displays raw and TTS text only.
 
-判定は1件ごとにDriveの`diagnostics/text-pair-audit/<identity>/annotations.jsonl`へatomic保存します。
-切断後も同じ設定で**セル1 → 8D**を再実行すると最初の未判定から再開します。
-入力manifest・本文・抽出数・seed・版が変われば別の監査となり、旧判定は流用しません。
-同じ監査を複数runtimeから同時に操作しないでください。
+Each annotation is atomically saved to Drive at `diagnostics/text-pair-audit/<identity>/annotations.jsonl`. After disconnection, run **Cells 1 → 8D** with the same settings to continue at the first unannotated item. Changes to manifest, text, count, seed, or version create a new audit. Use one runtime per audit.
 
-全件完了後に`report.md`・`summary.json`・`per_stratum.csv`・`per_sample.csv`へ
-層別件数、uncertainを除く品質率、Wilson 95% CI、flags頻度を保存・表示します。
-途中のsummary/reportは判定数・残り件数だけです。盲検を保つため、完了まで内部のidentity/queue/samplingファイルを開かないでください。
-この監査だけでDirect S2ST性能の原因を確定するものではありません。
+On completion, `report.md`, `summary.json`, `per_stratum.csv`, and `per_sample.csv` report stratum counts, quality rates excluding uncertain, Wilson 95% intervals, and flag frequencies. Interim reports show only completed and remaining counts. Keep identity, queue, and sampling files closed until annotation is complete to preserve blinding. The audit does not establish what causes direct S2ST performance.
 
-UIには標準Colabカーネルの`ipywidgets` 7/8とIPythonを使います。
-不足時はDrive出力を作る前に停止し、学習環境へ依存を自動導入しません。
-詳しい分類基準・入力検証・統計・検証記録は[TEXT_PAIR_AUDIT.md](TEXT_PAIR_AUDIT.md)を参照してください。
+The UI uses `ipywidgets` 7/8 and IPython in the standard Colab kernel. Missing dependencies stop before creating Drive output. See [TEXT_PAIR_AUDIT.md](TEXT_PAIR_AUDIT.md) for labeling, inputs, statistics, and verification.
 
+## Cell 8E: External FLEURS/FLORES S2UT evaluation (GPU, resumable)
 
-## Cell 8E: FLEURS/FLORES 外部S2UT評価（GPU・再開可）
+Run **Cells 1 → 8E** on GPU with the `OUTPUT_BASE / MODE / EXPERIMENT` used in 8C. Use saved results and prepared data.
 
-GPUで **セル1 → 8E** を実行します。8Cを実行した `OUTPUT_BASE / MODE / EXPERIMENT` を指定します。
-既存セル2～8Dの再実行、S2UTの再学習、学習用testデータの差し替えは不要です。
+- Leave `FLEURS_S2UT_RUN_NAME` empty to select a saved S2UT run as in standard Cell 6. Specify a saved name if ambiguous.
+- Leave `FLEURS_S2UT_CASCADE_ID` empty to select the latest saved 8C evaluation, with preference for 300 items. Set it explicitly to select a particular evaluation.
+- Set `FLEURS_S2UT_RESUME=True` to restore successful unit, WAV, and ASR journals from ZIPs.
+- Set `FLEURS_S2UT_RUN=True` to evaluate. False inspects saved 8C input metadata without loading models.
 
-- `FLEURS_S2UT_RUN_NAME`: 空欄は通常セル6と同じ保存済みS2UT run自動選択。複数候補なら保存名を指定。
-- `FLEURS_S2UT_CASCADE_ID`: 空欄は保存済み8Cの300件評価を優先して最新を選択。明示するとその8C identityを使用。
-- `FLEURS_S2UT_RESUME=True`: 成功済みUnit・WAV・ASR journalをZIPから復元します。
-- `FLEURS_S2UT_RUN=True`: 実行。Falseはモデルを読み込まず保存8C入力の確認だけ。
+Match canonical IDs, FLORES and FLEURS IDs, Japanese and English texts, SHAs, and natural audio receipts. Use **the same natural audio, English references, and English evaluation Whisper** for ASR-BLEU. Keep best by dev unit loss, beam 10, official unit HiFi-GAN, English normalization, and the formal S2UT failure-inclusive denominator. Reuse the existing 300 selections and use references only to score.
 
-8Cのcanonical ID・FLORES/FLEURS ID・日英テキスト・SHA・自然音声receiptを照合し、
-**同じNatural音声、同じ英語reference、同じ英語評価Whisper**でASR-BLEUを測ります。
-`best`は元のDev unit loss基準を維持し、beam10・公式Unit HiFi-GAN・英語正規化・
-失敗込みBLEU分母も正式S2UT評価と同じです。新しい300件選択やreferenceの推論入力は行いません。
+Write `report.md`, `metrics.json`, `per_sample.jsonl/csv`, and WAV ZIPs under `diagnostics/flores-fleurs-s2ut/<identity>/`. Read the saved 8C Cascade Natural score and display the difference. Training, 8C, and formal evaluation are read-only.
 
-結果は `diagnostics/flores-fleurs-s2ut/<identity>/report.md`、`metrics.json`、
-`per_sample.jsonl/csv`、WAV ZIPへ保存します。Cascade Naturalの数値は8C保存値を読み、
-再計算せず差を表示します。学習・8C・正式評価の保存結果は変更しません。
+Restore S2UT in its saved fairseq environment and evaluation Whisper in the separate 8C environment. NumPy 2 and NumPy 1 stay isolated. The 8C bootstrap supports L4/A100. T4 is unsupported. The cell reads saved dataset artifacts, with possible downloads of public vocoder and Whisper weights. A missing 8C runtime installs the existing pins, including Qwen dependencies. The diagnostic executes neither Qwen nor NLLB. See [8E implementation and verification](S2UT_FLORES_FLEURS_DIAGNOSTIC.md).
 
-S2UTは保存済みfairseq環境、評価Whisperは別の8C環境を自動復元します。
-8Cのnumpy2系をfairseqのnumpy1系に混ぜません。8C bootstrapのためL4/A100が対応し、
-T4は未対応です。新しいHFデータセット認証は不要ですが、公開vocoder/Whisperのダウンロードはあり得ます。
-初回に8C環境がない場合は既存の8C固定依存を導入します（Qwen等のパッケージを含みますが、
-8EでQwen/NLLBモデルをロード・実行しません）。
+For legacy `4e18c8f` with `8E evaluation dependency differs ... huggingface-hub`, rerun **Cells 1 → 8E with resume enabled** and identical settings in the updated notebook. Canonicalize package name punctuation (`-` / `_` / `.`) and case while requiring matching versions. Reuse saved units and WAV ZIPs after verifying model, inputs, and inference conditions. Preserve original plans and 8C and record the fixed execution separately. Preserve completed ASR and evaluations from distinct conditions.
 
-実装・根拠・復元単位・検証範囲は [8Eの説明](S2UT_FLORES_FLEURS_DIAGNOSTIC.md) を参照してください。
+`8E helper did not confirm agreement with the saved formal All score` was a display check after completed evaluation. Rerun **Cells 1 → 8E with resume enabled** and the same settings in the updated notebook. If `completion.json` and report checksums match, display the saved result. Updated display code retains inference revision `32cc967` and the original cache path so evaluation identity stays stable. Fetch that SHA if absent. The formal All-score confirmation belongs to 8A. Training, inference conditions, and saved reports are preserved.
 
-`8E evaluation dependency differs ... huggingface-hub` で停止した旧 `4e18c8f` 版は、
-更新したノートブックで **同じ設定のセル1 → 8E（RESUMEはON）** を再実行します。
-パッケージ名の `-` / `_` / `.` と大小文字を統一して比較し、バージョンの一致は引き続き必須です。
-同じモデル・入力・推論条件が確認できる場合、既存のUnit・WAV ZIPをそのまま引き継ぎます。
-旧planや8Cの結果は書き換えず、修正版コードの実行記録を別途保存します。
-完了済みASR評価や異なる条件の結果を、この修正の名目で再解釈しません。
+## Cell 8F: Synthetic FLEURS/FLORES S2UT evaluation
 
-`8E helper did not confirm agreement with the saved formal All score` は、
-評価が完了した後の表示チェックの不具合です。更新したノートブックで
-**同じ設定のセル1 → 8E（RESUMEはON）** を実行してください。
-`completion.json` とレポートのチェックサムが一致すれば保存済み結果を表示し、
-Unit生成・音声復元・ASR評価は再実行しません。
-表示コードは更新版を取得しますが、推論側は `32cc967` と従来の専用キャッシュパスを維持し、
-表示修正だけで評価identityが変わることを防ぎます。キャッシュがない場合は同じSHAのコードを取得します。
-8Eは独立した外部評価なので、8A用の「正式Allスコアと同じ」という確認フラグを作りません。
-学習・推論条件・保存済みレポートは変更しません。
+Run **Cells 1 → 8F** in the same experiment with completed 8E. Reuse the 300 saved 8C synthetic Japanese WAVs and Natural 8E's S2UT run, dev-best checkpoint, beam 10, official unit HiFi-GAN, and evaluation Whisper. The cell uses the existing selection, source synthesis, and trained weights.
 
-## Cell 8F: FLEURS/FLORES Synthetic S2UT評価
+- Leave `FLEURS_SYNTHETIC_NATURAL_ID` empty to select the corresponding completed 8E. If several 8C identities have natural evaluations, set the saved 8E directory name.
+- Set `FLEURS_SYNTHETIC_RESUME=True` to resume saved synthetic unit, WAV, and ASR stages.
+- Set `FLEURS_SYNTHETIC_RUN=True` to evaluate. False checks saved metadata without loading models.
 
-完了済み8Eがある同じ実験で **セル1 → 8F** を実行します。8C・8Eや学習セルの再実行は不要です。
-8Cで保存済みの300件のSynthetic Japanese WAVを再利用し、Natural 8Eと同じ
-S2UT run・Dev-best checkpoint・beam10・公式Unit HiFi-GAN・評価Whisperで評価します。
-日本語TTS生成、データの再選択、モデル再学習は行いません。
+Restore an existing 8F plan's code SHA and Natural 8E identity. Even after display-side main updates, use the same execution code and absolute path so identity stays stable. Set NATURAL_ID explicitly if 8F evaluations correspond to multiple natural results. Invalid saved plans stop.
 
-- `FLEURS_SYNTHETIC_NATURAL_ID`: 通常は空欄。対応する完了済み8Eを選びます。
-  複数の8Cに対応するNatural評価がある場合は、8Eの保存フォルダ名を指定してください。
-- `FLEURS_SYNTHETIC_RESUME=True`: 保存済みのSynthetic Unit/WAV/ASR段階を再開します。
-- `FLEURS_SYNTHETIC_RUN=True`: 新規Synthetic評価を実行。Falseはモデルを読み込まず保存メタデータだけ確認します。
+Compare input WAV SHA with formal 8C results and generation records. Check all IDs, Japanese text, and English references against 8E. Missing data, mismatches, or a different checkpoint stop. The scientific settings are the same except for source WAVs. Some shared function logs show 8E. The plan and output belong to 8F.
 
-開始済み8Fがあれば、そのplanのコードSHAとNatural 8E identityも復元します。
-表示側のmainが更新されても同じ実行コード・絶対パスを取得して再開するため、
-コード取得だけで別の評価IDになって最初から計算することを防ぎます。
-複数のNatural評価に対応する8Fがある場合はNATURAL_IDを明示し、不正な保存planは停止します。
-
-入力WAVは8Cの正式結果と生成記録のSHAに照合し、既存8EのID・日本語・英語referenceとも全件照合します。
-欠損や不一致、別checkpointの場合は停止します。source WAV以外の科学的条件を変更しません。
-既存の8E関数を共用するため処理ログの一部は8E表記ですが、8Fのplan/出力はSynthetic専用です。
-
-結果は `diagnostics/flores-fleurs-s2ut-synthetic/<identity>/report.md`、`metrics.json`、
-`per_sample.csv/jsonl`、音声ZIPに保存します。Natural/SyntheticそれぞれのCascade・S2UT BLEU、
-S2UT Synthetic−Natural、比率、Cascade Synthetic−Naturalを表示します。
-Original KFTT/JESC testは保存済み正式artifactを検証できる場合だけ追加し、値を推測・固定しません。
-原因の自動断定は行いません。詳細は [8Fの説明](S2UT_SYNTHETIC_FLORES_FLEURS_DIAGNOSTIC.md) を参照してください。
+Store `report.md`, `metrics.json`, `per_sample.csv/jsonl`, and WAV ZIPs under `diagnostics/flores-fleurs-s2ut-synthetic/<identity>/`. Display Natural and Synthetic Cascade and S2UT BLEU, S2UT Synthetic − Natural and its ratio, and Cascade Synthetic − Natural. Include original KFTT/JESC test values only when saved formal artifacts verify. The report leaves causal interpretation to the reader. See the [8F guide](S2UT_SYNTHETIC_FLORES_FLEURS_DIAGNOSTIC.md).
