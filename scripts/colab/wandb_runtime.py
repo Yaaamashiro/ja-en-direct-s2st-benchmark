@@ -54,7 +54,8 @@ def prepare(repo, *, root=Path('/content/s2st-wandb-runtime')):
 
 
 @contextmanager
-def reporter(repo, source, state, python, entity, project, *, key=None):
+def reporter(repo, source, state, python, entity, project, *, key=None, group='',
+             baseline_run_key='', existing_run_id='', registration='', audit_journals=False):
     """A separate interpreter owns all SDK/network work; trainer exit wins."""
     process = stop = None
     try:
@@ -70,6 +71,12 @@ def reporter(repo, source, state, python, entity, project, *, key=None):
             command = [str(python), str(Path(repo) / 'scripts/colab/baseline_wandb.py'), 'watch',
                        '--source', str(source), '--state', str(state), '--entity', entity,
                        '--project', project, '--stop-file', str(stop)]
+            for flag, value in (('--group', group), ('--baseline-run-key', baseline_run_key),
+                                ('--existing-run-id', existing_run_id), ('--registration', registration)):
+                if value:
+                    command.extend((flag, str(value)))
+            if audit_journals:
+                command.append('--audit-journals')
             process = subprocess.Popen(command, env=env, start_new_session=(os.name == 'posix'))
     except Exception as error:
         print('[baseline-wandb] reporter unavailable=' + type(error).__name__, file=sys.stderr, flush=True)

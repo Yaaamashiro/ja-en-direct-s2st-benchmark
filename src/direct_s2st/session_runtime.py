@@ -14,7 +14,7 @@ from .progress import operation
 
 @operation('training: resident session and asynchronous backup')
 def run_continuous(config, *, work, backup, identity, completed, total, seconds,
-                   inspect_checkpoint, publish, popen=subprocess.Popen):
+                   inspect_checkpoint, publish, popen=subprocess.Popen, publication_checkpoint=None):
     from .translatotron2.monitor import absolute_update_limit
     report = Path(work)/'training-monitor.json'
     policy = json.loads(report.read_text(encoding='utf-8'))['policy'] if report.is_file() else None
@@ -64,10 +64,12 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
         def upload(directory):
             state = json.loads((directory / 'ready.json').read_text(encoding='utf-8'))
             update = int(state['updates'])
-            actual = inspect_checkpoint(directory / 'files' / config['checkpoint'], config['kind'])
+            checkpoint_path = directory / 'files' / config['checkpoint']
+            actual, lineage = (publication_checkpoint(checkpoint_path, config['kind'], inspect_checkpoint)
+                               if publication_checkpoint else (inspect_checkpoint(checkpoint_path, config['kind']), None))
             if not completed < update <= total or actual != update:
                 raise ValueError('invalid immutable checkpoint update count')
-            publish(directory / 'files', backup, identity, update)
+            publish(directory / 'files', backup, identity, update, **({'lineage': lineage} if lineage else {}))
             if config['kind'] in ('tt2', 's2ut', 'vocoder') and (directory/'files/training-monitor.json').is_file():
                 from .translatotron2.monitor import mirror_reports
                 mirror_reports(directory/'files', backup)
@@ -140,14 +142,15 @@ def run_continuous(config, *, work, backup, identity, completed, total, seconds,
             # even when the normal ten-minute Drive upload interval deferred it.
             checkpoint = work/config['checkpoint']
             if checkpoint.is_file():
-                local = inspect_checkpoint(checkpoint, config['kind'])
+                local, lineage = (publication_checkpoint(checkpoint, config['kind'], inspect_checkpoint)
+                                  if publication_checkpoint else (inspect_checkpoint(checkpoint, config['kind']), None))
                 if completed < local <= total:
                     from .recovery import freeze_files
                     retained = Path(tempfile.mkdtemp(prefix='.pending-recovery-', dir=work.parent))
                     freeze_files(work, checkpoint, retained/'files')
                     print(f'[recovery] trainer_failed local_update={local} force_backup=true retained={retained}',
                           file=sys.stderr, flush=True)
-                    publish(retained/'files', backup, identity, local)
+                    publish(retained/'files', backup, identity, local, **({'lineage': lineage} if lineage else {}))
                     completed = local
                     print(f'[recovery] error_exit durable_updates={completed} local_copy_preserved={retained}',
                           file=sys.stderr, flush=True)

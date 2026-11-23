@@ -100,7 +100,7 @@ def checkout(repo, revision, run):
 @operation('cell 5: restore and continue selected training')
 def launch(repo, persistent, data, kind, default_name, model_size, options, total, seconds,
            *, requested='', confirm=False, run=None, wandb_python='', wandb_entity='',
-           wandb_project='alignment-transfer-s2ut', wandb_key=None):
+           wandb_project='alignment-transfer-s2ut', wandb_key=None, wandb_options=None):
     repo, persistent, data = Path(repo), Path(persistent), Path(data)
     if total < 1 or seconds < 0 or (total > 10 and not confirm):
         raise ValueError('long training requires CONFIRM_TRAINING=True')
@@ -271,7 +271,7 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
     if wandb_python and kind == 's2ut':
         from wandb_runtime import reporter
         with reporter(ROOT, backup, persistent/'wandb-baseline'/name,
-                      wandb_python, wandb_entity, wandb_project, key=wandb_key):
+                      wandb_python, wandb_entity, wandb_project, key=wandb_key, **(wandb_options or {})):
             run(*command)
     else:
         run(*command)
@@ -293,6 +293,11 @@ def main():
     parser.add_argument('--wandb-python', default='')
     parser.add_argument('--wandb-entity', default='')
     parser.add_argument('--wandb-project', default='alignment-transfer-s2ut')
+    parser.add_argument('--wandb-group', default='')
+    parser.add_argument('--wandb-baseline-run-key', default='')
+    parser.add_argument('--wandb-existing-run-id', default='')
+    parser.add_argument('--wandb-registration', default='')
+    parser.add_argument('--wandb-audit-journals', action='store_true')
     args = parser.parse_args()
     wandb_key = os.environ.pop('S2ST_WANDB_API_KEY', None)
     log = args.persistent/(args.kind+'-session.log')
@@ -316,7 +321,10 @@ def main():
            json.loads(args.options), args.total_updates, args.session_seconds,
            requested=args.run_name, confirm=args.confirm_training, run=run,
            wandb_python=args.wandb_python, wandb_entity=args.wandb_entity,
-           wandb_project=args.wandb_project, wandb_key=wandb_key)
+           wandb_project=args.wandb_project, wandb_key=wandb_key,
+           wandb_options=dict(group=args.wandb_group, baseline_run_key=args.wandb_baseline_run_key,
+                              existing_run_id=args.wandb_existing_run_id, registration=args.wandb_registration,
+                              audit_journals=args.wandb_audit_journals))
 
 
 if __name__ == '__main__':

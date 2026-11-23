@@ -15,6 +15,11 @@ def main():
     parser.add_argument('action', choices=('inspect', 'sync', 'watch'))
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--snapshot', type=Path)
+    parser.add_argument('--registration', type=Path, help='Published Baseline registration snapshot.json')
+    parser.add_argument('--baseline-run-key', default='', help='Original MyDrive-relative publication directory')
+    parser.add_argument('--existing-run-id', default='', help='Verified existing W&B Run ID')
+    parser.add_argument('--group', default='')
+    parser.add_argument('--audit-journals', action='store_true')
     parser.add_argument('--state', type=Path)
     parser.add_argument('--entity', default='')
     parser.add_argument('--project', default=PROJECT)
@@ -22,15 +27,19 @@ def main():
     parser.add_argument('--stop-file', type=Path)
     args = parser.parse_args()
     if args.action == 'inspect':
-        bundle = collect(args.source, snapshot=args.snapshot)
-        print(json.dumps({k: bundle[k] for k in ('durable_update', 'counts', 'summary', 'sources', 'conditions')}, ensure_ascii=False))
+        bundle = collect(args.source, snapshot=args.snapshot, registration=args.registration,
+                         audit_journals=args.audit_journals)
+        print(json.dumps({k: bundle[k] for k in ('durable_update', 'training_fingerprint', 'counts',
+                                               'summary', 'sources', 'conditions')}, ensure_ascii=False))
         return
     if not args.state or not args.entity or args.interval < 1:
         parser.error('sync/watch require --state and explicit --entity; interval must be >=1')
     from direct_s2st.baseline_wandb_delivery import synchronize
+    options = dict(project=args.project, snapshot=args.snapshot, registration=args.registration,
+                   baseline_run_key=args.baseline_run_key, existing_run_id=args.existing_run_id,
+                   group=args.group, audit_journals=args.audit_journals)
     if args.action == 'sync':
-        print(json.dumps(synchronize(args.source, args.state, args.entity,
-                                    project=args.project, snapshot=args.snapshot)))
+        print(json.dumps(synchronize(args.source, args.state, args.entity, **options)))
         return
     stopping = False
     def stop(*_):
@@ -46,9 +55,9 @@ def main():
             # published dashboard changed. Failed syncs are always retried.
             stamps = [(p.name, p.stat().st_mtime_ns, p.stat().st_size)
                       for p in args.source.glob('training-*') if p.is_file()]
+            stamps.append(str(args.snapshot or max(args.source.glob('*/snapshot.json'), default='')))
             if final or stamps != previous:
-                result = synchronize(args.source, args.state, args.entity,
-                                     project=args.project, snapshot=args.snapshot)
+                result = synchronize(args.source, args.state, args.entity, **options)
                 print('[baseline-wandb] ' + json.dumps(result), file=sys.stderr, flush=True)
                 previous = stamps
         except Exception as error:

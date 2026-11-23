@@ -17,7 +17,9 @@ For pre-merge review, replace `main` in that URL with the PR branch or commit.
    `/content/drive/MyDrive/alignment-transfer-s2ut-data/experiment-001/baseline`.
    Set `WANDB_ENTITY` to the **same account/team** as the transfer runs.
    Set `WANDB_PROJECT` to their actual existing project; the generic default is
-   `alignment-transfer-s2ut`. No personal entity or live project is preset.
+   `alignment-transfer-s2ut`. No personal entity or live project is preset. Set `WANDB_GROUP` to the comparison group, for example
+   `experiment-001/transfer-fixed-v1`. If the Baseline already has a verified
+   W&B run, enter its exact ID in `WANDB_EXISTING_RUN_ID`.
 2. Add a W&B API key with project write access to the Colab secret named
    `WANDB_API_KEY`, and grant this notebook access. Never put credentials in code.
 3. Run cells 1–3 to inspect the confirmed update, metric counts, summary, and
@@ -37,8 +39,8 @@ equal to, or an ancestor of the source directory.
 The source must retain a published `snapshot.json` receipt (normally below a
 `000000400000-...` snapshot folder). This small receipt proves the confirmed
 optimizer update and contains report hashes. There is no checkpoint/ZIP download.
-Reports must match the **latest** receipt exactly; a dashboard that is temporarily
-newer/older than the receipt is deferred rather than treated as committed data.
+Reports must match the **latest** receipt exactly. If the dashboard differs, the
+reporter reads only the archived report members and checks their hashes.
 An explicit `--snapshot` path supports a read-only copy of a selected receipt.
 
 ### Audited completed run
@@ -51,14 +53,17 @@ On 2026-11-24, the four source files matched the report hashes in the final
 | Train total, unit, source-letter, target-letter, decoder-CTC losses | 4,000 |
 | Learning rate | 4,000 |
 | Dev total, unit, source-letter, target-letter, decoder-CTC losses | 400 |
-| Aux-BLEU, sample count, failure count | 400 |
+| Aux-BLEU, sample count, failure count (`*_legacy_unclassified`) | 400 |
 | ASR-BLEU, sample count, failure count | 8 |
 | Saved evaluation elapsed seconds | 400 |
 
 The eight audio evaluations are at updates 1,000; 5,000; 10,000; 25,000;
 50,000; 100,000; 200,000; and 400,000. Unscheduled ASR entries contain placeholder
 `asr_samples=0` and `asr_failures=0`: **none of these are exported**. A measured
-BLEU of zero or a measured failure count of zero **is** exported.
+BLEU of zero or a measured failure count of zero **is** exported. The 400 saved
+Aux points have failures that were not classified by the original evaluator.
+They enter `eval/aux_bleu_legacy_unclassified` and its companion count series.
+The eight zero-failure ASR points enter `eval/asr_bleu`.
 
 The saved best checkpoint is update **400,000**, dev unit loss
 **2.7741764784057237** bits, SHA-256
@@ -82,7 +87,8 @@ Use the updated `colab_training.ipynb`. In Cell 1 set `TRAIN_TARGET='s2ut'`,
 `BASELINE_WANDB=True`, and the same `WANDB_ENTITY` as the transfer runs (the public default is empty). Set
 `WANDB_PROJECT` to the existing transfer project. The generic initial value
 `alignment-transfer-s2ut` matches the transfer repository's default, not any
-individual account's live project. Add the Colab secret as above, then use
+individual account's live project. Set `WANDB_GROUP` and
+`WANDB_EXISTING_RUN_ID` as needed, then add the Colab secret as above and use
 normal Cell 5 for new training or resume. If a saved launcher predates this
 feature, set `TRAIN_CODE_REVISION` to an immutable integration commit after
 review. The scientific execution revision and saved experiment remain pinned.
@@ -115,24 +121,31 @@ dependencies and `watch` for an external wrapper. `inspect` reads sources only.
 
 ## Metric definitions and transfer comparison
 
-The mapping was reviewed against transfer repository commit
-`572b874fbdc36ebfed418c5bf88de2ba37ffa613` (`tools/wandb_transfer.py` and
-`s2ut/benchmark_extension.py`), and this repository's `s2ut/monitor.py`.
-The SDK's fixed cloud API host is `https://api.forge.coreweave.com`, consistent
-with the [W&B 0.31.0 release](https://github.com/wandb/wandb/releases/tag/v0.31.0).
-An inherited `WANDB_BASE_URL` cannot silently redirect this reporter to another server.
+The comparison mapping follows [alignment-transfer-s2ut PR #8](https://github.com/Yaaamashiro/alignment-transfer-s2ut/pull/8).
+The SDK's fixed cloud API host is `https://api.forge.coreweave.com`.
 
-| Saved Baseline field | W&B metric | Definition / comparison |
+| Saved Baseline field | W&B metric | Definition |
 | --- | --- | --- |
-| `train.unit_loss` | `baseline/train/unit_loss_bits` | Main label-smoothed criterion sum / sample size / ln(2). Transfer's native `train/main_loss` is in **nats**, so it is not aliased. |
-| `train.loss` | `baseline/train/loss_bits` | Weighted multitask total / main sample size / ln(2). Transfer's total includes an alignment objective and uses nats; do not compare them under one name. |
-| Train auxiliary losses | `baseline/train/<name>_bits` | Each auxiliary task uses its **own** denominator, divided by ln(2). |
-| `dev.unit_loss` | `dev/main_loss` | Same label-smoothed main criterion, sample-size aggregation, and bits as transfer's native dev main loss. **Not** raw NLL. |
-| Dev total / auxiliary losses | `baseline/dev/<name>_bits` | Keep explicit Baseline definitions rather than silently aliasing Fairseq aggregates. |
-| Learning rate | `train/learning_rate` | Recorded optimizer LR; no inferred schedule. |
-| Aux / ASR BLEU and counts | `eval/aux_bleu`, `eval/asr_bleu`, `eval/<aux-or-asr>_samples`, `eval/<aux-or-asr>_failures` | The existing measured score/count. Conditions/signatures are retained. Same name does not prove identical subsets, ASR, or vocoders; compare recorded conditions. |
-| Max update / durable progress | `train/max_update`, `train/durable_update` | Saved maximum and confirmed absolute optimizer update; summary values. |
-| Best checkpoint | `baseline/best_value`, `baseline/best_update`, `baseline/best_sha256` | Saved checkpoint-selection metadata; summary only. |
+| Train Unit | `train/main_loss` | Label-smoothed Unit loss in nats. Convert the saved bits by multiplying by ln(2). Retain the raw bits in `baseline/train/unit_loss_bits`. |
+| Train weighted task loss | `train/task_loss` | Saved task loss converted to nats. Compare to transfer's `alignment/task_loss`. |
+| Train auxiliaries | `train/aux/<task>_loss_bits` | Unweighted bits per auxiliary sample unit from one logical update. |
+| Dev Unit | `dev/main_loss` | Full-Dev label-smoothed Unit loss in bits. |
+| Dev total / auxiliaries | `dev/loss`, `dev/multitask_<task>_loss` | Weighted total in bits per main token and unweighted auxiliary bits per auxiliary sample unit. |
+| Learning rate | `train/learning_rate` | Saved optimizer learning rate. |
+| Comparable BLEU and counts | `eval/<mode>_bleu`, `eval/<mode>_samples`, `eval/<mode>_failures` | The saved score and counts, gated separately for Aux and ASR. |
+| Published progress | `train/max_update`, `train/durable_update` | Maximum verified progress on the run and verified update for this import, respectively. |
+| Training target | `train/target_update` | Saved planned limit, e.g. 400,000. |
+| Best checkpoint | `baseline/best_value`, `baseline/best_update`, `baseline/best_sha256` | Saved checkpoint-selection metadata. |
+
+The shared BLEU keys require the matched protocol, scoring signature, counts, and
+evaluation identity. Check the saved Dev scope and reference hashes when
+comparing runs. Missing protocol evidence uses `*_unmatched`. Unclassified
+failures use `*_legacy_unclassified`. To audit archived failures, enable
+`AUDIT_FAILURE_JOURNALS` in the importer or `WANDB_AUDIT_JOURNALS` in Cell 1
+(`--audit-journals` on the CLI). The reporter checks the published journal and
+identity lock hashes, exact sample IDs, and every failed row against the pinned
+decoder errors. Missing, corrupt or unclassified rows stay in the legacy series.
+An affected Aux point does not gate a clean ASR point for the same update.
 
 Other numeric train/dev measurements are retained under
 `baseline/<train-or-dev>/observed/<original-name>` without claiming loss units.
@@ -145,19 +158,34 @@ Every event also retains its own source file names, SHA-256 hashes, sizes,
 snapshot receipt path, and confirmed update. Later source versions do not erase
 the provenance of previously sent rows.
 
-No conversion from bits to nats, interpolation, missing-value substitution,
-extra validation, or checkpoint-selection changes are made. Loss comparability
-does not imply the Baseline and transfer runs have identical scientific contracts;
-check the recorded datasets, label smoothing, batching, and evaluation conditions.
+The unit conversion uses existing measurements. There is no loss or BLEU
+reevaluation, interpolation, or missing-value substitution.
 
 ## Identity, retries, and duplicate protection
 
-The W&B ID is `baseline-<24 hex digits>` derived from the immutable snapshot
-identity (scientific config, input hashes, original work path), explicit entity,
-project, and mapping version. Copying artifacts to a new local path does not
-create another run. Different experiments get different IDs even with the same
-display name. Existing transfer runs are never searched by display name,
-overwritten, deleted, or merged into the Baseline.
+PR #8 derives the Run ID from the first 24 digits of SHA-256 of the compact
+UTF-8 JSON array `["baseline", baseline_run_key, training_fingerprint]`.
+The key is the original publication directory relative to MyDrive. For a
+relocated copy, supply the original key via `BASELINE_RUN_KEY` (importer) or
+`WANDB_BASELINE_RUN_KEY` (training). Group, destination, and launcher revision
+are independent of the derived ID.
+
+For the existing transfer-repository Baseline, the import notebook discovers its
+published registration under the sibling `stages/register-baseline` directory.
+An explicit `REGISTRATION_SNAPSHOT` can select the exact registration receipt
+when several candidates exist. The reporter checks the small registration archive
+and binds its checkpoint, metadata and recipe hashes to the training receipt.
+New native publications include lineage after checkpoint, metadata and recipe
+verification during the existing checkpoint validation. For a pinned older
+trainer without this evidence, supply a matching verified registration or wait
+for a publication by a compatible run. Restore keeps its existing execution pin.
+
+With an explicit existing Run ID the reporter verifies its condition and lineage
+then appends with `resume="must"`. Pre-review imports can be adopted by exact
+source identity. When adopting such a run, use a new reporter state path if the
+old directory still has a v1 binding. Any old points already in W&B stay in
+history. New deliveries use the corrected metric names. A requested Group must
+match the group returned by W&B before metrics are sent.
 
 A separate state binding prevents accidentally reusing another experiment's
 outbox. The remote run's binding is also checked before writes. A destination that differs from an existing state/run binding,
@@ -188,11 +216,7 @@ read-only artifacts, idempotence with lost local state, failures before/after
 network acceptance, late BLEU/resume, foreign runs/destinations, notebook syntax,
 and reporter failure preserving the trainer outcome. Existing Cell-5 recovery
 tests continue to exercise scientific code/environment/config preservation.
-The affected-path CPU regression suite passed **336 tests**, with **one skip**
-because this Windows host lacks symlink creation privileges. This includes
-**22 new W&B tests**. It is not a claim that GPU/model-inference tests were run.
-
-The pinned W&B SDK was additionally exercised offline with all 4,000 real update
-rows (30,864 numeric/metadata cells). Linux/Colab Python 3.13 binary dependencies
-were resolved; transitive versions are constrained separately. An authenticated
-online delivery and actual Colab execution still require the user's W&B secret.
+Review regression tests also cover the two PR #8 Run ID fixtures, registration
+and checkpoint lineage, Group-independent routing, adoption of an existing run,
+journal classification and durable progress versus the training target.
+Authenticated online delivery and actual Colab execution require a W&B secret.

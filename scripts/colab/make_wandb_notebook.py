@@ -27,6 +27,12 @@ SOURCE = '/content/drive/MyDrive/alignment-transfer-s2ut-data/experiment-001/bas
 STATE = '/content/drive/MyDrive/alignment-transfer-s2ut-data/experiment-001/wandb-baseline' #@param {type:"string"}
 WANDB_ENTITY = '' #@param {type:"string"}
 WANDB_PROJECT = 'alignment-transfer-s2ut' #@param {type:"string"}
+WANDB_GROUP = '' #@param {type:"string"}
+WANDB_EXISTING_RUN_ID = '' #@param {type:"string"}
+BASELINE_RUN_KEY = '' #@param {type:"string"}
+# Empty attempts to discover the published registration for the standard source.
+REGISTRATION_SNAPSHOT = '' #@param {type:"string"}
+AUDIT_FAILURE_JOURNALS = False #@param {type:"boolean"}
 SYNC_TO_WANDB = False #@param {type:"boolean"}
 # Optional full commit SHA. Empty selects main ONCE per local checkout.
 CODE_REVISION = '' #@param {type:"string"}
@@ -89,10 +95,25 @@ elif CODE_REVISION and command(['git', '-C', CODE, 'rev-parse', 'HEAD'], capture
 print('Reporter revision:', command(['git', '-C', CODE, 'rev-parse', 'HEAD'], capture=True).strip())
 HELPER = CODE/'scripts/colab/baseline_wandb.py'
 assert HELPER.is_file(), 'Select a revision containing the Baseline W&B integration'
+
+def evidence_args():
+    args = []
+    registration = REGISTRATION_SNAPSHOT.strip()
+    if not registration:
+        directory = Path(SOURCE).parent/'stages/register-baseline'
+        candidates = list(directory.glob('*/snapshot.json'))
+        if len(candidates) == 1:
+            registration = str(candidates[0])
+    if registration:
+        args += ['--registration', registration]
+    if AUDIT_FAILURE_JOURNALS:
+        args.append('--audit-journals')
+    return args
 ''')
     cell('code', '''#@title 3. Inspect measured, checkpoint-confirmed metrics (no W&B dependency)
-report = json.loads(command([sys.executable, HELPER, 'inspect', '--source', SOURCE], capture=True))
+report = json.loads(command([sys.executable, HELPER, 'inspect', '--source', SOURCE, *evidence_args()], capture=True))
 print('Confirmed optimizer update:', report['durable_update'])
+print('Verified training fingerprint:', report['training_fingerprint'])
 print('Saved summary:', json.dumps(report['summary'], indent=2))
 for metric, count in report['counts'].items():
     print(f'{metric}: {count}')
@@ -102,7 +123,7 @@ print('Source SHA-256:', json.dumps(report['sources'], indent=2))
 if SYNC_TO_WANDB:
     assert WANDB_ENTITY.strip(), 'Set WANDB_ENTITY to the same account/team as the transfer runs'
     assert WANDB_PROJECT.strip(), 'Set the same existing project as the transfer runs'
-    print('Destination:', WANDB_ENTITY.strip()+'/'+WANDB_PROJECT.strip(), 'run: baseline')
+    print('Destination:', WANDB_ENTITY.strip()+'/'+WANDB_PROJECT.strip(), 'group:', WANDB_GROUP.strip(), 'run: baseline')
     import runpy
     settings = runpy.run_path(str(CODE/'scripts/colab/wandb_runtime.py'))['prepare'](CODE)
     if settings is None:
@@ -112,7 +133,9 @@ if SYNC_TO_WANDB:
     env['WANDB_API_KEY'] = settings['key']
     try:
         result = json.loads(command([settings['python'], HELPER, 'sync', '--source', SOURCE,
-            '--state', STATE, '--entity', WANDB_ENTITY.strip(), '--project', WANDB_PROJECT.strip()],
+            '--state', STATE, '--entity', WANDB_ENTITY.strip(), '--project', WANDB_PROJECT.strip(),
+            '--group', WANDB_GROUP.strip(), '--existing-run-id', WANDB_EXISTING_RUN_ID.strip(),
+            '--baseline-run-key', BASELINE_RUN_KEY, *evidence_args()],
             env=env, capture=True))
         print(json.dumps(result, indent=2))
         print('W&B:', f"https://forge.coreweave.com/wandb/{result['entity']}/{result['project']}/runs/{result['run_id']}")
