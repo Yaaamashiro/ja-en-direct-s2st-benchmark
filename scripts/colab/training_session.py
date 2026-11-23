@@ -99,7 +99,8 @@ def checkout(repo, revision, run):
 
 @operation('cell 5: restore and continue selected training')
 def launch(repo, persistent, data, kind, default_name, model_size, options, total, seconds,
-           *, requested='', confirm=False, run=None):
+           *, requested='', confirm=False, run=None, wandb_python='', wandb_entity='',
+           wandb_project='alignment-transfer-s2ut', wandb_key=None):
     repo, persistent, data = Path(repo), Path(persistent), Path(data)
     if total < 1 or seconds < 0 or (total > 10 and not confirm):
         raise ValueError('long training requires CONFIRM_TRAINING=True')
@@ -267,7 +268,13 @@ def launch(repo, persistent, data, kind, default_name, model_size, options, tota
                '--resume' if snapshot else '--auto-resume']
     if confirm:
         command.append('--confirm-training')
-    run(*command)
+    if wandb_python and kind == 's2ut':
+        from wandb_runtime import reporter
+        with reporter(ROOT, backup, persistent/'wandb-baseline'/name,
+                      wandb_python, wandb_entity, wandb_project, key=wandb_key):
+            run(*command)
+    else:
+        run(*command)
     return name
 
 
@@ -283,7 +290,11 @@ def main():
     parser.add_argument('--total-updates', type=int, default=2)
     parser.add_argument('--session-seconds', type=float, default=0)
     parser.add_argument('--confirm-training', action='store_true')
+    parser.add_argument('--wandb-python', default='')
+    parser.add_argument('--wandb-entity', default='')
+    parser.add_argument('--wandb-project', default='alignment-transfer-s2ut')
     args = parser.parse_args()
+    wandb_key = os.environ.pop('S2ST_WANDB_API_KEY', None)
     log = args.persistent/(args.kind+'-session.log')
     def run(*command):
         print('実行:', *map(str, command), flush=True)
@@ -303,7 +314,9 @@ def main():
             raise RuntimeError(f'command failed ({status}); saved checkpoints retained. See {log}')
     launch(args.repo, args.persistent, args.data, args.kind, args.default_name, args.model_size,
            json.loads(args.options), args.total_updates, args.session_seconds,
-           requested=args.run_name, confirm=args.confirm_training, run=run)
+           requested=args.run_name, confirm=args.confirm_training, run=run,
+           wandb_python=args.wandb_python, wandb_entity=args.wandb_entity,
+           wandb_project=args.wandb_project, wandb_key=wandb_key)
 
 
 if __name__ == '__main__':

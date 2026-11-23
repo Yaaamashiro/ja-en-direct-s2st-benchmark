@@ -1,3 +1,4 @@
+from notebook_baseline_wandb import without_wandb
 import ast
 import copy
 import json
@@ -269,8 +270,8 @@ def test_cli_help_is_stdlib_only_and_old_notebook_code_cells_are_identical():
         'show','901ec4b15c4fab4ffbfee1a6efee35626bc00940:notebooks/colab_training.ipynb'],encoding='utf-8'))
     added=[c for c in notebook['cells'] if ''.join(c['source']).startswith('#@title 8F.')]
     assert len(added) == 1
-    assert [c for c in notebook['cells'] if c['cell_type'] == 'code' and c not in added] == [
-        c for c in original['cells'] if c['cell_type'] == 'code'
+    assert [without_wandb(c) for c in notebook['cells'] if c['cell_type'] == 'code' and c not in added] == [
+        without_wandb(c) for c in original['cells'] if c['cell_type'] == 'code'
     ]
     i=notebook['cells'].index(added[0]);assert ''.join(notebook['cells'][i-1]['source']).startswith('#@title 8E.')
     assert ''.join(notebook['cells'][i+1]['source']).startswith('#@title 9.')

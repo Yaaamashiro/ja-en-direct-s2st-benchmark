@@ -549,3 +549,13 @@ Restore an existing 8F plan's code SHA and Natural 8E identity. Even after displ
 Compare input WAV SHA with formal 8C results and generation records. Check all IDs, Japanese text, and English references against 8E. Missing data, mismatches, or a different checkpoint stop. The scientific settings are the same except for source WAVs. Some shared function logs show 8E. The plan and output belong to 8F.
 
 Store `report.md`, `metrics.json`, `per_sample.csv/jsonl`, and WAV ZIPs under `diagnostics/flores-fleurs-s2ut-synthetic/<identity>/`. Display Natural and Synthetic Cascade and S2UT BLEU, S2UT Synthetic − Natural and its ratio, and Cascade Synthetic − Natural. Include original KFTT/JESC test values only when saved formal artifacts verify. The report leaves causal interpretation to the reader. See the [8F guide](S2UT_SYNTHETIC_FLORES_FLEURS_DIAGNOSTIC.md).
+
+## Optional Baseline W&B reporting
+
+For S2UT, Cell 1's `BASELINE_WANDB` enables an independent CPU reporter alongside
+normal Cell 5. Set `WANDB_ENTITY` to the transfer runs' account/team and add the
+`WANDB_API_KEY` Colab secret. The default is off. It reuses published measurements
+without changing training/evaluation or stopping training on W&B failures.
+Completed Baselines can instead use the CPU-only
+[`baseline_wandb_import.ipynb`](../notebooks/baseline_wandb_import.ipynb).
+See [W&B reporting](WANDB.md) for read-only import, metric definitions, and retries.
