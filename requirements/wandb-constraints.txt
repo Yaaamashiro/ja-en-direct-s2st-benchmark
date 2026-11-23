@@ -22,7 +22,8 @@ opentelemetry-proto==1.45.2
 opentelemetry-sdk==1.45.2
 opentelemetry-semantic-conventions==0.66b2
 packaging==26.3
-platformdirs==4.14.8
+# 4.14.8 requires Python >=3.11; preserve the reporter's Python 3.10 support.
+platformdirs==4.12.4
 protobuf==7.36.2
 pydantic-core==2.50.5
 pydantic==2.14.4
