@@ -42,8 +42,8 @@ from google.colab import drive
 drive.mount('/content/drive')
 import json, os, re, subprocess, sys, threading, time
 from pathlib import Path
-CODE = Path('/content/s2st-baseline-wandb-code')
 assert not CODE_REVISION or re.fullmatch('[0-9a-f]{40}', CODE_REVISION), 'Use an immutable full code SHA'
+CODE = Path('/content/s2st-baseline-wandb-code-v2') / (CODE_REVISION or 'main')
 
 def command(args, *, env=None, capture=False):
     # Local logs only. Do not append to the original Baseline session log.
@@ -87,6 +87,7 @@ def command(args, *, env=None, capture=False):
     return out
 
 if not CODE.exists():
+    CODE.parent.mkdir(parents=True, exist_ok=True)
     command(['git', 'clone', '--no-checkout', 'https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark.git', CODE])
     command(['git', '-C', CODE, 'fetch', 'origin', CODE_REVISION or 'main'])
     command(['git', '-C', CODE, 'checkout', '--detach', 'FETCH_HEAD'])
@@ -125,9 +126,7 @@ if SYNC_TO_WANDB:
     assert WANDB_PROJECT.strip(), 'Set the same existing project as the transfer runs'
     print('Destination:', WANDB_ENTITY.strip()+'/'+WANDB_PROJECT.strip(), 'group:', WANDB_GROUP.strip(), 'run: baseline')
     import runpy
-    settings = runpy.run_path(str(CODE/'scripts/colab/wandb_runtime.py'))['prepare'](CODE)
-    if settings is None:
-        raise RuntimeError('Reporter dependency/auth setup failed. Source data were not modified.')
+    settings = runpy.run_path(str(CODE/'scripts/colab/wandb_runtime.py'))['prepare'](CODE, required=True)
     env = os.environ.copy()
     env.pop('PYTHONPATH', None)
     env['WANDB_API_KEY'] = settings['key']

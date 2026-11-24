@@ -270,6 +270,49 @@ def test_reporter_failure_preserves_training_exit(tmp_path, monkeypatch):
             raise RuntimeError('original trainer error')
 
 
+def test_cpu_reporter_recovers_from_partial_install_and_reuses_verified_environment(tmp_path, monkeypatch, capsys):
+    import runpy
+    from types import SimpleNamespace
+    repo = Path(__file__).resolve().parents[2]
+    runtime = runpy.run_path(str(repo/'scripts/colab/wandb_runtime.py'))
+    monkeypatch.setenv('WANDB_API_KEY', 'test-key')
+    monkeypatch.setenv('PYTHONPATH', 'unrelated-training-code')
+    monkeypatch.setenv('PIP_EXTRA_INDEX_URL', 'https://example.invalid')
+    calls = []
+    failed_once = False
+
+    def subprocess_run(command, *, env, **kwargs):
+        nonlocal failed_once
+        assert 'WANDB_API_KEY' not in env and 'PYTHONPATH' not in env
+        assert 'PIP_EXTRA_INDEX_URL' not in env
+        calls.append(command)
+        if 'venv' in command:
+            assert '--without-pip' in command
+        if 'install' in command:
+            assert '--python' in command
+            if not failed_once:
+                failed_once = True
+                return SimpleNamespace(returncode=1, stdout='', stderr='No matching distribution at https://secret@example.invalid/')
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runtime['subprocess'], 'run', subprocess_run)
+    prepare = runtime['prepare']
+    with pytest.raises(RuntimeError, match='Install pinned W&B wheels failed') as failure:
+        prepare(repo, root=tmp_path, required=True)
+    assert 'No matching distribution' in str(failure.value)
+    assert 'secret@example' not in str(failure.value)
+    assert not list(tmp_path.rglob('.ready'))
+
+    result = prepare(repo, root=tmp_path, required=True)
+    assert result['key'] == 'test-key'
+    assert len(list(tmp_path.rglob('.ready'))) == 1
+    assert len([call for call in calls if 'install' in call]) == 2
+    assert len({call[-1] for call in calls if 'venv' in call}) == 2
+    assert prepare(repo, root=tmp_path, required=True) == result
+    assert len([call for call in calls if 'install' in call]) == 2
+    assert 'test-key' not in capsys.readouterr().err
+
+
 def test_copied_sources_have_the_same_identity_and_no_new_history(tmp_path):
     import shutil
     root, server = source(tmp_path), Server()

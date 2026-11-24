@@ -106,10 +106,11 @@ The helper deliberately supports only S2UT Baseline reporting. It does not turn
 W&B on for TT2/vocoders, and does not change the other repository's training
 workflow. That repository's completed Baseline can use the independent importer.
 
-For a manual CPU retry against a future run's published backup:
+For a manual CPU retry against a future run's published backup, use the
+interpreter path printed as `[baseline-wandb] CPU Python:`:
 
 ```sh
-/content/s2st-wandb-runtime/bin/python scripts/colab/baseline_wandb.py sync \
+"$REPORTER_PYTHON" scripts/colab/baseline_wandb.py sync \
   --source "$PERSISTENT/checkpoints/$RUN_NAME" \
   --state "$PERSISTENT/wandb-baseline/$RUN_NAME" \
   --entity YOUR_EXISTING_ENTITY
