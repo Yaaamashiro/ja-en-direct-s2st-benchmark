@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import tempfile
 from zipfile import BadZipFile
+from . import baseline_wandb_v3 as v3
 
 from .progress import operation
 from .baseline_wandb_evidence import (PublishedFiles, baseline_wandb_run_id, publication_key,
@@ -216,21 +217,40 @@ def _receipt(source, blobs, snapshot):
 
 
 @operation('baseline W&B: read confirmed measured reports')
-def collect(source, *, snapshot=None, registration=None, audit_journals=False):
+def collect(source, *, snapshot=None, registration=None, audit_journals=False, metric_schema=2,
+            baseline_run_key=''):
     source = Path(source)
     blobs = _read_reports(source)
     receipt, receipt_path, blobs = _receipt(source, blobs, snapshot)
     fingerprint = snapshot_fingerprint(receipt)
-    if registration and fingerprint is None:
+    if metric_schema == 3 and not registration:
+        raise ValueError('Schema v3 requires the published Baseline registration receipt')
+    if registration and (fingerprint is None or metric_schema == 3):
         registered = registered_fingerprint(registration, receipt)
+        if fingerprint is not None and fingerprint != registered:
+            raise ValueError('registered Baseline and snapshot fingerprints differ')
         fingerprint = registered
     with PublishedFiles(receipt_path, receipt) as files:
-        result = _measurements(blobs, receipt, receipt_path, files if audit_journals else None)
+        result = _measurements(blobs, receipt, receipt_path, files if audit_journals else None,
+                               audit_updates=v3.BLEU_UPDATES if metric_schema == 3 else None)
     result['training_fingerprint'] = fingerprint
+    if metric_schema == 3:
+        # These member hashes are bound by the published receipt and registration.
+        result['lineage'] = {name: receipt['files'][name] for name in (
+            'checkpoints/checkpoint_last.pt', 'checkpoints/checkpoint_best.pt',
+            'research-metadata.json', 's2ut-recipe-lock.json')}
+        key = publication_key(baseline_run_key or source.as_posix())
+        result['schema_identity'] = v3.identity(result, key)
+        result['rows'] = v3.measurements(result)
+        result['summary'] = dict(v3.SUMMARY)
+        result['counts'], result['coverage'] = metric_coverage(
+            (int(update), values) for update, values in result['rows'].items())
+    elif metric_schema != 2:
+        raise ValueError('metric_schema must be 2 or 3')
     return result
 
 
-def _measurements(blobs, receipt, receipt_path, journals):
+def _measurements(blobs, receipt, receipt_path, journals, *, audit_updates=None):
     durable = update_number(receipt['updates'])
     rows, summary, conditions = {}, {}, {}
 
@@ -285,7 +305,9 @@ def _measurements(blobs, receipt, receipt_path, journals):
                 # An actual score (including 0.0) is evidence of a measurement.
                 if item.get(mode + '_bleu') is None:
                     continue
-                eligibility = verify_bleu(item, mode, journals if update <= durable else None)
+                journal = (journals if update <= durable and (audit_updates is None or update in audit_updates)
+                           else None)
+                eligibility = verify_bleu(item, mode, journal)
                 suffix = '' if eligibility == 'comparable' else '_'+eligibility
                 previous = measured.setdefault(update, {}).setdefault(mode, suffix)
                 if previous != suffix:
@@ -341,19 +363,23 @@ def _measurements(blobs, receipt, receipt_path, journals):
         summary['train/target_update'] = update_number(maximum)
     summary['train/max_update'] = durable
     summary['train/durable_update'] = durable
-    coverage = {}
-    for update, values in sorted(rows.items()):
-        for key in values:
-            span = coverage.setdefault(key, dict(count=0, first_update=update, last_update=update))
-            span['count'] += 1
-            span['last_update'] = update
-    counts = {key: span['count'] for key, span in sorted(coverage.items())}
+    counts, coverage = metric_coverage(rows.items())
     return dict(version=VERSION, identity=receipt['identity'], durable_update=durable,
                 rows={str(k): v for k, v in sorted(rows.items()) if v}, summary=summary,
                 conditions=conditions, counts=counts, coverage=coverage,
                 sources={name: dict(sha256=hashlib.sha256(payload).hexdigest(), bytes=len(payload))
                          for name, payload in blobs.items()}, receipt=str(receipt_path),
                 best_checkpoint_sha256=(monitor or {}).get('best_sha256'))
+
+
+def metric_coverage(rows):
+    coverage = {}
+    for update, values in sorted(rows):
+        for key in values:
+            span = coverage.setdefault(key, dict(count=0, first_update=update, last_update=update))
+            span['count'] += 1
+            span['last_update'] = update
+    return {key: span['count'] for key, span in sorted(coverage.items())}, coverage
 
 
 def binding(bundle, entity, project=PROJECT, *, key, adopted_run_id=''):
@@ -367,16 +393,23 @@ def binding(bundle, entity, project=PROJECT, *, key, adopted_run_id=''):
     derived = baseline_wandb_run_id(key, fingerprint)
     if adopted_run_id and not re.fullmatch(r'[A-Za-z0-9_-]+', adopted_run_id):
         raise ValueError('invalid existing W&B Run ID')
-    return dict(version=VERSION, api_base=API_BASE, entity=entity, project=project, condition='baseline',
-                baseline_run_key=key, training_fingerprint=fingerprint,
-                run_id=adopted_run_id or derived, adopted=bool(adopted_run_id))
+    contract = dict(version=VERSION, api_base=API_BASE, entity=entity, project=project, condition='baseline',
+                    baseline_run_key=key, training_fingerprint=fingerprint,
+                    run_id=adopted_run_id or derived, adopted=bool(adopted_run_id))
+    if bundle.get('schema_identity'):
+        if project != v3.PROJECT or entity != v3.ENTITY or adopted_run_id:
+            raise ValueError('invalid Schema v3 destination or Run ID override')
+        contract.update(v3.identity(bundle, key))
+    elif project == v3.PROJECT:
+        raise ValueError('the Schema v3 project rejects legacy Baseline writes')
+    return contract
 
 
 def run_id(contract):
     return contract['run_id']
 
 
-def plan(bundle, remote_rows, *, adopted=False, eligible=None):
+def plan(bundle, remote_rows, *, adopted=False, eligible=None, check_duplicates=True):
     """Plan only missing metric cells. An existing cell may never be replaced."""
     observed, events, last = {}, set(), -1
     for item in remote_rows:
@@ -402,8 +435,14 @@ def plan(bundle, remote_rows, *, adopted=False, eligible=None):
                      provenance=json.loads(item['baseline/provenance']))
         if digest(event) != item['baseline/event_id']:
             raise ValueError('remote baseline event content differs')
+        recorded = observed.setdefault(str(update), {})
+        if bundle.get('schema_identity'):
+            if event['values'].keys() - bundle['rows'].get(str(update), {}).keys():
+                raise ValueError('remote metric has no matching Schema v3 source measurement')
+            if check_duplicates and event['values'].keys() & recorded.keys():
+                raise ValueError(f'duplicate Schema v3 history at update {update}')
         for key, value in event['values'].items():
-            merge(observed.setdefault(str(update), {}), key, value)
+            merge(recorded, key, value)
         events.add(item['baseline/event_id'])
     pending = []
     for update, values in bundle['rows'].items():

@@ -1,5 +1,9 @@
 # S2UT Baseline reporting to Weights & Biases
 
+For the registered 400k Baseline and the new comparison project, see
+[Metric Schema v3](WANDB_METRIC_SCHEMA_V3.md) for the shared definitions and
+CPU import procedure. The instructions below cover legacy Schema v1/v2 runs.
+
 The optional CPU reporter sends **existing measurements**, not new evaluations,
 to the explicitly selected existing W&B project used by the transfer runs. Its run
 display name is `baseline`; every chart uses the custom `update` axis. It does
