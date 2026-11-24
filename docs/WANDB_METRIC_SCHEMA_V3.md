@@ -106,6 +106,17 @@ points had zero failures. The 400 historical Aux observations had unclassified
 failures in the available evidence. V3 omits them. If exact matching journals
 are available, enable the optional audit to qualify individual milestones.
 
+For the registered 400k Baseline, each Train metric must have measurements at
+exactly `100, 200, …, 400000`, and each Dev metric at exactly
+`1000, 2000, …, 400000`. Each of the eight ASR milestones must have the
+qualified score, failure count and sample count. The importer compares each
+metric's actual update set with this fixed schedule. An equal point count
+with a shifted update fails validation. Invalid required values and
+missing or unexpected coordinates are reported with the metric and update.
+Cell 3, both history audits and sync validate the source first, so an
+incomplete source cannot produce `VERIFIED` or open a W&B writer. Aux-BLEU
+is optional and contributes only complete, qualified triplets.
+
 Section [Audit of the 400k Baseline history](WANDB.md#audit-of-the-400k-baseline-history)
 records the prior search for native Fairseq logs and snapshot evidence. The
 receipts and archived snapshot rules do not preserve the complete native

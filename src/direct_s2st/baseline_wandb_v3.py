@@ -13,6 +13,8 @@ BASELINE_KEY = 'alignment-transfer-s2ut-data/experiment-001/baseline'
 FINGERPRINT = 'fe8b63b2f57c5c15f24f03ae9af4ec083ccb1eff6f1c897ac707b83e40b69e24'
 FAIRSEQ_REVISION = '3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99'
 MAX_UPDATE = 400000
+TRAIN_UPDATES = frozenset(range(100, MAX_UPDATE + 1, 100))
+DEV_UPDATES = frozenset(range(1000, MAX_UPDATE + 1, 1000))
 BLEU_UPDATES = frozenset((1000, 5000, 10000, 25000, 50000, 100000, 200000, 400000))
 AUX = ('source_letter', 'target_letter', 'decoder_target_ctc')
 TRAIN_LOSSES = {
@@ -26,8 +28,18 @@ DEV_LOSSES = {
     'dev/total_loss': 'baseline/dev/loss_bits',
     **{f'dev/aux/{key}_loss': f'baseline/dev/{key}_bits' for key in AUX},
 }
-BLEU_METRICS = tuple(f'eval/{mode}_{stat}' for mode in ('aux', 'asr')
-                     for stat in ('bleu', 'failures', 'samples'))
+BLEU_FIELDS = ('bleu', 'failures', 'samples')
+ASR_METRICS = tuple(f'eval/asr_{field}' for field in BLEU_FIELDS)
+AUX_BLEU_METRICS = tuple(f'eval/aux_{field}' for field in BLEU_FIELDS)
+REQUIRED_UPDATES = {
+    **dict.fromkeys((*TRAIN_LOSSES, 'train/learning_rate'), TRAIN_UPDATES),
+    **dict.fromkeys(DEV_LOSSES, DEV_UPDATES),
+    **dict.fromkeys(ASR_METRICS, BLEU_UPDATES),
+}
+SOURCE_METRIC_NAMES = {
+    source: ', '.join(key for key, legacy in mapping.items() if legacy == source)
+    for mapping in (TRAIN_LOSSES, DEV_LOSSES) for source in set(mapping.values())
+}
 SUMMARY = {f'train/{key}_update': MAX_UPDATE for key in ('target', 'max', 'durable')}
 
 
@@ -70,18 +82,42 @@ def measurements(bundle):
     """Convert only normalized losses and already qualified BLEU measurements."""
     rows = {}
     for coordinate, values in bundle['rows'].items():
-        update = int(coordinate)
-        result = {}
-        if update > 0 and update % 100 == 0:
-            result.update({key: values[source] * math.log(2) for key, source in TRAIN_LOSSES.items()
-                           if source in values})
-            if 'train/learning_rate' in values:
-                result['train/learning_rate'] = values['train/learning_rate']
-        if update > 0 and update % 1000 == 0:
-            result.update({key: values[source] * math.log(2) for key, source in DEV_LOSSES.items()
-                           if source in values})
-        if update in BLEU_UPDATES:
-            result.update({key: values[key] for key in BLEU_METRICS if key in values})
+        result = {key: values[source] * math.log(2)
+                  for mapping in (TRAIN_LOSSES, DEV_LOSSES) for key, source in mapping.items()
+                  if source in values}
+        result.update({key: values[key] for key in ('train/learning_rate', *ASR_METRICS) if key in values})
+        if int(coordinate) in BLEU_UPDATES and all(key in values for key in AUX_BLEU_METRICS):
+            result.update({key: values[key] for key in AUX_BLEU_METRICS})
         if result:
             rows[coordinate] = result
     return rows
+
+
+def _format_updates(updates, stride=1):
+    spans = []
+    for update in sorted(updates):
+        if spans and update == spans[-1][1] + stride:
+            spans[-1][1] = update
+        else:
+            spans.append([update, update])
+    return ', '.join(str(start) if start == end else f'{start}–{end} (every {stride})'
+                     for start, end in spans)
+
+
+def validate_completeness(rows):
+    """Require the exact coordinates of the registered 400k publication."""
+    observed = {metric: set() for metric in REQUIRED_UPDATES}
+    for coordinate, values in rows.items():
+        for metric in values.keys() & REQUIRED_UPDATES.keys():
+            observed[metric].add(int(coordinate))
+    errors = []
+    for metric, expected in REQUIRED_UPDATES.items():
+        missing = expected - observed[metric]
+        unexpected = observed[metric] - expected
+        if missing:
+            stride = min(expected) if metric.startswith(('train/', 'dev/')) else 1
+            errors.append(f'{metric} missing updates: {_format_updates(missing, stride)}')
+        if unexpected:
+            errors.append(f'{metric} unexpected updates: {_format_updates(unexpected)}')
+    if errors:
+        raise ValueError('Incomplete Schema v3 Baseline measurements: ' + '; '.join(errors))

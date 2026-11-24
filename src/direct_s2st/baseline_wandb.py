@@ -232,7 +232,7 @@ def collect(source, *, snapshot=None, registration=None, audit_journals=False, m
         fingerprint = registered
     with PublishedFiles(receipt_path, receipt) as files:
         result = _measurements(blobs, receipt, receipt_path, files if audit_journals else None,
-                               audit_updates=v3.BLEU_UPDATES if metric_schema == 3 else None)
+                               schema_v3=metric_schema == 3)
     result['training_fingerprint'] = fingerprint
     if metric_schema == 3:
         # These member hashes are bound by the published receipt and registration.
@@ -242,6 +242,7 @@ def collect(source, *, snapshot=None, registration=None, audit_journals=False, m
         key = publication_key(baseline_run_key or source.as_posix())
         result['schema_identity'] = v3.identity(result, key)
         result['rows'] = v3.measurements(result)
+        v3.validate_completeness(result['rows'])
         result['summary'] = dict(v3.SUMMARY)
         result['counts'], result['coverage'] = metric_coverage(
             (int(update), values) for update, values in result['rows'].items())
@@ -250,24 +251,54 @@ def collect(source, *, snapshot=None, registration=None, audit_journals=False, m
     return result
 
 
-def _measurements(blobs, receipt, receipt_path, journals, *, audit_updates=None):
+def _measurements(blobs, receipt, receipt_path, journals, *, schema_v3=False):
     durable = update_number(receipt['updates'])
     rows, summary, conditions = {}, {}, {}
 
+    def at_update(metric, update, read, *args):
+        try:
+            return read(*args)
+        except (ValueError, TypeError, OverflowError) as error:
+            if not schema_v3:
+                raise
+            raise ValueError(f'Schema v3 {metric} at update {update!r}: {error}') from error
+
     def row(update):
-        update = update_number(update)
-        return rows.setdefault(update, {}) if update <= durable else {}
+        # Retain suspect coordinates so v3 can reject them explicitly.
+        return rows.setdefault(update, {}) if schema_v3 or update <= durable else {}
+
+    def monitor_metric(split, key):
+        return v3.SOURCE_METRIC_NAMES.get(metric_name(split, key), f'{split}/{key}')
+
+    def monitor_row(item, losses):
+        coordinate = item.get('update')
+        rate = item.get('learning_rate')
+        try:
+            update = update_number(coordinate)
+        except (ValueError, TypeError, OverflowError) as error:
+            if not schema_v3:
+                raise
+            metrics = [monitor_metric(split, key) for split, key, value in losses if value not in (None, '')]
+            if rate not in (None, ''):
+                metrics.append('train/learning_rate')
+            label = ', '.join(metrics) or 'train/dev monitor metrics'
+            raise ValueError(f'Schema v3 {label} at update {coordinate!r}: {error}') from error
+        target = row(update)
+        for split, key, value in losses:
+            name = monitor_metric(split, key) if schema_v3 else key
+            at_update(name, update, record_loss, target, split, key, value)
+        at_update('train/learning_rate', update, record_learning_rate, target, rate)
+
+    def bleu_number(item, update, mode, key):
+        return at_update(f'eval/{mode}_{key}', update, number, item.get(f'{mode}_{key}'))
 
     monitor = json.loads(blobs['training-monitor.json']) if 'training-monitor.json' in blobs else None
     if monitor:
         if monitor.get('metric') != 'teacher_forced_dev_unit_loss':
             raise ValueError('unrecognized S2UT loss definition')
         for item in monitor.get('history', []):
-            target = row(item['update'])
-            for split in ('train', 'dev'):
-                for key, value in (item.get(split) or {}).items():
-                    record_loss(target, split, key, value)
-            record_learning_rate(target, item.get('learning_rate'))
+            monitor_row(item, ((split, key, value) for split in ('train', 'dev')
+                               for key, value in (item.get(split) or {}).items()))
         if update_number(monitor['update']) <= durable:
             for key in ('best_value', 'best_update', 'best_sha256', 'metric',
                         'best_total_value', 'best_total_update', 'stopped', 'early_stopping'):
@@ -286,26 +317,31 @@ def _measurements(blobs, receipt, receipt_path, journals, *, audit_updates=None)
 
     if 'training-monitor.csv' in blobs:
         for item in csv.DictReader(io.StringIO(blobs['training-monitor.csv'].decode('utf-8-sig'))):
-            target = row(item['update'])
-            for key, value in item.items():
-                if key.startswith(('train_', 'dev_')):
-                    split, name = key.split('_', 1)
-                    record_loss(target, split, name, value)
-            record_learning_rate(target, item.get('learning_rate'))
+            monitor_row(item, ((*key.split('_', 1), value) for key, value in item.items()
+                               if key.startswith(('train_', 'dev_'))))
 
     measured = {}
     if 'training-bleu.json' in blobs:
         bleu = json.loads(blobs['training-bleu.json'])
         conditions['bleu_purpose'] = bleu.get('purpose')
         for item in bleu.get('results', []):
-            update = update_number(item['update'])
+            update = at_update('eval/asr_bleu, eval/aux_bleu', item.get('update'), update_number, item.get('update'))
             target = row(update)
             for mode in ('aux', 'asr'):
+                if schema_v3 and mode == 'asr' and (
+                    item.get('asr_bleu') is not None
+                    or any(item.get(f'asr_{key}') not in (None, 0) for key in ('samples', 'failures'))
+                ):
+                    if update not in v3.BLEU_UPDATES:
+                        raise ValueError(f'Schema v3 eval/asr_bleu at unexpected update {update}')
+                    for key in v3.BLEU_FIELDS:
+                        if bleu_number(item, update, mode, key) is None:
+                            raise ValueError(f'Schema v3 eval/asr_{key} missing at update {update}')
                 # Unscheduled ASR rows contain synthetic samples=0/failures=0.
                 # An actual score (including 0.0) is evidence of a measurement.
                 if item.get(mode + '_bleu') is None:
                     continue
-                journal = (journals if update <= durable and (audit_updates is None or update in audit_updates)
+                journal = (journals if update <= durable and (not schema_v3 or update in v3.BLEU_UPDATES)
                            else None)
                 eligibility = verify_bleu(item, mode, journal)
                 suffix = '' if eligibility == 'comparable' else '_'+eligibility
@@ -313,11 +349,12 @@ def _measurements(blobs, receipt, receipt_path, journals, *, audit_updates=None)
                 if previous != suffix:
                     raise ValueError('duplicate BLEU records disagree about eligibility')
                 for key in ('bleu', 'samples', 'failures'):
-                    merge(target, f'eval/{mode}_{key}{suffix}', number(item.get(mode + '_' + key)))
+                    merge(target, f'eval/{mode}_{key}{suffix}', bleu_number(item, update, mode, key))
                 scoring = item.get(mode + '_scoring') or {}
                 for key, value in scoring.items():
                     if key in ('bleu', 'samples', 'failures'):
-                        merge(target, f'eval/{mode}_{key}{suffix}', number(value))
+                        checked = at_update(f'eval/{mode}_{key} scoring', update, number, value)
+                        merge(target, f'eval/{mode}_{key}{suffix}', checked)
                     if isinstance(value, (float, int)) and not isinstance(value, bool):
                         merge(target, f'baseline/eval/{mode}_scoring/{key}', number(value))
                     elif key in ('signature', 'normalization') and value is not None:
@@ -341,19 +378,23 @@ def _measurements(blobs, receipt, receipt_path, journals, *, audit_updates=None)
 
     if 'training-bleu.csv' in blobs:
         for item in csv.DictReader(io.StringIO(blobs['training-bleu.csv'].decode('utf-8-sig'))):
-            update = update_number(item['update'])
+            update = at_update('eval/asr_bleu, eval/aux_bleu', item.get('update'), update_number, item.get('update'))
             target = row(update)
             for mode in ('aux', 'asr'):
-                if number(item.get(mode + '_bleu')) is None:
+                if bleu_number(item, update, mode, 'bleu') is None:
                     continue
+                if schema_v3 and mode == 'asr' and update not in v3.BLEU_UPDATES:
+                    raise ValueError(f'Schema v3 eval/asr_bleu at unexpected update {update}')
                 if 'training-bleu.json' in blobs and mode not in measured.get(update, set()):
+                    if schema_v3:
+                        raise ValueError(f'Schema v3 eval/{mode}_bleu at update {update}: CSV/JSON disagree')
                     raise ValueError('CSV/JSON disagree about measured BLEU')
                 suffix = measured.get(update, {}).get(mode)
                 if suffix is None:
                     # CSV alone cannot establish the scoring protocol or classify failures.
                     suffix = '_legacy_unclassified' if number(item.get(mode+'_failures')) != 0 else '_unmatched'
                 for key in ('bleu', 'samples', 'failures'):
-                    merge(target, f'eval/{mode}_{key}{suffix}', number(item.get(mode + '_' + key)))
+                    merge(target, f'eval/{mode}_{key}{suffix}', bleu_number(item, update, mode, key))
             if item.get('status'):
                 merge(target, 'baseline/eval/status', item['status'])
 
