@@ -1,0 +1,23 @@
+{
+  "metric_schema": 3,
+  "label_smoothing": 0.2,
+  "weights": {"source_letter": 8, "target_letter": 8, "decoder_target_ctc": 1.6},
+  "microbatches": [
+    {
+      "main_sum": 5, "main_count": 2, "nll_sum": 1,
+      "aux_sum": {"source_letter": 12, "target_letter": 10, "decoder_target_ctc": 16},
+      "aux_count": {"source_letter": 3, "target_letter": 5, "decoder_target_ctc": 4}
+    },
+    {
+      "main_sum": 12, "main_count": 8, "nll_sum": 4,
+      "aux_sum": {"source_letter": 21, "target_letter": 4, "decoder_target_ctc": 18},
+      "aux_count": {"source_letter": 7, "target_letter": 1, "decoder_target_ctc": 9}
+    }
+  ],
+  "expected_nats": {
+    "main_loss": 1.7, "task_loss": 44.74, "total_loss": 44.74,
+    "aux/source_letter_loss": 3.3, "aux/target_letter_loss": 2.3333333333333335,
+    "aux/decoder_target_ctc_loss": 2.6153846153846154
+  },
+  "expected_nll_nats": 0.5
+}

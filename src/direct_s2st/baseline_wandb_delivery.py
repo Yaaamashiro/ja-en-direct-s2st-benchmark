@@ -3,8 +3,11 @@ import json
 from pathlib import Path
 import re
 import sys
+from tempfile import TemporaryDirectory
 import time
+from collections import Counter
 
+from . import baseline_wandb_v3 as v3
 from .baseline_wandb import (API_BASE, PROJECT, SCHEMA_V2_METRICS, atomic, binding, canonical, collect,
                              digest, plan, run_id)
 from .progress import operation
@@ -46,6 +49,8 @@ class WandbRemote:
 
     def _matches(self, config):
         saved = config.get('baseline_contract') or {}
+        if self.contract.get('metric_schema') == 3:
+            return saved == self.contract and config.get('metric_schema') == 3
         identity = ('baseline_run_key', 'training_fingerprint')
         return (saved == self.contract
                 or (self.contract['adopted'] and config.get('condition', saved.get('condition')) == 'baseline'
@@ -78,12 +83,21 @@ class WandbRemote:
             raise
         if not self._matches(remote.config):
             raise ValueError('W&B run identity/destination differs; refusing to write')
-        require_idle = self.contract['adopted'] or (getattr(self, 'require_existing', False) and not self.existing)
+        require_idle = (self.contract['adopted'] or ((getattr(self, 'require_existing', False)
+                        or getattr(self, 'require_idle', False))
+                        and not self.existing and not getattr(self, 'started_writer', False)))
         if require_idle and remote.state not in {'finished', 'failed', 'crashed', 'killed'}:
             raise ValueError('selected existing W&B run is active; use one writer')
         self.existing = True
         group = getattr(self, 'group', '')
         self.needs_group_update = bool(group and getattr(remote, 'group', None) != group)
+        if self.contract.get('metric_schema') == 3 and self.needs_group_update:
+            raise ValueError('existing Schema v3 Run has the wrong group')
+        if self.contract.get('metric_schema') == 3:
+            self.remote_summary = {key: remote.summary.get(key) for key in v3.SUMMARY}
+            if any(value is not None and (type(value) not in (float, int) or not 0 <= value <= v3.MAX_UPDATE)
+                   for value in self.remote_summary.values()):
+                raise ValueError('existing Schema v3 Run has invalid optimizer progress')
         # The initial PR used the planned budget as max_update. Only its
         # separately recorded durable watermark counts as verified progress.
         progress_key = ('train/durable_update' if self._matches_pre_review_import(remote.config)
@@ -96,19 +110,23 @@ class WandbRemote:
         if getattr(self, 'group', ''):
             options['group'] = self.group
         existing = getattr(self, 'existing', False) or self.contract['adopted']
+        config = {'condition': 'baseline', 'baseline_contract': self.contract,
+                  'baseline_run_key': self.contract['baseline_run_key'],
+                  'training_fingerprint': self.contract['training_fingerprint'],
+                  'source_identity': bundle['identity'], 'loss_mapping_version': 2}
+        if self.contract.get('metric_schema') == 3:
+            config.update(metric_schema=3, loss_mapping_version=3, baseline_origin=self.contract['origin'],
+                          baseline_snapshot_lineage=self.contract['lineage'])
         run = self.wandb.init(
             entity=self.contract['entity'], project=self.contract['project'],
             id=run_id(self.contract), name='baseline', resume='must' if existing else 'never',
             dir=str(self.logs), save_code=False,
-            config=None if existing else {'condition': 'baseline', 'baseline_contract': self.contract,
-                    'baseline_run_key': self.contract['baseline_run_key'],
-                    'training_fingerprint': self.contract['training_fingerprint'],
-                    'source_identity': bundle['identity'],
-                    'loss_mapping_version': 2},
+            config=None if existing else config,
             settings=self.wandb.Settings(console='off', disable_git=True, disable_code=True,
                 base_url=API_BASE,
                 x_disable_meta=True, x_disable_stats=True, x_service_wait=10,
                 init_timeout=20, finish_timeout=20, finish_timeout_raises=True), **options)
+        self.started_writer = True
         try:
             if not self._matches(run.config):
                 raise ValueError('W&B initialization returned another experiment')
@@ -143,7 +161,7 @@ class WandbRemote:
 @operation('baseline W&B: reconcile and publish measured metrics')
 def synchronize(source, state, entity, *, project=PROJECT, snapshot=None, registration=None,
                 baseline_run_key='', existing_run_id='', group='', audit_journals=False,
-                schema_v2_only=False, remote_factory=WandbRemote):
+                schema_v2_only=False, metric_schema=2, remote_factory=WandbRemote):
     """Persist an outbox first. Remote event hashes, not local watermarks, dedupe.
 
     The source is always read-only. State/logs must live outside it. A successful
@@ -155,7 +173,12 @@ def synchronize(source, state, entity, *, project=PROJECT, snapshot=None, regist
         raise ValueError('reporter state must be separate from read-only source data')
     if group and (group != group.strip() or re.search(r'[\x00-\x1f\x7f]', group)):
         raise ValueError('invalid W&B group')
-    bundle = collect(source, snapshot=snapshot, registration=registration, audit_journals=audit_journals)
+    if metric_schema == 3:
+        _validate_v3_state(source, state, entity, project, group, existing_run_id, schema_v2_only)
+    elif project == v3.PROJECT:
+        raise ValueError('the Schema v3 project rejects legacy Baseline writes')
+    bundle = collect(source, snapshot=snapshot, registration=registration, audit_journals=audit_journals,
+                     metric_schema=metric_schema, baseline_run_key=baseline_run_key)
     state.mkdir(parents=True, exist_ok=True)
     with FileLock(str(state / 'writer.lock'), timeout=0):
         owner = state / 'binding.json'
@@ -182,6 +205,7 @@ def synchronize(source, state, entity, *, project=PROJECT, snapshot=None, regist
         remote = remote_factory(contract, state / 'sdk')
         remote.group = group
         remote.require_existing = schema_v2_only
+        remote.require_idle = metric_schema == 3
         remote.source_identity_sha256 = digest(bundle['identity'])
         history = remote.history()
         _, acknowledged = plan(bundle, history, adopted=contract['adopted'])
@@ -227,7 +251,11 @@ def synchronize(source, state, entity, *, project=PROJECT, snapshot=None, regist
         # summary refresh for newer confirmed updates or an explicit new group.
         same_summary = old and all(old['bundle'][key] == bundle[key] for key in
                                   ('summary', 'sources', 'receipt', 'conditions'))
-        if events or (not schema_v2_only and (not same_summary or getattr(remote, 'needs_group_update', False))):
+        if metric_schema == 3:
+            summary_refresh = getattr(remote, 'remote_summary', {}) != v3.SUMMARY
+        else:
+            summary_refresh = not schema_v2_only and (not same_summary or getattr(remote, 'needs_group_update', False))
+        if events or summary_refresh:
             atomic(outbox_path, dict(contract=contract, bundle=bundle, events=events))
             try:
                 remote.send(events, bundle)
@@ -243,3 +271,40 @@ def synchronize(source, state, entity, *, project=PROJECT, snapshot=None, regist
         result.update(status='SYNCED', pending_rows=0)
         atomic(state / 'last-success.json', result)
         return result
+
+
+def _validate_v3_state(source, state, entity, project, group, existing_run_id='', schema_v2_only=False):
+    v3.validate_destination(entity, project, group, state, existing_run_id=existing_run_id,
+                            schema_v2_only=schema_v2_only)
+    if source == state or state.parent != source.parent:
+        raise ValueError('the Schema v3 state must be a separate sibling of the Baseline source')
+
+
+@operation('baseline W&B: read-only Schema v3 history audit')
+def audit_v3(source, state, entity, *, project, group, snapshot=None, registration=None,
+             baseline_run_key='', audit_journals=False, remote_factory=WandbRemote):
+    source, state = Path(source).resolve(), Path(state).resolve()
+    _validate_v3_state(source, state, entity, project, group)
+    bundle = collect(source, snapshot=snapshot, registration=registration,
+                     audit_journals=audit_journals, metric_schema=3, baseline_run_key=baseline_run_key)
+    contract = binding(bundle, entity, project, key=bundle['schema_identity']['origin']['baseline_run_key'])
+    owner = state/'binding.json'
+    if owner.is_file() and json.loads(owner.read_bytes()) != contract:
+        raise ValueError('reporter state belongs to another experiment/entity/project')
+    with TemporaryDirectory(prefix='baseline-v3-audit-') as temp:
+        remote = remote_factory(contract, Path(temp))
+        remote.group = group
+        history = remote.history()
+    missing_events, _ = plan(bundle, history, check_duplicates=False)
+    missing = Counter(key for event in missing_events for key in event['event']['values'])
+    keys = Counter((row['update'], key) for row in history for key in json.loads(row['baseline/fields']))
+    duplicates = Counter()
+    for (_, key), count in keys.items():
+        if count > 1:
+            duplicates[key] += count - 1
+    summary = getattr(remote, 'remote_summary', {})
+    verdict = ('DUPLICATES' if duplicates else 'NOT_IMPORTED' if not getattr(remote, 'existing', bool(history))
+               else 'INCOMPLETE' if missing or summary != v3.SUMMARY else 'VERIFIED')
+    return dict(status=verdict, run_id=run_id(contract), expected_by_metric=bundle['counts'],
+                missing_by_metric=dict(missing), duplicate_by_metric=dict(duplicates),
+                summary_expected=v3.SUMMARY, summary_observed=summary)
