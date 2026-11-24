@@ -5,7 +5,7 @@ import re
 import sys
 import time
 
-from .baseline_wandb import (API_BASE, PROJECT, atomic, binding, canonical, collect,
+from .baseline_wandb import (API_BASE, PROJECT, SCHEMA_V2_METRICS, atomic, binding, canonical, collect,
                              digest, plan, run_id)
 from .progress import operation
 
@@ -72,13 +72,14 @@ class WandbRemote:
             # CommError, without an HTTP response, for its GraphQL null run.
             if (getattr(response, 'status_code', None) == 404
                     or str(error).startswith('Could not find run ')):
-                if self.contract['adopted'] or self.existing:
+                if self.contract['adopted'] or self.existing or getattr(self, 'require_existing', False):
                     raise ValueError('selected existing W&B Run ID was not found') from error
                 return []
             raise
         if not self._matches(remote.config):
             raise ValueError('W&B run identity/destination differs; refusing to write')
-        if self.contract['adopted'] and remote.state not in {'finished', 'failed', 'crashed', 'killed'}:
+        require_idle = self.contract['adopted'] or (getattr(self, 'require_existing', False) and not self.existing)
+        if require_idle and remote.state not in {'finished', 'failed', 'crashed', 'killed'}:
             raise ValueError('selected existing W&B run is active; use one writer')
         self.existing = True
         group = getattr(self, 'group', '')
@@ -116,7 +117,7 @@ class WandbRemote:
             if events and run.step > events[0]['step']:
                 raise HistoryNotVisible('server advanced beyond pending event; retry after history becomes visible')
             run.define_metric('update', summary='none', overwrite=True)
-            for prefix in ('baseline', 'train', 'dev', 'eval'):
+            for prefix in ('baseline', 'train', 'dev', 'eval', 'alignment'):
                 run.define_metric(prefix + '/*', step_metric='update')
             for item in events:
                 event = item['event']
@@ -125,13 +126,16 @@ class WandbRemote:
                                 'baseline/fields': canonical(sorted(event['values'])),
                                 'baseline/provenance': canonical(event['provenance'])})
                 run.log(payload, step=item['step'], commit=True)
-            for key, value in bundle['summary'].items():
-                if key == 'train/max_update':
-                    value = max(value, getattr(self, 'progress', 0))
-                run.summary[key] = value
-            run.summary['baseline/sources'] = bundle['sources']
-            run.summary['baseline/receipt'] = bundle['receipt']
-            run.summary['baseline/evaluation_conditions'] = bundle['conditions']
+            maximum = max(bundle['durable_update'], getattr(self, 'progress', 0))
+            if getattr(self, 'require_existing', False):
+                if maximum > getattr(self, 'progress', 0):
+                    run.summary['train/max_update'] = maximum
+            else:
+                for key, value in bundle['summary'].items():
+                    run.summary[key] = maximum if key == 'train/max_update' else value
+                run.summary['baseline/sources'] = bundle['sources']
+                run.summary['baseline/receipt'] = bundle['receipt']
+                run.summary['baseline/evaluation_conditions'] = bundle['conditions']
         finally:
             run.finish()
 
@@ -139,7 +143,7 @@ class WandbRemote:
 @operation('baseline W&B: reconcile and publish measured metrics')
 def synchronize(source, state, entity, *, project=PROJECT, snapshot=None, registration=None,
                 baseline_run_key='', existing_run_id='', group='', audit_journals=False,
-                remote_factory=WandbRemote):
+                schema_v2_only=False, remote_factory=WandbRemote):
     """Persist an outbox first. Remote event hashes, not local watermarks, dedupe.
 
     The source is always read-only. State/logs must live outside it. A successful
@@ -177,9 +181,12 @@ def synchronize(source, state, entity, *, project=PROJECT, snapshot=None, regist
                     raise ValueError('pending event no longer matches confirmed source')
         remote = remote_factory(contract, state / 'sdk')
         remote.group = group
+        remote.require_existing = schema_v2_only
         remote.source_identity_sha256 = digest(bundle['identity'])
         history = remote.history()
         _, acknowledged = plan(bundle, history, adopted=contract['adopted'])
+        if schema_v2_only and getattr(remote, 'needs_group_update', False):
+            raise ValueError('schema-v2 backfill requires the existing W&B Run group')
         if not saved:
             atomic(owner, contract)
         if group:
@@ -202,6 +209,9 @@ def synchronize(source, state, entity, *, project=PROJECT, snapshot=None, regist
             if finished and pending:
                 return awaiting(pending)
             if pending:
+                if schema_v2_only and any(not SCHEMA_V2_METRICS.issuperset(event['event']['values'])
+                                          for event in pending):
+                    raise ValueError('previous sync still has unconfirmed non-schema-v2 rows; finish it first')
                 try:
                     remote.send(pending, old['bundle'])
                 except HistoryNotVisible:
@@ -211,12 +221,13 @@ def synchronize(source, state, entity, *, project=PROJECT, snapshot=None, regist
                 history, acknowledged = _wait_for_history(remote, bundle, pending)
                 if any(event['id'] not in acknowledged for event in pending):
                     return awaiting(pending)
-        events, _ = plan(bundle, history, adopted=contract['adopted'])
+        events, _ = plan(bundle, history, adopted=contract['adopted'],
+                         eligible=SCHEMA_V2_METRICS if schema_v2_only else None)
         # An unchanged retry can finish by reading history alone. Preserve
         # summary refresh for newer confirmed updates or an explicit new group.
         same_summary = old and all(old['bundle'][key] == bundle[key] for key in
                                   ('summary', 'sources', 'receipt', 'conditions'))
-        if events or not same_summary or getattr(remote, 'needs_group_update', False):
+        if events or (not schema_v2_only and (not same_summary or getattr(remote, 'needs_group_update', False))):
             atomic(outbox_path, dict(contract=contract, bundle=bundle, events=events))
             try:
                 remote.send(events, bundle)

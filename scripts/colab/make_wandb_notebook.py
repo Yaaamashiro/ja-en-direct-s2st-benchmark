@@ -29,6 +29,8 @@ WANDB_ENTITY = '' #@param {type:"string"}
 WANDB_PROJECT = 'alignment-transfer-s2ut' #@param {type:"string"}
 WANDB_GROUP = '' #@param {type:"string"}
 WANDB_EXISTING_RUN_ID = '' #@param {type:"string"}
+# Enable when migrating an already imported Baseline. Keep its STATE and ID binding.
+SCHEMA_V2_ONLY = False #@param {type:"boolean"}
 BASELINE_RUN_KEY = '' #@param {type:"string"}
 # Empty attempts to discover the published registration for the standard source.
 REGISTRATION_SNAPSHOT = '' #@param {type:"string"}
@@ -116,8 +118,8 @@ report = json.loads(command([sys.executable, HELPER, 'inspect', '--source', SOUR
 print('Confirmed optimizer update:', report['durable_update'])
 print('Verified training fingerprint:', report['training_fingerprint'])
 print('Saved summary:', json.dumps(report['summary'], indent=2))
-for metric, count in report['counts'].items():
-    print(f'{metric}: {count}')
+for metric, span in sorted(report['coverage'].items()):
+    print(f'{metric}: {span["count"]} points, updates {span["first_update"]}–{span["last_update"]}')
 print('Source SHA-256:', json.dumps(report['sources'], indent=2))
 ''')
     cell('code', '''#@title 4. Synchronize / resume the same baseline run
@@ -134,7 +136,8 @@ if SYNC_TO_WANDB:
         result = json.loads(command([settings['python'], HELPER, 'sync', '--source', SOURCE,
             '--state', STATE, '--entity', WANDB_ENTITY.strip(), '--project', WANDB_PROJECT.strip(),
             '--group', WANDB_GROUP.strip(), '--existing-run-id', WANDB_EXISTING_RUN_ID.strip(),
-            '--baseline-run-key', BASELINE_RUN_KEY, *evidence_args()],
+            '--baseline-run-key', BASELINE_RUN_KEY,
+            *(['--schema-v2-only'] if SCHEMA_V2_ONLY else []), *evidence_args()],
             env=env, capture=True))
         print(json.dumps(result, indent=2))
         if result.get('status') == 'ACK_PENDING':

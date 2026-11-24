@@ -125,17 +125,17 @@ dependencies and `watch` for an external wrapper. `inspect` reads sources only.
 
 ## Metric definitions and transfer comparison
 
-The comparison mapping follows [alignment-transfer-s2ut PR #8](https://github.com/Yaaamashiro/alignment-transfer-s2ut/pull/8).
+The comparison mapping follows [alignment-transfer-s2ut Metric Schema v2](https://github.com/Yaaamashiro/alignment-transfer-s2ut/blob/ffbb7a9dc1a290899321e80c2408f8fe5236bc05/docs/WANDB_BASELINE_COMPARISON.md).
 The SDK's fixed cloud API host is `https://api.forge.coreweave.com`.
 
 | Saved Baseline field | W&B metric | Definition |
 | --- | --- | --- |
-| Train Unit | `train/main_loss` | Label-smoothed Unit loss in nats. Convert the saved bits by multiplying by ln(2). Retain the raw bits in `baseline/train/unit_loss_bits`. |
-| Train weighted task loss | `train/task_loss` | Saved task loss converted to nats. Compare to transfer's `alignment/task_loss`. |
+| Train Unit | `train/unit_ce_nats` | One logical update, label-smoothed Unit CE sum divided by main target-token count. Convert saved bits by multiplying by ln(2). |
+| Train weighted task loss | `alignment/update/task_loss` | One logical update, Unit CE plus the three weighted auxiliary sums (8, 8, 1.6) divided by main target-token count. Convert saved bits by multiplying by ln(2). |
 | Train auxiliaries | `train/aux/<task>_loss_bits` | Unweighted bits per auxiliary sample unit from one logical update. |
 | Dev Unit | `dev/main_loss` | Full-Dev label-smoothed Unit loss in bits. |
-| Dev total / auxiliaries | `dev/loss`, `dev/multitask_<task>_loss` | Weighted total in bits per main token and unweighted auxiliary bits per auxiliary sample unit. |
-| Learning rate | `train/learning_rate` | Saved optimizer learning rate. |
+| Dev total / auxiliaries | `dev/full/loss`, `dev/full/multitask_<task>_loss` | Full Dev. Weighted total in bits per main token and unweighted auxiliary bits per auxiliary sample unit. |
+| Learning rate | `train/update/learning_rate` | Saved learning rate after the optimizer update. |
 | Comparable BLEU and counts | `eval/<mode>_bleu`, `eval/<mode>_samples`, `eval/<mode>_failures` | The saved score and counts, gated separately for Aux and ASR. |
 | Published progress | `train/max_update`, `train/durable_update` | Maximum verified progress on the run and verified update for this import, respectively. |
 | Training target | `train/target_update` | Saved planned limit, e.g. 400,000. |
@@ -164,6 +164,65 @@ the provenance of previously sent rows.
 
 The unit conversion uses existing measurements. There is no loss or BLEU
 reevaluation, interpolation, or missing-value substitution.
+
+### Migrate the existing Baseline to Schema v2
+
+Open the updated import notebook on a CPU runtime. Keep `SOURCE`, `STATE` and
+the W&B entity, project and group from the original import. Preserve the
+original `WANDB_EXISTING_RUN_ID` setting. For the registered Baseline it was
+blank because the verified lineage derives Run `54aa109cb906644038c08f91`.
+Set `SCHEMA_V2_ONLY=True` and inspect cell 3. For a pre-merge run use the
+full PR commit SHA in `CODE_REVISION`. After inspection, enable
+`SYNC_TO_WANDB` and run cells 1, 2 and 4.
+
+Migration requires the existing idle Run and matching group. It checks
+existing keys and stops on a conflict before opening a writer. It appends only
+missing Schema v2 metric cells, preserving the old keys and the verified
+`train/max_update`. A repeated migration with complete history appends zero
+rows. Normal training reporting includes both new and legacy keys through
+the same conversion. `dev/main_loss` and BLEU eligibility retain their
+existing definitions.
+
+### Audit of the 400k Baseline history
+
+| Series | Measurements | Optimizer updates |
+| --- | ---: | --- |
+| `train/unit_ce_nats`, `alignment/update/task_loss`, `train/update/learning_rate` | 4,000 each | 100–400,000, every 100 |
+| `dev/full/loss` and the three `dev/full/multitask_*_loss` series | 400 each | 1,000–400,000, every 1,000 |
+| Existing `dev/main_loss` | 400 | 1,000–400,000, every 1,000 |
+| Existing qualified `eval/asr_bleu` | 8 | 1,000; 5,000; 10,000; 25,000; 50,000; 100,000; 200,000; 400,000 |
+| `train/window/*` | 0 recovered | No verified matching Fairseq execution log located |
+
+The Baseline Drive folder listing had 926 snapshot folders and six loose
+monitor/BLEU files. The receipts at 100, 201,000 and 400,000 updates point to
+the monitor, checkpoint, metadata and evaluation artifacts. They contain no
+Fairseq process log. The recorded benchmark revision
+`4361e55a99c7f4ea3a00c5c138f6820c34a07d06` uses a snapshot file allowlist
+without stdout or stderr. The transfer Colab sets the execution log directory
+to `/content/alignment-transfer-work/experiment-001/execution` on the runtime
+filesystem. Its Drive execution-provenance folder contained release receipts.
+No matching saved process log was found in the inspected Drive and local
+copies. The stored recipe requests JSON logging at interval 1. This proves
+the producer configuration and says nothing about retention of the log.
+
+The checkpointed monitor stores independent logical-update samples at every
+100 updates. It has no intervening per-update numerator/sample-size tuples
+or native window output. The saved gradient audit keeps a bounded tail of raw
+microbatch losses and gradient maxima without the sample sizes and window
+coordinates required here. Consequently `train/window/main_loss_fairseq`,
+`train/window/loss_fairseq`, all `train/window/multitask_*_loss`, NLL,
+perplexity and other window diagnostics are left absent. Full-Dev NLL and
+perplexity are also absent. Unit CE uses label smoothing and cannot recover
+NLL. There is no verified Baseline logical point before update 100 or Dev
+point before update 1,000.
+
+The common loss and LR series are comparable across Baseline, distillation,
+annealed distillation and mask distillation where each has a point with
+verified provenance at the same update. Old transfer `train/main_loss` may
+contain NLL, and the new key cannot recover exact missing transfer CE.
+Qualified BLEU is comparable at shared milestones with matching Dev inputs
+and evaluator conditions. Baseline Aux-BLEU remains in its legacy series
+pending journal verification.
 
 ## Identity, retries, and duplicate protection
 

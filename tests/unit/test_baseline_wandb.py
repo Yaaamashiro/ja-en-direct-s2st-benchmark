@@ -106,6 +106,88 @@ def test_measured_zero_missing_asr_and_coalesced_json_csv(tmp_path):
     assert 'private-id' not in canonical(bundle)
 
 
+SCHEMA_V2_KEYS = {
+    'train/unit_ce_nats', 'alignment/update/task_loss', 'train/update/learning_rate',
+    'dev/full/loss', 'dev/full/multitask_source_letter_loss',
+    'dev/full/multitask_target_letter_loss', 'dev/full/multitask_decoder_target_ctc_loss',
+}
+
+
+def schema_v2_source(tmp_path):
+    root = source(tmp_path)
+    path = root/'training-monitor.json'
+    monitor = json.loads(path.read_bytes())
+    monitor['history'][0]['dev'].update(source_letter=1.5, target_letter=2.5, decoder_target_ctc=3.5)
+    atomic(path, monitor)
+    seal(root)
+    return root
+
+
+def test_schema_v2_maps_existing_measurements_without_inventing_windows(tmp_path):
+    root = schema_v2_source(tmp_path)
+    bundle = collect(root)
+    expected = {
+        'train/unit_ce_nats': 3 * math.log(2),
+        'alignment/update/task_loss': 12 * math.log(2),
+        'train/update/learning_rate': .0001,
+        'dev/full/loss': 10,
+        'dev/full/multitask_source_letter_loss': 1.5,
+        'dev/full/multitask_target_letter_loss': 2.5,
+        'dev/full/multitask_decoder_target_ctc_loss': 3.5,
+    }
+    row = bundle['rows']['100']
+    assert {key: row[key] for key in SCHEMA_V2_KEYS} == expected
+    assert row['dev/main_loss'] == 2.5
+    assert not any(key.startswith('train/window/') or 'nll' in key or 'perplexity' in key for key in row)
+    assert bundle['coverage']['train/unit_ce_nats'] == dict(count=1, first_update=100, last_update=100)
+
+    # Same conversion for a receipt-confirmed CSV alone; leave absent fields absent.
+    (root/'training-monitor.json').unlink()
+    seal(root)
+    row = collect(root)['rows']['100']
+    assert row['train/unit_ce_nats'] == expected['train/unit_ce_nats']
+    assert row['alignment/update/task_loss'] == expected['alignment/update/task_loss']
+    assert row['train/update/learning_rate'] == expected['train/update/learning_rate']
+    assert 'dev/full/loss' not in row and 'dev/full/multitask_source_letter_loss' not in row
+
+
+@pytest.mark.parametrize('already_present', [False, True])
+def test_schema_v2_backfill_reuses_binding_and_only_appends_missing_keys(tmp_path, already_present):
+    root, server, state = schema_v2_source(tmp_path), Server(), tmp_path/'state'
+    old = collect(root)
+    retained = {'train/unit_ce_nats'} if already_present else set()
+    for row in old['rows'].values():
+        for key in SCHEMA_V2_KEYS - retained:
+            row.pop(key, None)
+        row.pop('train/learning_rate')  # A legacy hole is outside this migration.
+    server.contract = binding(old, 'owner', key=KEY)
+    first, _ = plan(old, [])
+    server.send(first, old)
+    atomic(state/'binding.json', server.contract)
+    atomic(state/'outbox.json', dict(contract=server.contract, bundle=old, events=[]))
+    initial = copy.deepcopy(server.rows[0])
+    result = sync(root, state, server, schema_v2_only=True)
+    assert result['run_id'] == run_id(server.contract) and server.require_existing
+    assert result['sent_rows'] == 1 and server.summary['train/max_update'] == 100
+    assert server.rows[0] == initial
+    assert json.loads(server.rows[1]['baseline/fields']) == sorted(SCHEMA_V2_KEYS - retained)
+    assert server.rows[1]['update'] == 100 and server.rows[1]['_step'] == initial['_step'] + 1
+    assert sync(root, state, server, schema_v2_only=True)['sent_rows'] == 0 and len(server.rows) == 2
+
+
+def test_schema_v2_conflict_stops_before_writing_any_metric(tmp_path):
+    root, server, state = schema_v2_source(tmp_path), Server(), tmp_path/'state'
+    conflict = collect(root)
+    conflict['rows']['100']['train/unit_ce_nats'] += 1
+    server.contract = binding(conflict, 'owner', key=KEY)
+    existing, _ = plan(conflict, [])
+    server.send(existing, conflict)
+    with pytest.raises(ValueError, match='conflicting duplicate metric: train/unit_ce_nats'):
+        sync(root, state, server, schema_v2_only=True)
+    assert server.calls == 1 and len(server.rows) == 1
+    assert not (state/'outbox.json').exists()
+
+
 def test_idempotence_and_lost_local_state(tmp_path):
     root, server = source(tmp_path), Server()
     assert sync(root, tmp_path/'state', server)['sent_rows'] == 1
@@ -452,6 +534,10 @@ def test_adapter_rejects_wrong_project_foreign_run_and_auth_error(tmp_path, monk
     Api.error = CommError('Could not find run missing')
     with pytest.raises(ValueError, match='was not found'):
         remote.history()
+    migration = WandbRemote(contract, tmp_path/'logs')
+    migration.require_existing = True
+    with pytest.raises(ValueError, match='was not found'):
+        migration.history()
     Api.error, Api.config = None, {'baseline_contract': {'wrong': 'experiment'}}
     with pytest.raises(ValueError, match='identity/destination'):
         remote.history()

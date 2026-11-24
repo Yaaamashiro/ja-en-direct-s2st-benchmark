@@ -18,6 +18,8 @@ def main():
     parser.add_argument('--registration', type=Path, help='Published Baseline registration snapshot.json')
     parser.add_argument('--baseline-run-key', default='', help='Original MyDrive-relative publication directory')
     parser.add_argument('--existing-run-id', default='', help='Verified existing W&B Run ID')
+    parser.add_argument('--schema-v2-only', action='store_true',
+                        help='Append only the new schema-v2 keys to an existing W&B run')
     parser.add_argument('--group', default='')
     parser.add_argument('--audit-journals', action='store_true')
     parser.add_argument('--state', type=Path)
@@ -29,7 +31,7 @@ def main():
     if args.action == 'inspect':
         bundle = collect(args.source, snapshot=args.snapshot, registration=args.registration,
                          audit_journals=args.audit_journals)
-        print(json.dumps({k: bundle[k] for k in ('durable_update', 'training_fingerprint', 'counts',
+        print(json.dumps({k: bundle[k] for k in ('durable_update', 'training_fingerprint', 'counts', 'coverage',
                                                'summary', 'sources', 'conditions')}, ensure_ascii=False))
         return
     if not args.state or not args.entity or args.interval < 1:
@@ -37,7 +39,8 @@ def main():
     from direct_s2st.baseline_wandb_delivery import synchronize
     options = dict(project=args.project, snapshot=args.snapshot, registration=args.registration,
                    baseline_run_key=args.baseline_run_key, existing_run_id=args.existing_run_id,
-                   group=args.group, audit_journals=args.audit_journals)
+                   group=args.group, audit_journals=args.audit_journals,
+                   schema_v2_only=args.schema_v2_only)
     if args.action == 'sync':
         print(json.dumps(synchronize(args.source, args.state, args.entity, **options)))
         return
