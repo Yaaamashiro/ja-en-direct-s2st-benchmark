@@ -29,6 +29,9 @@ For pre-merge review, replace `main` in that URL with the PR branch or commit.
    prints the resulting W&B run URL. It does not build the training runtime.
 5. Rerun cell 4 to retry or resynchronize. Reconnecting requires cells 1–2 first.
    Keep the same entity, project, and source experiment.
+   An `ACK_PENDING` result means the W&B history API has yet to confirm every
+   submitted row. Keep the same `STATE` and rerun cell 4 to check again. If the
+   SDK has finished uploading, retries only read the pending rows.
 
 The notebook never loads Fairseq, Torch, a vocoder, an ASR model, checkpoint
 payloads, or audio, and never recomputes BLEU. No changes to the original Drive
@@ -106,10 +109,11 @@ The helper deliberately supports only S2UT Baseline reporting. It does not turn
 W&B on for TT2/vocoders, and does not change the other repository's training
 workflow. That repository's completed Baseline can use the independent importer.
 
-For a manual CPU retry against a future run's published backup:
+For a manual CPU retry against a future run's published backup, use the
+interpreter path printed as `[baseline-wandb] CPU Python:`:
 
 ```sh
-/content/s2st-wandb-runtime/bin/python scripts/colab/baseline_wandb.py sync \
+"$REPORTER_PYTHON" scripts/colab/baseline_wandb.py sync \
   --source "$PERSISTENT/checkpoints/$RUN_NAME" \
   --state "$PERSISTENT/wandb-baseline/$RUN_NAME" \
   --entity YOUR_EXISTING_ENTITY

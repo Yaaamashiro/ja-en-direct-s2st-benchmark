@@ -2,10 +2,33 @@
 import json
 from pathlib import Path
 import re
+import sys
+import time
 
 from .baseline_wandb import (API_BASE, PROJECT, atomic, binding, canonical, collect,
                              digest, plan, run_id)
 from .progress import operation
+
+
+class HistoryNotVisible(RuntimeError):
+    """W&B has advanced past an outbox event its read API does not show."""
+
+
+def _wait_for_history(remote, bundle, events, history=None):
+    """Poll the read API after a write without submitting the same steps again."""
+    expected = {event['id'] for event in events}
+    for delay in (0, 2, 4, 8, 15, 30):
+        if delay:
+            time.sleep(delay)
+        if delay or history is None:
+            history = remote.history()
+        _, acknowledged = plan(bundle, history, adopted=remote.contract['adopted'])
+        missing = expected - acknowledged
+        if not missing:
+            return history, acknowledged
+        print(f'[baseline-wandb] waiting for history: confirmed={len(expected)-len(missing)}/{len(expected)}',
+              file=sys.stderr, flush=True)
+    return history, acknowledged
 
 
 class WandbRemote:
@@ -58,6 +81,8 @@ class WandbRemote:
         if self.contract['adopted'] and remote.state not in {'finished', 'failed', 'crashed', 'killed'}:
             raise ValueError('selected existing W&B run is active; use one writer')
         self.existing = True
+        group = getattr(self, 'group', '')
+        self.needs_group_update = bool(group and getattr(remote, 'group', None) != group)
         # The initial PR used the planned budget as max_update. Only its
         # separately recorded durable watermark counts as verified progress.
         progress_key = ('train/durable_update' if self._matches_pre_review_import(remote.config)
@@ -88,15 +113,12 @@ class WandbRemote:
                 raise ValueError('W&B initialization returned another experiment')
             if options.get('group') and run.group != options['group']:
                 raise ValueError('W&B did not apply the selected group; verify the existing run group')
+            if events and run.step > events[0]['step']:
+                raise HistoryNotVisible('server advanced beyond pending event; retry after history becomes visible')
             run.define_metric('update', summary='none', overwrite=True)
             for prefix in ('baseline', 'train', 'dev', 'eval'):
                 run.define_metric(prefix + '/*', step_metric='update')
             for item in events:
-                # Reuse assigned W&B steps after an uncertain acknowledgement.
-                # A later server step without a visible event is NOT a license
-                # to append the same event at a new step.
-                if run.step > item['step']:
-                    raise RuntimeError('server advanced beyond pending event; retry after history becomes visible')
                 event = item['event']
                 payload = dict(event['values'], update=event['update'])
                 payload.update({'baseline/event_id': item['id'],
@@ -163,23 +185,50 @@ def synchronize(source, state, entity, *, project=PROJECT, snapshot=None, regist
         if group:
             atomic(group_file, group)
         pending = [e for e in (old or {}).get('events', []) if e['id'] not in acknowledged]
-        if pending:
-            # Finish the frozen old batch before adding late metric cells.
-            remote.send(pending, old['bundle'])
-            history = remote.history()
-            _, acknowledged = plan(bundle, history, adopted=contract['adopted'])
-            if any(e['id'] not in acknowledged for e in pending):
-                raise RuntimeError('W&B acknowledgement pending; outbox retained for retry')
-        events, _ = plan(bundle, history, adopted=contract['adopted'])
-        atomic(outbox_path, dict(contract=contract, bundle=bundle, events=events))
-        # Also refresh measured summary/provenance on a no-op history sync.
-        remote.send(events, bundle)
-        _, acknowledged = plan(bundle, remote.history(), adopted=contract['adopted'])
-        if any(e['id'] not in acknowledged for e in events):
-            raise RuntimeError('W&B acknowledgement pending; outbox retained for retry')
-        atomic(outbox_path, dict(contract=contract, bundle=bundle, events=[]))
         result = dict(run_id=run_id(contract), name='baseline', entity=entity, project=project,
-                      sent_rows=len(events) + len(pending), durable_update=bundle['durable_update'], group=group,
-                      counts=bundle['counts'])
+                      sent_rows=0, durable_update=bundle['durable_update'], group=group, counts=bundle['counts'])
+
+        def awaiting(events):
+            return dict(result, status='ACK_PENDING',
+                        pending_rows=sum(event['id'] not in acknowledged for event in events))
+
+        if pending:
+            # Older outboxes predate the finish marker. Give the read API a
+            # chance to expose their rows before opening an existing writer.
+            finished = old.get('awaiting_ack', False)
+            if finished or getattr(remote, 'existing', False):
+                history, acknowledged = _wait_for_history(remote, bundle, pending, history=history)
+                pending = [event for event in pending if event['id'] not in acknowledged]
+            if finished and pending:
+                return awaiting(pending)
+            if pending:
+                try:
+                    remote.send(pending, old['bundle'])
+                except HistoryNotVisible:
+                    return awaiting(pending)
+                result['sent_rows'] += len(pending)
+                atomic(outbox_path, dict(contract=contract, bundle=old['bundle'], events=pending, awaiting_ack=True))
+                history, acknowledged = _wait_for_history(remote, bundle, pending)
+                if any(event['id'] not in acknowledged for event in pending):
+                    return awaiting(pending)
+        events, _ = plan(bundle, history, adopted=contract['adopted'])
+        # An unchanged retry can finish by reading history alone. Preserve
+        # summary refresh for newer confirmed updates or an explicit new group.
+        same_summary = old and all(old['bundle'][key] == bundle[key] for key in
+                                  ('summary', 'sources', 'receipt', 'conditions'))
+        if events or not same_summary or getattr(remote, 'needs_group_update', False):
+            atomic(outbox_path, dict(contract=contract, bundle=bundle, events=events))
+            try:
+                remote.send(events, bundle)
+            except HistoryNotVisible:
+                return awaiting(events)
+            result['sent_rows'] += len(events)
+            if events:
+                atomic(outbox_path, dict(contract=contract, bundle=bundle, events=events, awaiting_ack=True))
+                _, acknowledged = _wait_for_history(remote, bundle, events)
+                if any(event['id'] not in acknowledged for event in events):
+                    return awaiting(events)
+        atomic(outbox_path, dict(contract=contract, bundle=bundle, events=[], awaiting_ack=False))
+        result.update(status='SYNCED', pending_rows=0)
         atomic(state / 'last-success.json', result)
         return result
