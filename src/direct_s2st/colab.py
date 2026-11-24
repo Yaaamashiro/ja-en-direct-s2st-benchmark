@@ -274,11 +274,11 @@ def safe_relative(value):
 
 
 @operation('direct_s2st/colab: publish')
-def publish(work, destination, identity, updates):
+def publish(work, destination, identity, updates, *, lineage=None):
     """Never replace an older recovery point; marker is written last."""
     work, destination = Path(work), Path(destination)
     if os.environ.get('S2ST_DRIVE_SAFE') == '1':
-        return publish_packed(work, destination, identity, updates)
+        return publish_packed(work, destination, identity, updates, lineage=lineage)
     target = destination / f'{updates:012d}-{uuid.uuid4().hex}'
     target.mkdir(parents=True, exist_ok=False)
     files = {}
@@ -294,12 +294,12 @@ def publish(work, destination, identity, updates):
         files[name] = sha256_file(source)
         if sha256_file(output) != files[name]:
             raise OSError('snapshot copy checksum mismatch')
-    atomic_write_json(target / 'snapshot.json', dict(identity=identity, updates=updates, files=files))
+    atomic_write_json(target / 'snapshot.json', _publication_receipt(identity, updates, files, lineage))
     return target
 
 
 @operation('backup: one verified ZIP with capacity budget')
-def publish_packed(work, destination, identity, updates):
+def publish_packed(work, destination, identity, updates, *, lineage=None):
     from .drive_staging import raw_sha, capacity
     maximum = float(os.environ.get('S2ST_BACKUP_MAX_GB', '1024')) * 1024**3
     if not math.isfinite(maximum) or maximum <= 0:
@@ -331,10 +331,19 @@ def publish_packed(work, destination, identity, updates):
         if raw_sha(temporary) != checksum:
             raise OSError('snapshot ZIP readback checksum mismatch')
         os.replace(temporary, target / 'snapshot.zip')
-        atomic_write_json(target / 'snapshot.json',
-                          dict(identity=identity, updates=updates, files=files,
-                               storage='zip-v1', zip_sha256=checksum))
+        receipt = _publication_receipt(identity, updates, files, lineage)
+        receipt.update(storage='zip-v1', zip_sha256=checksum)
+        atomic_write_json(target / 'snapshot.json', receipt)
     return target
+
+
+def _publication_receipt(identity, updates, files, lineage):
+    receipt = dict(identity=identity, updates=updates, files=files)
+    if lineage and lineage['updates'] == updates and all(
+            files.get(name) == lineage[name] for name in (
+                'checkpoints/checkpoint_last.pt', 'research-metadata.json', 's2ut-recipe-lock.json')):
+        receipt['s2ut_lineage'] = lineage
+    return receipt
 
 
 @operation('direct_s2st/colab: latest')
@@ -411,6 +420,14 @@ def checkpoint_updates(path, kind):
     elif state.get('format') != 'direct-s2st-vocoder-v1' or not state.get('optimizer_g') or not state.get('optimizer_d'):
         raise ValueError('missing vocoder optimizer checkpoint')
     return int(state['updates'])
+
+
+def publication_checkpoint(path, kind, inspect_checkpoint):
+    if kind == 's2ut' and inspect_checkpoint is checkpoint_updates:
+        from .s2ut.checkpoint import validate_checkpoint
+        details = validate_checkpoint(path, include_lineage=True)
+        return details['num_updates'], details.get('s2ut_lineage')
+    return inspect_checkpoint(path, kind), None
 
 
 @operation('direct_s2st/colab: run_session')
@@ -538,7 +555,8 @@ def run_session(config, *, work, backup, total=2, chunk=1, seconds=0,
         from .session_runtime import run_continuous
         return run_continuous(config, work=work, backup=backup, identity=identity,
                               completed=completed, total=total, seconds=seconds,
-                              inspect_checkpoint=inspect_checkpoint, publish=publish)
+                              inspect_checkpoint=inspect_checkpoint, publish=publish,
+                              publication_checkpoint=publication_checkpoint)
     work.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.s2st-preflight-', dir=work.parent) as temporary:
         from .vocoders.verification import preflight_command
@@ -575,10 +593,10 @@ def _run_chunks(config, work, backup, checkpoint, identity, completed, total, ch
             break
         if result.returncode:
             raise RuntimeError(f'training failed ({result.returncode}); previous backup retained')
-        actual = inspect_checkpoint(checkpoint, config['kind'])
+        actual, lineage = publication_checkpoint(checkpoint, config['kind'], inspect_checkpoint)
         if actual != target:
             raise ValueError(f'expected update {target}, checkpoint contains {actual}')
-        publish(work, backup, identity, actual)
+        publish(work, backup, identity, actual, **({'lineage': lineage} if lineage else {}))
         completed = actual
         print(f'Verified backup: update {completed}', flush=True)
     return dict(status='COMPLETE' if completed >= total else 'PAUSED', durable_updates=completed)

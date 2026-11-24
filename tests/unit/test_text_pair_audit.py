@@ -1,3 +1,4 @@
+from notebook_baseline_wandb import without_wandb
 import builtins
 import csv
 import hashlib
@@ -392,9 +393,9 @@ def test_existing_notebook_code_cells_unchanged_and_8d_follows_8c():
     new = [c for c in current['cells'] if ''.join(c['source']).startswith('#@title 8D.')]
     assert len(new) == 1
     later_titles = ('#@title 8E.', '#@title 8F.')
-    assert [c for c in current['cells'] if c['cell_type'] == 'code' and c not in new
+    assert [without_wandb(c) for c in current['cells'] if c['cell_type'] == 'code' and c not in new
             and not ''.join(c['source']).startswith(later_titles)] == [
-        c for c in prior['cells'] if c['cell_type'] == 'code'
+        without_wandb(c) for c in prior['cells'] if c['cell_type'] == 'code'
     ]
     position = current['cells'].index(new[0])
     assert ''.join(current['cells'][position-1]['source']).startswith('#@title 8C.')

@@ -26,7 +26,8 @@ def rescue(config, work, backup, total):
     previous = latest(backup, identity)
     if previous is None:
         raise ValueError('unpublished local S2UT state has no verified durable run identity; preserve and inspect it')
-    local = validate_checkpoint(path)['num_updates']
+    details = validate_checkpoint(path, include_lineage=True)
+    local = details['num_updates']
     if local <= previous[1]['updates']:
         return None
     if local > total:
@@ -53,7 +54,8 @@ def rescue(config, work, backup, total):
     hashes = freeze_files(work, path, retained/'files')
     if hashes[config['checkpoint']] != checksum:
         raise ValueError('local checkpoint changed before recovery copy')
-    publish(retained/'files', backup, identity, local)
+    lineage = details.get('s2ut_lineage')
+    publish(retained/'files', backup, identity, local, **({'lineage': lineage} if lineage else {}))
     print(f'[local-rescue] verified_updates={local} durable_published=true original_local_preserved=true copy={retained}', flush=True)
     return local
 

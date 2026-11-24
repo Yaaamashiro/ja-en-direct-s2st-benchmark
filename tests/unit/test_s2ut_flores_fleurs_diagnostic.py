@@ -1,3 +1,4 @@
+from notebook_baseline_wandb import without_wandb
 import ast
 import copy
 import json
@@ -572,9 +573,9 @@ def test_notebook_old_code_cells_identical_and_one_8e_after_8d():
         'show','1a2c552e30834ac7284aa913177f68b166dba678:notebooks/colab_training.ipynb'],encoding='utf-8'))
     added=[c for c in current['cells'] if ''.join(c['source']).startswith('#@title 8E.')]
     assert len(added) == 1
-    assert [c for c in current['cells'] if c['cell_type'] == 'code' and c not in added
+    assert [without_wandb(c) for c in current['cells'] if c['cell_type'] == 'code' and c not in added
             and not ''.join(c['source']).startswith('#@title 8F.')] == [
-        c for c in prior['cells'] if c['cell_type'] == 'code'
+        without_wandb(c) for c in prior['cells'] if c['cell_type'] == 'code'
     ]
     i=current['cells'].index(added[0]);assert ''.join(current['cells'][i-1]['source']).startswith('#@title 8D.')
     assert ''.join(current['cells'][i+1]['source']).startswith('#@title 8F.')

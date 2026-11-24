@@ -1,0 +1,5 @@
+# Same reporter SDK as alignment-transfer-s2ut main 572b874.
+# Install ONLY in an isolated CPU reporter environment, never the training venv.
+-c wandb-constraints.txt
+wandb==0.31.0
+filelock==4.1.0

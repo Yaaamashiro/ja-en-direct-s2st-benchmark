@@ -46,6 +46,10 @@ and continue to the desired cell; the local environment is rebuilt automatically
   updates. Use this first to check the pipeline.
 - [Training notebook](notebooks/colab_training.ipynb): training on the full dataset
   and comparison of all four systems. Long training requires explicit confirmation.
+- [Baseline W&B import notebook](notebooks/baseline_wandb_import.ipynb): CPU-only
+  import of saved, checkpoint-confirmed S2UT measurements into the existing
+  transfer-learning workspace. Optional live reporting is available in training
+  Cell 5. See [W&B setup, metric definitions, and retries](docs/WANDB.md).
 
 Edit the initial configuration form, then run the numbered cells in order. Smoke
 tests and regular experiments use separate output locations. Environment setup,

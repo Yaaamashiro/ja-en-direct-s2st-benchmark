@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-def validate_checkpoint(path: Path) -> dict:
+def validate_checkpoint(path: Path, *, include_lineage=False) -> dict:
     if not path.is_file() or path.stat().st_size == 0:
         raise FileNotFoundError(f"real training checkpoint required: {path}")
     import torch
@@ -42,4 +42,30 @@ def validate_checkpoint(path: Path) -> dict:
             from .paper_monitor import PaperMonitor
             monitor_class = PaperMonitor
         monitor_class.restore(None, monitor, int(history[-1]['num_updates']), monitor['warmup'], path.parent.parent)
-    return {"num_updates": int(history[-1]["num_updates"]), "checkpoint": str(path), "finite_parameters": True}
+    result = {"num_updates": int(history[-1]["num_updates"]), "checkpoint": str(path), "finite_parameters": True}
+    if include_lineage:
+        import hashlib
+        import json
+        import re
+        from ..journal import digest
+        from ..hashing import sha256_file
+        fingerprint = state.get('extra_state', {}).get('s2st_recipe_fingerprint')
+        root = path.parent.parent
+        try:
+            metadata = (root/'research-metadata.json').read_bytes()
+            lock = (root/'s2ut-recipe-lock.json').read_bytes()
+            recipe = json.loads(lock)
+            locked = recipe['recipe'].pop('training_fingerprint')
+            meta = json.loads(metadata)
+            if (isinstance(fingerprint, str) and re.fullmatch('[0-9a-f]{64}', fingerprint)
+                    and fingerprint == locked == digest(recipe) == meta.get('training_fingerprint')
+                    and meta.get('completed_updates') == result['num_updates']):
+                result['s2ut_lineage'] = {
+                    'training_fingerprint': fingerprint, 'updates': result['num_updates'],
+                    'checkpoints/checkpoint_last.pt': sha256_file(path),
+                    'research-metadata.json': hashlib.sha256(metadata).hexdigest(),
+                    's2ut-recipe-lock.json': hashlib.sha256(lock).hexdigest(),
+                }
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # Older or incomplete optional evidence must not stop training.
+    return result

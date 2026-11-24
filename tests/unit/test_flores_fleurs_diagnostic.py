@@ -1,3 +1,4 @@
+from notebook_baseline_wandb import without_wandb
 import ast
 import copy
 from dataclasses import dataclass
@@ -310,9 +311,9 @@ def test_new_cell_order_and_existing_notebook_code_cells_are_identical():
     new=[c for c in b['cells'] if ''.join(c['source']).startswith('#@title 8C.')]
     assert len(new)==1
     later_titles = ('#@title 8D.', '#@title 8E.', '#@title 8F.')
-    assert [c for c in b['cells'] if c['cell_type'] == 'code' and c not in new
+    assert [without_wandb(c) for c in b['cells'] if c['cell_type'] == 'code' and c not in new
             and not ''.join(c['source']).startswith(later_titles)] == [
-        c for c in previous['cells'] if c['cell_type'] == 'code'
+        without_wandb(c) for c in previous['cells'] if c['cell_type'] == 'code'
     ]
     i=b['cells'].index(new[0]);assert ''.join(b['cells'][i-1]['source']).startswith('#@title 8B.')
     assert ''.join(b['cells'][i+1]['source']).startswith(('#@title 8D.', '#@title 9.'))

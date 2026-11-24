@@ -151,7 +151,8 @@ def test_cell5_resume_retains_config_work_snapshot_and_execution_pin(tmp_path, m
     assert route['environment_sha256'] == expected
 
 
-def test_new_native_run_records_code_and_environment_then_reuses_them(tmp_path, monkeypatch):
+@pytest.mark.parametrize('wandb_enabled', [False, True])
+def test_new_native_run_records_code_and_environment_then_reuses_them(tmp_path, monkeypatch, wandb_enabled):
     import os
     monkeypatch.setattr(os, 'environ', dict(os.environ))
     import s2ut_runtime_overlay
@@ -183,24 +184,33 @@ def test_new_native_run_records_code_and_environment_then_reuses_them(tmp_path, 
     cfg = dict(kind='s2ut', runtime={'cache_gb':8}, identity_files=['/content/s2st-runtime/environment.json'],
                research_metadata=dict(repository_revision=code, warmup_updates=400))
     monkeypatch.setattr(session.subprocess, 'check_output', lambda *a, **kw: json.dumps(cfg))
+    from contextlib import contextmanager
+    import wandb_runtime
+    reporter_calls = []
+    @contextmanager
+    def fake_reporter(*args, **kwargs):
+        reporter_calls.append((args, kwargs))
+        yield
+    monkeypatch.setattr(wandb_runtime, 'reporter', fake_reporter)
+    reporting = dict(wandb_python='isolated-cpu-python', wandb_entity='owner', wandb_key='not-a-real-secret') if wandb_enabled else {}
     calls = []
     name = 's2ut-training-experiment-001-paper_practical-recipe-v3-warmup400'
     session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 's2ut', name, 'fisher',
-                   {'s2ut_warmup_updates':400}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
+                   {'s2ut_warmup_updates':400}, 1000, 0, confirm=True, run=lambda *a: calls.append(a), **reporting)
     assert '--auto-resume' in calls[-1]
     # Initial overflow left a config/route but no optimizer checkpoint. Cell 5
     # must still apply the reviewed repair and retain their immutable bytes.
     zero_config = (tmp_path/(name+'.json')).read_bytes()
     zero_route = (tmp_path/(name+'.launch.json')).read_bytes()
     session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 's2ut', name, 'fisher',
-                   {'s2ut_warmup_updates':400}, 1000, 0, confirm=True, run=lambda *a: calls.append(a))
+                   {'s2ut_warmup_updates':400}, 1000, 0, confirm=True, run=lambda *a: calls.append(a), **reporting)
     assert '--auto-resume' in calls[-1]
     assert zero_config == (tmp_path/(name+'.json')).read_bytes()
     assert zero_route == (tmp_path/(name+'.launch.json')).read_bytes()
     _, path, marker = snapshot(tmp_path, name, kind='s2ut', base=code, expected=expected)
     before = path.read_bytes(), marker.read_bytes()
     session.launch(tmp_path/'repo', tmp_path, tmp_path/'data', 's2ut', name, 'fisher',
-                   {'s2ut_warmup_updates':400, 'batch_size':999}, 5000, 0, confirm=True, run=lambda *a: calls.append(a))
+                   {'s2ut_warmup_updates':400, 'batch_size':999}, 5000, 0, confirm=True, run=lambda *a: calls.append(a), **reporting)
     assert '--resume' in calls[-1]
     assert calls[-1][calls[-1].index('--total-updates')+1] == '3000'
     preflight_calls = [c for c in calls if 'preflight_s2ut_resume.py' in str(c)]
@@ -208,6 +218,9 @@ def test_new_native_run_records_code_and_environment_then_reuses_them(tmp_path, 
     assert preflight_calls[0][preflight_calls[0].index('--total')+1] == '3000'
     assert calls.index(preflight_calls[0]) < len(calls)-1  # Before the payload-staging session.
     assert restored_environments == [None, expected, expected]
+    assert len(reporter_calls) == (3 if wandb_enabled else 0)
+    assert all('wandb' not in str(command).lower() for command in calls)
+    assert b'wandb' not in path.read_bytes().lower()
     assert checked_out == [code, code, code]
     assert len(repaired) == 3
     assert before == (path.read_bytes(), marker.read_bytes())

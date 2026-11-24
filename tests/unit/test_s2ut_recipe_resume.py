@@ -142,6 +142,28 @@ def durable(recipe, backup):
     return identity
 
 
+def test_reporter_receipt_contains_lineage_only_for_matching_checkpoint(recipe, tmp_path):
+    from direct_s2st.baseline_wandb_evidence import snapshot_fingerprint
+    from direct_s2st.colab import checkpoint_updates, publication_checkpoint
+    cfg, work, _, metadata, _ = recipe
+    fingerprint = metadata['training_fingerprint']
+    checkpoint = saved_checkpoint(cfg, work, fingerprint, 1)
+    updated = dict(metadata, completed_updates=1)
+    (work/'research-metadata.json').write_text(json.dumps(updated), encoding='utf-8')
+    update, proof = publication_checkpoint(checkpoint, 's2ut', checkpoint_updates)
+    assert update == 1 and proof['training_fingerprint'] == fingerprint
+    backup = tmp_path/'drive'
+    identity = dict(config=cfg, work=str(work), inputs={})
+    before = checkpoint.read_bytes()
+    marker = publish(work, backup, identity, update, lineage=proof)/'snapshot.json'
+    assert snapshot_fingerprint(json.loads(marker.read_bytes())) == fingerprint
+    assert checkpoint.read_bytes() == before
+    saved_checkpoint(cfg, work, '0'*64, 1)
+    assert publication_checkpoint(checkpoint, 's2ut', checkpoint_updates) == (1, None)
+    marker = publish(work, backup, identity, update, lineage=proof)/'snapshot.json'
+    assert snapshot_fingerprint(json.loads(marker.read_bytes())) is None
+
+
 def test_real_recipe_guard_allows_local_rescue_then_predownload_resume(recipe, tmp_path, monkeypatch):
     cfg, work, _, metadata, checks = recipe
     backup = tmp_path/'drive'
