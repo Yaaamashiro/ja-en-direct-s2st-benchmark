@@ -213,9 +213,10 @@ the selected v3 W&B Run. The audit uses temporary local SDK state.
 ## Reporter release
 
 The Schema v3 Colab importer pins the CPU reporter to Git revision
-`306b152c16e26aea09560bf10bfe6c230515aae3`. The revision contains the metric mapping,
-validator and fixture for the transfer implementation. The notebook still
-defaults to Schema v2. Select v3 explicitly to use this release.
+`6d242da09902bc15c0cff85f6eb331e5274d0731`. The revision contains the
+metric mapping, completeness validator and fixture for the transfer
+implementation. The notebook still defaults to Schema v2. Select v3
+explicitly to use this release.
 
 [monitor]: https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark/blob/4361e55a99c7f4ea3a00c5c138f6820c34a07d06/src/direct_s2st/s2ut/monitor.py
 [criterion]: https://github.com/facebookresearch/fairseq/blob/3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99/fairseq/criterions/speech_to_speech_criterion.py

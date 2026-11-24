@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 # Published interpreter-neutral reporter revision for the Schema v3 import.
-V3_REPORTER_REVISION = '306b152c16e26aea09560bf10bfe6c230515aae3'
+V3_REPORTER_REVISION = '6d242da09902bc15c0cff85f6eb331e5274d0731'
 
 
 def build():
@@ -28,6 +28,8 @@ cell or a command. Rerun the last cell after a disconnect/network failure.
 For Schema v3, select the dedicated project, group and state described in
 `docs/WANDB_METRIC_SCHEMA_V3.md`. Cells 2–3 verify the source and report counts.
 Cell 3A checks W&B before upload. Cell 5 reads back the synchronized history.
+Schema v3 checks all required Train, Dev and ASR-BLEU update coordinates
+before auditing or syncing.
 ''')
     cell('code', '''#@title 1. Import settings
 SOURCE = '/content/drive/MyDrive/alignment-transfer-s2ut-data/experiment-001/baseline' #@param {type:"string"}
