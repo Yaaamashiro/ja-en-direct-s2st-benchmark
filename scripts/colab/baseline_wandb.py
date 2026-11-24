@@ -59,7 +59,7 @@ def main():
             if final or stamps != previous:
                 result = synchronize(args.source, args.state, args.entity, **options)
                 print('[baseline-wandb] ' + json.dumps(result), file=sys.stderr, flush=True)
-                previous = stamps
+                previous = stamps if result['status'] == 'SYNCED' else None
         except Exception as error:
             previous = None
             # Do not print exception bodies containing credentials/request URLs.

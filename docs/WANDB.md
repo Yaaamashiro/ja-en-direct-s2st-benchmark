@@ -29,6 +29,9 @@ For pre-merge review, replace `main` in that URL with the PR branch or commit.
    prints the resulting W&B run URL. It does not build the training runtime.
 5. Rerun cell 4 to retry or resynchronize. Reconnecting requires cells 1–2 first.
    Keep the same entity, project, and source experiment.
+   An `ACK_PENDING` result means the W&B history API has yet to confirm every
+   submitted row. Keep the same `STATE` and rerun cell 4 to check again. If the
+   SDK has finished uploading, retries only read the pending rows.
 
 The notebook never loads Fairseq, Torch, a vocoder, an ASR model, checkpoint
 payloads, or audio, and never recomputes BLEU. No changes to the original Drive

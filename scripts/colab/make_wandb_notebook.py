@@ -137,6 +137,8 @@ if SYNC_TO_WANDB:
             '--baseline-run-key', BASELINE_RUN_KEY, *evidence_args()],
             env=env, capture=True))
         print(json.dumps(result, indent=2))
+        if result.get('status') == 'ACK_PENDING':
+            print('W&B history confirmation is pending. Rerun Cell 4 with the same settings to check again.')
         print('W&B:', f"https://forge.coreweave.com/wandb/{result['entity']}/{result['project']}/runs/{result['run_id']}")
     finally:
         env.pop('WANDB_API_KEY', None)

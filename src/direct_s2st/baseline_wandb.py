@@ -120,19 +120,45 @@ def _read_reports(source):
     return {name: (source / name).read_bytes() for name in FILES if (source / name).is_file()}
 
 
+def _read_receipt(path, expected=None):
+    receipt = json.loads(path.read_text(encoding='utf-8'))
+    update = update_number(receipt['updates'])
+    if not update or (expected is not None and update != expected):
+        raise ValueError(f'invalid published snapshot update: {path}')
+    return update, str(path), receipt
+
+
+def _latest_receipts(source, snapshot):
+    if snapshot:
+        return [_read_receipt(Path(snapshot))]
+    standalone = source/'snapshot.json'
+    root_receipt = _read_receipt(standalone) if standalone.is_file() else None
+    candidates = {}
+    # Colab Drive mounts make individual reads expensive. Publication directories
+    # encode the optimizer update, so open receipts only at the newest update.
+    if source.is_dir():
+        for directory in source.iterdir():
+            match = re.fullmatch(r'([0-9]+)-.+', directory.name)
+            if match:
+                candidates.setdefault(int(match[1]), []).append(directory/'snapshot.json')
+    for update in sorted(candidates, reverse=True):
+        if root_receipt and update < root_receipt[0]:
+            break
+        receipts = []
+        for path in candidates[update]:
+            try:
+                receipts.append(_read_receipt(path, expected=update))
+            except (FileNotFoundError, NotADirectoryError):
+                continue  # The publication marker is written last.
+        if root_receipt and update == root_receipt[0]:
+            receipts.append(root_receipt)
+        if receipts:
+            return receipts
+    return [root_receipt] if root_receipt else []
+
+
 def _receipt(source, blobs, snapshot):
-    candidates = [Path(snapshot)] if snapshot else list(source.glob('*/snapshot.json'))
-    if (source / 'snapshot.json').is_file() and not snapshot:
-        candidates.append(source / 'snapshot.json')
-    receipts = []
-    for path in candidates:
-        try:
-            receipt = json.loads(path.read_text(encoding='utf-8'))
-            if update_number(receipt['updates']) > 0:
-                receipts.append((update_number(receipt['updates']), str(path), receipt))
-        except (KeyError, ValueError, OSError):
-            if snapshot:
-                raise
+    receipts = _latest_receipts(source, snapshot)
     if not receipts:
         raise ValueError('no published snapshot receipt; refusing unconfirmed metrics')
     maximum = max(item[0] for item in receipts)

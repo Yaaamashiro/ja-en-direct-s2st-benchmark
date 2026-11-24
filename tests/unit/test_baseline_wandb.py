@@ -128,6 +128,67 @@ def test_communication_failure_replay_without_duplicate(tmp_path, failure):
     assert json.loads((state/'outbox.json').read_text())['events'] == []
 
 
+def test_delayed_history_after_sdk_finish_never_resends_rows(tmp_path, monkeypatch):
+    from direct_s2st import baseline_wandb_delivery as delivery
+
+    class DelayedHistory(Server):
+        visible = False
+        def history(self):
+            return super().history() if self.visible else []
+
+    monkeypatch.setattr(delivery.time, 'sleep', lambda seconds: None)
+    root, server, state = source(tmp_path), DelayedHistory(), tmp_path/'state'
+    result = sync(root, state, server)
+    assert (result['status'], result['sent_rows'], result['pending_rows']) == ('ACK_PENDING', 1, 1)
+    assert json.loads((state/'outbox.json').read_bytes())['awaiting_ack'] is True
+    assert not (state/'last-success.json').exists()
+    assert sync(root, state, server)['status'] == 'ACK_PENDING'
+    assert server.calls == 1
+    server.visible = True
+    assert sync(root, state, server)['status'] == 'SYNCED'
+    assert server.calls == 1
+    assert json.loads((state/'outbox.json').read_bytes())['events'] == []
+
+
+def test_existing_outbox_confirms_on_read_without_reopening_run(tmp_path, monkeypatch):
+    from direct_s2st import baseline_wandb_delivery as delivery
+
+    class DelayedHistory(Server):
+        existing = False
+        scans = 0
+        def history(self):
+            self.scans += 1
+            return super().history() if self.scans >= 3 else []
+
+    monkeypatch.setattr(delivery.time, 'sleep', lambda seconds: None)
+    root, server, state = source(tmp_path), DelayedHistory(), tmp_path/'state'
+    server.fail = 'after'  # Old outbox has no persisted SDK-finish marker.
+    with pytest.raises(ConnectionError):
+        sync(root, state, server)
+    server.existing, server.fail = True, None
+    assert sync(root, state, server)['status'] == 'SYNCED'
+    assert server.calls == 1
+
+
+def test_snapshot_discovery_reads_only_newest_published_update(tmp_path, monkeypatch):
+    root = source(tmp_path)
+    receipt = json.loads((root/'snapshot.json').read_bytes())
+    (root/'snapshot.json').unlink()
+    for step in (10, 20, 30, 100):
+        atomic(root/f'{step:012d}-published'/'snapshot.json', dict(receipt, updates=step))
+    (root/'000000000200-pending').mkdir()
+    original = Path.read_text
+    opened = []
+
+    def read_text(path, *args, **kwargs):
+        opened.append(path.parent.name)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', read_text)
+    assert collect(root)['durable_update'] == 100
+    assert opened == ['000000000200-pending', '000000000100-published']
+
+
 def test_resume_new_updates_and_late_bleu_same_update(tmp_path):
     root, server, state = source(tmp_path), Server(), tmp_path/'state'
     sync(root, state, server)
