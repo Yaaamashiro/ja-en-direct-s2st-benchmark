@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 # Published interpreter-neutral reporter revision for the Schema v3 import.
-V3_REPORTER_REVISION = ''
+V3_REPORTER_REVISION = '306b152c16e26aea09560bf10bfe6c230515aae3'
 
 
 def build():
