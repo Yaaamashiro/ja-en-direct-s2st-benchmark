@@ -24,6 +24,13 @@ PROJECT = 'alignment-transfer-s2ut'
 API_BASE = 'https://api.forge.coreweave.com'
 VERSION = 2
 LOSSES = ('loss', 'unit_loss', 'source_letter', 'target_letter', 'decoder_target_ctc')
+TRAIN_SCHEMA_V2 = {'unit_loss': 'train/unit_ce_nats', 'loss': 'alignment/update/task_loss'}
+LEARNING_RATE_SCHEMA_V2 = 'train/update/learning_rate'
+DEV_SCHEMA_V2 = {'loss': 'dev/full/loss', **{
+    key: f'dev/full/multitask_{key}_loss' for key in LOSSES[2:]
+}}
+SCHEMA_V2_METRICS = frozenset((*TRAIN_SCHEMA_V2.values(), LEARNING_RATE_SCHEMA_V2,
+                              *DEV_SCHEMA_V2.values()))
 
 
 def canonical(value):
@@ -107,13 +114,24 @@ def record_loss(target, split, key, value):
     if value is None:
         return
     merge(target, metric_name(split, key), value)
-    if split == 'train' and key in ('loss', 'unit_loss'):
-        merge(target, 'train/task_loss' if key == 'loss' else 'train/main_loss', value * math.log(2))
+    if split == 'train' and key in TRAIN_SCHEMA_V2:
+        nats = value * math.log(2)
+        merge(target, 'train/task_loss' if key == 'loss' else 'train/main_loss', nats)
+        merge(target, TRAIN_SCHEMA_V2[key], nats)
     elif split == 'dev' and key == 'loss':
         merge(target, 'dev/loss', value)
+        merge(target, DEV_SCHEMA_V2[key], value)
     elif key in LOSSES[2:]:
         name = f'train/aux/{key}_loss_bits' if split == 'train' else f'dev/multitask_{key}_loss'
         merge(target, name, value)
+        if split == 'dev':
+            merge(target, DEV_SCHEMA_V2[key], value)
+
+
+def record_learning_rate(target, value):
+    rate = number(value)
+    merge(target, 'train/learning_rate', rate)
+    merge(target, LEARNING_RATE_SCHEMA_V2, rate)
 
 
 def _read_reports(source):
@@ -229,7 +247,7 @@ def _measurements(blobs, receipt, receipt_path, journals):
             for split in ('train', 'dev'):
                 for key, value in (item.get(split) or {}).items():
                     record_loss(target, split, key, value)
-            merge(target, 'train/learning_rate', number(item.get('learning_rate')))
+            record_learning_rate(target, item.get('learning_rate'))
         if update_number(monitor['update']) <= durable:
             for key in ('best_value', 'best_update', 'best_sha256', 'metric',
                         'best_total_value', 'best_total_update', 'stopped', 'early_stopping'):
@@ -253,7 +271,7 @@ def _measurements(blobs, receipt, receipt_path, journals):
                 if key.startswith(('train_', 'dev_')):
                     split, name = key.split('_', 1)
                     record_loss(target, split, name, value)
-            merge(target, 'train/learning_rate', number(item.get('learning_rate')))
+            record_learning_rate(target, item.get('learning_rate'))
 
     measured = {}
     if 'training-bleu.json' in blobs:
@@ -323,11 +341,16 @@ def _measurements(blobs, receipt, receipt_path, journals):
         summary['train/target_update'] = update_number(maximum)
     summary['train/max_update'] = durable
     summary['train/durable_update'] = durable
-    counts = {key: sum(key in values for values in rows.values())
-              for key in sorted({k for values in rows.values() for k in values})}
+    coverage = {}
+    for update, values in sorted(rows.items()):
+        for key in values:
+            span = coverage.setdefault(key, dict(count=0, first_update=update, last_update=update))
+            span['count'] += 1
+            span['last_update'] = update
+    counts = {key: span['count'] for key, span in sorted(coverage.items())}
     return dict(version=VERSION, identity=receipt['identity'], durable_update=durable,
                 rows={str(k): v for k, v in sorted(rows.items()) if v}, summary=summary,
-                conditions=conditions, counts=counts,
+                conditions=conditions, counts=counts, coverage=coverage,
                 sources={name: dict(sha256=hashlib.sha256(payload).hexdigest(), bytes=len(payload))
                          for name, payload in blobs.items()}, receipt=str(receipt_path),
                 best_checkpoint_sha256=(monitor or {}).get('best_sha256'))
@@ -353,7 +376,7 @@ def run_id(contract):
     return contract['run_id']
 
 
-def plan(bundle, remote_rows, *, adopted=False):
+def plan(bundle, remote_rows, *, adopted=False, eligible=None):
     """Plan only missing metric cells. An existing cell may never be replaced."""
     observed, events, last = {}, set(), -1
     for item in remote_rows:
@@ -387,7 +410,7 @@ def plan(bundle, remote_rows, *, adopted=False):
         old = observed.get(update, {})
         for key in old.keys() & values.keys():
             merge(dict(old), key, values[key])
-        missing = {k: v for k, v in values.items() if k not in old}
+        missing = {k: v for k, v in values.items() if k not in old and (eligible is None or k in eligible)}
         if missing:
             event = dict(update=int(update), values=missing,
                          provenance=dict(sources=bundle['sources'], receipt=bundle['receipt'],
